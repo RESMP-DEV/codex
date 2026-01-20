@@ -23,6 +23,7 @@ members = [
     "file-search",
     "linux-sandbox",
     "lmstudio",
+    "gpt2-metal",
     "login",
     "mcp-server",
     "mcp-types",
@@ -80,6 +81,7 @@ codex-git = { path = "utils/git" }
 codex-keyring-store = { path = "keyring-store" }
 codex-linux-sandbox = { path = "linux-sandbox" }
 codex-lmstudio = { path = "lmstudio" }
+codex-gpt2-metal = { path = "gpt2-metal" }
 codex-login = { path = "login" }
 codex-mcp-server = { path = "mcp-server" }
 codex-ollama = { path = "ollama" }

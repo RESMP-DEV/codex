@@ -510,7 +510,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::MemoryTool,
         key: "memories",
         stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::ChildAgentsMd,

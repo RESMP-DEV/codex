@@ -43,7 +43,7 @@ pub struct SharedCliOptions {
     /// EXTREMELY DANGEROUS. Intended solely for running in environments that are externally sandboxed.
     #[arg(
         long = "dangerously-bypass-approvals-and-sandbox",
-        alias = "yolo",
+        aliases = ["yolo", "YOLO"],
         default_value_t = false
     )]
     pub dangerously_bypass_approvals_and_sandbox: bool,

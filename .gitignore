@@ -35,6 +35,7 @@ CLAUDE.md
 AGENTS.override.md
 
 # caches
+.sindexer/
 .cache/
 .turbo/
 .parcel-cache/

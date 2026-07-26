@@ -26,3 +26,9 @@ pub(crate) fn is_final(status: &AgentStatus) -> bool {
         AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted
     )
 }
+
+/// Check if the agent is actively running and able to process requests.
+/// Returns `true` for `Running` and `Interrupted` states, `false` otherwise.
+pub(crate) fn is_active(status: &AgentStatus) -> bool {
+    matches!(status, AgentStatus::Running | AgentStatus::Interrupted)
+}

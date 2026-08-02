@@ -75,6 +75,29 @@ fn parses_config_isolation_flags() {
 }
 
 #[test]
+fn parses_permission_profile_forms_globally() {
+    for flag in ["--permission-profile", "--permissions-profile", "-P"] {
+        let cli = Cli::parse_from(["codex-exec", "resume", "--last", flag, "alphaheng-task"]);
+
+        assert_eq!(cli.permission_profile.as_deref(), Some("alphaheng-task"));
+    }
+}
+
+#[test]
+fn permission_profile_conflicts_with_unsandboxed_execution() {
+    let error = Cli::try_parse_from([
+        "codex-exec",
+        "-P",
+        "alphaheng-task",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "summarize",
+    ])
+    .expect_err("flags should conflict");
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+#[test]
 fn approve_for_me_flag_applies_to_resume_when_passed_at_exec_root() {
     for flag in ["--approve-for-me", "--not-so-yolo"] {
         let cli = Cli::parse_from(["codex-exec", flag, "resume", "--last"]);

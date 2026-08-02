@@ -38,7 +38,11 @@ pub struct Cli {
         short = 'P',
         value_name = "NAME",
         global = true,
-        conflicts_with = "dangerously_bypass_approvals_and_sandbox"
+        conflicts_with_all = [
+            "sandbox_mode",
+            "auto_review",
+            "dangerously_bypass_approvals_and_sandbox"
+        ]
     )]
     pub permission_profile: Option<String>,
 
@@ -145,6 +149,8 @@ impl FromArgMatches for ExecSharedCliOptions {
 
 fn mark_exec_global_args(cmd: clap::Command) -> clap::Command {
     cmd.mut_arg("model", |arg| arg.global(true))
+        .mut_arg("sandbox_mode", |arg| arg.global(true))
+        .mut_arg("auto_review", |arg| arg.global(true))
         .mut_arg("dangerously_bypass_approvals_and_sandbox", |arg| {
             arg.global(true)
         })

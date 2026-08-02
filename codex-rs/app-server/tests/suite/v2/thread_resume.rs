@@ -1107,27 +1107,51 @@ async fn thread_goal_set_repairs_missing_sqlite_metadata() -> Result<()> {
     mock_responses_config(&server.uri())
         .enable_feature(Feature::Goals)
         .write(codex_home.path())?;
-    let thread_id = create_fake_rollout(
-        codex_home.path(),
-        "2025-01-05T12-00-00",
-        "2025-01-05T12:00:00Z",
-        "Rollout preview",
-        Some("mock_provider"),
-        /*git_info*/ None,
-    )?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_managed_config()
         .build_initialized()
         .await?;
+    let start_id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadStartResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
+    let turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            client_user_message_id: None,
+            input: vec![UserInput::Text {
+                text: "materialize this live thread".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_id)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
         "mock_provider".into(),
     )
     .await?;
-    let thread_id = ThreadId::from_string(&thread_id)?;
+    let thread_id = ThreadId::from_string(&thread.id)?;
+    assert!(state_db.get_thread(thread_id).await?.is_some());
     state_db.delete_thread(thread_id).await?;
+    assert!(state_db.get_thread(thread_id).await?.is_none());
 
     let goal_id = mcp
         .send_raw_request(

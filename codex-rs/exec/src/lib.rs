@@ -238,6 +238,7 @@ fn exec_stderr_env_filter() -> EnvFilter {
 }
 
 pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
+    cli.validate_permission_profile_conflicts()?;
     if let Err(err) = set_default_originator("codex_exec".to_string()) {
         tracing::warn!(?err, "Failed to set codex exec originator override {err:?}");
     }
@@ -248,6 +249,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         shared,
         skip_git_repo_check,
         ephemeral,
+        permission_profile,
         ignore_user_config,
         ignore_rules,
         color,
@@ -422,7 +424,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         approvals_reviewer: None,
         sandbox_mode,
         permission_profile: None,
-        default_permissions: None,
+        default_permissions: permission_profile,
         cwd: resolved_cwd,
         workspace_roots: None,
         model_provider: model_provider.clone(),

@@ -74,6 +74,7 @@ personal/
 
 # os
 .DS_Store
+.sindexer/
 Thumbs.db
 Icon?
 .Spotlight-V100/

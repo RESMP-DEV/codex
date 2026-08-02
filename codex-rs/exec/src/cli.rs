@@ -31,6 +31,17 @@ pub struct Cli {
     #[arg(long = "ephemeral", global = true, default_value_t = false)]
     pub ephemeral: bool,
 
+    /// Named permissions profile to apply from the active configuration stack.
+    #[arg(
+        long = "permission-profile",
+        alias = "permissions-profile",
+        short = 'P',
+        value_name = "NAME",
+        global = true,
+        conflicts_with = "dangerously_bypass_approvals_and_sandbox"
+    )]
+    pub permission_profile: Option<String>,
+
     /// Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`.
     #[arg(long = "ignore-user-config", global = true, default_value_t = false)]
     pub ignore_user_config: bool,
@@ -86,6 +97,31 @@ impl std::ops::Deref for Cli {
 impl std::ops::DerefMut for Cli {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.shared.0
+    }
+}
+
+impl Cli {
+    pub fn validate_permission_profile_conflicts(&self) -> Result<(), clap::Error> {
+        if self.permission_profile.is_none() {
+            return Ok(());
+        }
+
+        let conflicting_flag = if self.sandbox_mode.is_some() {
+            Some("--sandbox")
+        } else if self.auto_review {
+            Some("--approve-for-me")
+        } else if self.dangerously_bypass_approvals_and_sandbox {
+            Some("--dangerously-bypass-approvals-and-sandbox")
+        } else {
+            None
+        };
+        if let Some(flag) = conflicting_flag {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::ArgumentConflict,
+                format!("`--permission-profile` cannot be combined with `{flag}`"),
+            ));
+        }
+        Ok(())
     }
 }
 

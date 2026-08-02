@@ -1045,6 +1045,10 @@ async fn thread_goal_mutations_preserve_authoritative_sqlite_metadata() -> Resul
         .expect("thread metadata should exist");
     metadata.preview = Some("SQLite preview before goal set".to_string());
     state_db.upsert_thread(&metadata).await?;
+    let metadata_before_goal_set = state_db
+        .get_thread(thread_id)
+        .await?
+        .expect("thread metadata should exist before goal set");
 
     let goal_id = mcp
         .send_raw_request(
@@ -1068,12 +1072,13 @@ async fn thread_goal_mutations_preserve_authoritative_sqlite_metadata() -> Resul
         .get_thread(thread_id)
         .await?
         .expect("thread metadata should survive goal set");
-    assert_eq!(
-        metadata.preview.as_deref(),
-        Some("SQLite preview before goal set")
-    );
+    assert_eq!(metadata, metadata_before_goal_set);
     metadata.preview = Some("SQLite preview before goal clear".to_string());
     state_db.upsert_thread(&metadata).await?;
+    let metadata_before_goal_clear = state_db
+        .get_thread(thread_id)
+        .await?
+        .expect("thread metadata should exist before goal clear");
 
     let clear_id = mcp
         .send_raw_request(
@@ -1090,10 +1095,7 @@ async fn thread_goal_mutations_preserve_authoritative_sqlite_metadata() -> Resul
         .get_thread(thread_id)
         .await?
         .expect("thread metadata should survive goal clear");
-    assert_eq!(
-        metadata.preview.as_deref(),
-        Some("SQLite preview before goal clear")
-    );
+    assert_eq!(metadata, metadata_before_goal_clear);
 
     Ok(())
 }

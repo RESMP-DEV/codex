@@ -85,18 +85,27 @@ fn parses_permission_profile_forms_globally() {
 
 #[test]
 fn permission_profile_conflicts_with_other_permission_selectors() {
-    for conflicting_args in [
-        vec!["--sandbox", "read-only"],
-        vec!["--approve-for-me"],
-        vec!["--dangerously-bypass-approvals-and-sandbox"],
-    ] {
+    for conflicting_args in [vec!["--sandbox", "read-only"], vec!["--approve-for-me"]] {
         let mut args = vec!["codex-exec", "-P", "alphaheng-task"];
         args.extend(conflicting_args);
         args.push("summarize");
 
-        let error = Cli::try_parse_from(args).expect_err("flags should conflict");
+        let cli = Cli::try_parse_from(args).expect("parse cross-scope flags");
+        let error = cli
+            .validate_permission_profile_conflicts()
+            .expect_err("flags should conflict");
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
+
+    let error = Cli::try_parse_from([
+        "codex-exec",
+        "-P",
+        "alphaheng-task",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "summarize",
+    ])
+    .expect_err("flags should conflict during parsing");
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
 }
 
 #[test]

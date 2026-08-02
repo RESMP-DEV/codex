@@ -990,6 +990,7 @@ async fn cli_main(
     let root_remote = remote.remote;
     let root_remote_auth_token_env = remote.remote_auth_token_env;
     let root_strict_config = interactive.strict_config;
+    reject_root_permission_selectors_for_exec(&interactive.shared, &subcommand)?;
     interactive
         .shared
         .take_auto_review_config_overrides(&mut root_config_overrides);
@@ -2172,6 +2173,35 @@ fn reject_remote_mode_for_subcommand(
     Ok(())
 }
 
+fn reject_root_permission_selectors_for_exec(
+    root: &SharedCliOptions,
+    subcommand: &Option<Subcommand>,
+) -> anyhow::Result<()> {
+    let Some(Subcommand::Exec(exec)) = subcommand else {
+        return Ok(());
+    };
+    exec.validate_permission_profile_conflicts()?;
+    if exec.permission_profile.is_none() {
+        return Ok(());
+    }
+
+    let conflicting_flag = if root.sandbox_mode.is_some() {
+        Some("--sandbox")
+    } else if root.auto_review {
+        Some("--approve-for-me")
+    } else if root.dangerously_bypass_approvals_and_sandbox {
+        Some("--dangerously-bypass-approvals-and-sandbox")
+    } else {
+        None
+    };
+    if let Some(flag) = conflicting_flag {
+        anyhow::bail!(
+            "`--permission-profile` cannot be combined with root-level `{flag}` for `codex exec`"
+        );
+    }
+    Ok(())
+}
+
 fn reject_root_strict_config_for_subcommand(
     strict_config: bool,
     subcommand: &Option<Subcommand>,
@@ -2995,6 +3025,30 @@ mod tests {
             ]
         );
         assert!(exec.sandbox_mode.is_none());
+    }
+
+    #[test]
+    fn permission_profile_rejects_root_permission_selectors() {
+        for root_args in [
+            vec!["--sandbox", "read-only"],
+            vec!["--approve-for-me"],
+            vec!["--dangerously-bypass-approvals-and-sandbox"],
+        ] {
+            let mut args = vec!["codex"];
+            args.extend(root_args);
+            args.extend([
+                "exec",
+                "--permission-profile",
+                "alphaheng-task",
+                "summarize",
+            ]);
+            let cli = MultitoolCli::try_parse_from(args).expect("parse cross-scope flags");
+
+            let error =
+                reject_root_permission_selectors_for_exec(&cli.interactive.shared, &cli.subcommand)
+                    .expect_err("root and exec permission selectors should conflict");
+            assert!(error.to_string().contains("cannot be combined"));
+        }
     }
 
     #[test]

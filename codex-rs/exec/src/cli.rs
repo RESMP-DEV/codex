@@ -38,11 +38,7 @@ pub struct Cli {
         short = 'P',
         value_name = "NAME",
         global = true,
-        conflicts_with_all = [
-            "sandbox_mode",
-            "auto_review",
-            "dangerously_bypass_approvals_and_sandbox"
-        ]
+        conflicts_with = "dangerously_bypass_approvals_and_sandbox"
     )]
     pub permission_profile: Option<String>,
 
@@ -104,6 +100,31 @@ impl std::ops::DerefMut for Cli {
     }
 }
 
+impl Cli {
+    pub fn validate_permission_profile_conflicts(&self) -> Result<(), clap::Error> {
+        if self.permission_profile.is_none() {
+            return Ok(());
+        }
+
+        let conflicting_flag = if self.sandbox_mode.is_some() {
+            Some("--sandbox")
+        } else if self.auto_review {
+            Some("--approve-for-me")
+        } else if self.dangerously_bypass_approvals_and_sandbox {
+            Some("--dangerously-bypass-approvals-and-sandbox")
+        } else {
+            None
+        };
+        if let Some(flag) = conflicting_flag {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::ArgumentConflict,
+                format!("`--permission-profile` cannot be combined with `{flag}`"),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ExecSharedCliOptions(SharedCliOptions);
 
@@ -149,8 +170,6 @@ impl FromArgMatches for ExecSharedCliOptions {
 
 fn mark_exec_global_args(cmd: clap::Command) -> clap::Command {
     cmd.mut_arg("model", |arg| arg.global(true))
-        .mut_arg("sandbox_mode", |arg| arg.global(true))
-        .mut_arg("auto_review", |arg| arg.global(true))
         .mut_arg("dangerously_bypass_approvals_and_sandbox", |arg| {
             arg.global(true)
         })

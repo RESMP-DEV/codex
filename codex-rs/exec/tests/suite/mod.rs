@@ -11,6 +11,8 @@ mod hooks;
 mod mcp_required_exit;
 mod originator;
 mod output_schema;
+#[path = "permission_profile_tests.rs"]
+mod permission_profile;
 mod prompt_stdin;
 mod resume;
 mod sandbox;

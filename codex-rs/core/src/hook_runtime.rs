@@ -294,6 +294,49 @@ pub(crate) async fn run_post_tool_use_hooks(
     outcome
 }
 
+/// Collect files changed in the working directory via git.
+/// Returns `None` if the directory is not a git repo or git is unavailable.
+async fn collect_changed_files(cwd: &std::path::Path) -> Option<Vec<String>> {
+    use tokio::process::Command;
+
+    // Modified/staged files relative to HEAD
+    let diff_output = Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .await
+        .ok()?;
+
+    // Untracked files (new files not yet committed)
+    let untracked_output = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(cwd)
+        .output()
+        .await
+        .ok()?;
+
+    if !diff_output.status.success() && !untracked_output.status.success() {
+        return None;
+    }
+
+    let mut files: Vec<String> = Vec::new();
+
+    if diff_output.status.success() {
+        let stdout = String::from_utf8_lossy(&diff_output.stdout);
+        files.extend(stdout.lines().filter(|l| !l.is_empty()).map(String::from));
+    }
+
+    if untracked_output.status.success() {
+        let stdout = String::from_utf8_lossy(&untracked_output.stdout);
+        files.extend(stdout.lines().filter(|l| !l.is_empty()).map(String::from));
+    }
+
+    files.sort();
+    files.dedup();
+
+    if files.is_empty() { None } else { Some(files) }
+}
+
 #[instrument(level = "trace", skip_all)]
 pub(crate) async fn run_turn_stop_hooks(
     sess: &Arc<Session>,
@@ -356,6 +399,8 @@ pub(crate) async fn run_turn_stop_hooks(
         stop_hook_active,
         last_assistant_message,
         target,
+        #[allow(deprecated)]
+        changed_files: collect_changed_files(turn_context.cwd.as_path()).await,
     };
     let hooks = sess.hooks();
     emit_hook_started_events(sess, turn_context, hooks.preview_stop(&request)).await;

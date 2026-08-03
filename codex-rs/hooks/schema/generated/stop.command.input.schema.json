@@ -10,6 +10,13 @@
     }
   },
   "properties": {
+    "changed_files": {
+      "description": "Files modified during this session (via git diff). Enables targeted quality gates without requiring hook scripts to invoke git themselves.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "cwd": {
       "type": "string"
     },

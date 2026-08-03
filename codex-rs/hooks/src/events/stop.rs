@@ -31,6 +31,8 @@ pub struct StopRequest {
     pub stop_hook_active: bool,
     pub last_assistant_message: Option<String>,
     pub target: StopHookTarget,
+    /// Files modified during this session, if available (populated via git diff).
+    pub changed_files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +129,7 @@ pub(crate) async fn run(
                 last_assistant_message: NullableString::from_string(
                     request.last_assistant_message.clone(),
                 ),
+                changed_files: request.changed_files.clone(),
             };
             match serde_json::to_string(&input) {
                 Ok(input_json) => input_json,
@@ -161,6 +164,7 @@ pub(crate) async fn run(
                 last_assistant_message: NullableString::from_string(
                     request.last_assistant_message.clone(),
                 ),
+                changed_files: request.changed_files.clone(),
             };
             match serde_json::to_string(&input) {
                 Ok(input_json) => input_json,

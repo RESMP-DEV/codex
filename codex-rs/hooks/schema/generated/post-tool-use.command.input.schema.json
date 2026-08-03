@@ -10,6 +10,13 @@
     }
   },
   "properties": {
+    "affected_files": {
+      "description": "File paths affected by this tool call, extracted from `tool_input`. Enables hook scripts to run targeted validation without re-parsing tool input.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "agent_id": {
       "type": "string"
     },

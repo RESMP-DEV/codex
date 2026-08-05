@@ -335,6 +335,10 @@ pub(crate) struct PostToolUseCommandInput {
     pub tool_input: Value,
     pub tool_response: Value,
     pub tool_use_id: String,
+    /// File paths affected by this tool call, extracted from `tool_input`.
+    /// Enables hook scripts to run targeted validation without re-parsing tool input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affected_files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]

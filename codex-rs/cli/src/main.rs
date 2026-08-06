@@ -104,6 +104,10 @@ use codex_terminal_detection::TerminalName;
     override_usage = "codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]"
 )]
 struct MultitoolCli {
+    /// Enable process-only PSP routing for first-party ChatGPT requests.
+    #[arg(long, global = true, hide = true)]
+    psp: bool,
+
     #[clap(flatten)]
     pub config_overrides: CliConfigOverrides,
 
@@ -569,6 +573,14 @@ struct ExecServerCommand {
     #[arg(long = "strict-config", default_value_t = false)]
     strict_config: bool,
 
+    /// Maximum number of requests to process concurrently on each connection.
+    #[arg(
+        long = "concurrent-requests",
+        value_name = "COUNT",
+        default_value = "1"
+    )]
+    request_dispatch_mode: codex_exec_server::RequestDispatchMode,
+
     /// Transport endpoint URL. Supported values: `ws://IP:PORT` (default), `stdio`, `stdio://`.
     #[arg(long = "listen", value_name = "URL", conflicts_with = "remote")]
     listen: Option<String>,
@@ -977,12 +989,14 @@ async fn cli_main(
     remote_control_disabled: bool,
 ) -> anyhow::Result<()> {
     let MultitoolCli {
+        psp,
         config_overrides: mut root_config_overrides,
         feature_toggles,
         remote,
         mut interactive,
         subcommand,
     } = MultitoolCli::parse();
+    interactive.psp = psp;
 
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
@@ -1023,6 +1037,7 @@ async fn cli_main(
             exec_cli
                 .shared
                 .inherit_exec_root_options(&interactive.shared);
+            exec_cli.psp = psp;
             exec_cli.strict_config |= root_strict_config;
             prepend_config_flags(
                 &mut exec_cli.config_overrides,
@@ -1043,6 +1058,7 @@ async fn cli_main(
             exec_cli
                 .shared
                 .inherit_exec_root_options(&interactive.shared);
+            exec_cli.psp = psp;
             exec_cli.command = Some(ExecCommand::Review(review_args));
             exec_cli.strict_config = strict_config || root_strict_config;
             prepend_config_flags(
@@ -1152,6 +1168,7 @@ async fn cli_main(
                                 codex_app_server::RemoteControlStartupMode::ResolvePersisted
                             }
                         },
+                        psp,
                         ..Default::default()
                     };
                     codex_app_server::run_main_with_transport_options(
@@ -1254,6 +1271,7 @@ async fn cli_main(
                 remote_control_cli,
                 arg0_paths.clone(),
                 root_config_overrides,
+                psp,
             )
             .await?;
         }
@@ -1736,6 +1754,7 @@ async fn run_exec_server_command(
         if let Some(name) = cmd.name {
             remote_config.name = name;
         }
+        remote_config.request_dispatch_mode = cmd.request_dispatch_mode;
         let remote_config = remote_config.with_telemetry(telemetry);
         let parent_lifetime = if cmd.exit_on_stdin_close {
             exec_server_telemetry::ParentLifetime::StdinPipe
@@ -1785,6 +1804,7 @@ async fn run_exec_server_command(
                     runtime_paths,
                     telemetry,
                     http_client_factory,
+                    cmd.request_dispatch_mode,
                 )
                 .await
             },
@@ -1802,16 +1822,19 @@ async fn load_exec_server_remote_auth_provider(
     use_agent_identity_auth: bool,
 ) -> anyhow::Result<codex_api::SharedAuthProvider> {
     if use_agent_identity_auth {
-        let agent_identity_jwt = read_codex_access_token_from_env().ok_or_else(|| {
+        read_codex_access_token_from_env().ok_or_else(|| {
             anyhow::anyhow!("CODEX_ACCESS_TOKEN is required when --use-agent-identity-auth is set")
         })?;
-        let auth_route_config = config.auth_route_config();
-        let auth = CodexAuth::from_agent_identity_jwt(
-            &agent_identity_jwt,
-            Some(&config.chatgpt_base_url),
-            &auth_route_config,
-        )
-        .await?;
+        let auth = AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false)
+            .await
+            .auth()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Agent Identity authentication is unavailable"))?;
+        if !matches!(auth, CodexAuth::AgentIdentity(_)) {
+            anyhow::bail!(
+                "CODEX_ACCESS_TOKEN did not provide permitted Agent Identity authentication"
+            );
+        }
         return Ok(codex_model_provider::auth_provider_from_auth(&auth));
     }
 
@@ -2737,6 +2760,7 @@ mod tests {
     fn finalize_resume_from_args(args: &[&str]) -> TuiCli {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");
         let MultitoolCli {
+            psp: _,
             mut interactive,
             config_overrides: mut root_overrides,
             subcommand,
@@ -2774,6 +2798,7 @@ mod tests {
     fn finalize_fork_from_args(args: &[&str]) -> TuiCli {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");
         let MultitoolCli {
+            psp: _,
             mut interactive,
             config_overrides: mut root_overrides,
             subcommand,
@@ -2818,6 +2843,7 @@ mod tests {
     fn finalize_archive_from_args(args: &[&str]) -> (String, TuiCli, InteractiveRemoteOptions) {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");
         let MultitoolCli {
+            psp: _,
             interactive,
             config_overrides: root_overrides,
             subcommand,
@@ -4068,6 +4094,19 @@ mod tests {
         })
         .expect_err("empty env vars should be rejected");
         assert!(err.to_string().contains("is empty"));
+    }
+
+    #[test]
+    fn psp_is_a_global_runtime_argument() {
+        for args in [
+            ["codex", "--psp"].as_slice(),
+            ["codex", "app-server", "--psp"].as_slice(),
+            ["codex", "remote-control", "--psp"].as_slice(),
+        ] {
+            let cli = MultitoolCli::try_parse_from(args).expect("parse runtime PSP flag");
+            assert!(cli.psp);
+            assert!(cli.config_overrides.raw_overrides.is_empty());
+        }
     }
 
     #[test]

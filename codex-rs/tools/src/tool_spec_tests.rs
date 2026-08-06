@@ -227,12 +227,17 @@ fn responses_lite_groups_default_function_and_custom_tools() {
 }
 
 #[test]
-fn responses_lite_preserves_empty_functions_namespace_description() {
+fn responses_lite_default_functions_namespace_has_nonempty_description() {
     let tools = create_tools_json_for_responses_lite(&[ToolSpec::Function(
         responses_lite_function("lookup_order"),
     )])
     .expect("serialize Responses Lite tools");
-    assert_eq!(tools[0]["description"], "");
+    // The default `functions` namespace must carry a non-empty description.
+    // Some Responses API endpoints reject an empty `description` with
+    // `empty_string` / `invalid_request_error` (regression in upstream #37022).
+    let desc = tools[0]["description"].as_str().expect("description should be a string");
+    assert!(!desc.is_empty(), "functions namespace description must be non-empty, got: {desc:?}");
+    assert_eq!(desc, "Tools in the functions namespace.");
 }
 
 #[test]

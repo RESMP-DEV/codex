@@ -28,7 +28,7 @@ fn top_level_function_search_results_use_the_default_namespace() {
             "lookup_order lookup order Look up an order".to_string(),
             LoadableToolSpec::Namespace(ResponsesApiNamespace {
                 name: "functions".to_string(),
-                description: String::new(),
+                description: "Tools in the functions namespace.".to_string(),
                 tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
                     defer_loading: Some(true),
                     output_schema: None,
@@ -63,7 +63,7 @@ fn top_level_custom_tools_are_searchable() {
             "apply_patch Apply a patch lark".to_string(),
             LoadableToolSpec::Namespace(ResponsesApiNamespace {
                 name: "functions".to_string(),
-                description: String::new(),
+                description: "Tools in the functions namespace.".to_string(),
                 tools: vec![ResponsesApiNamespaceTool::Custom(crate::FreeformTool {
                     defer_loading: Some(true),
                     ..custom_tool

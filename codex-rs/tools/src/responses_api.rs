@@ -4,7 +4,6 @@ use crate::ToolName;
 use crate::parse_agent_plugin_mcp_tool;
 use crate::parse_dynamic_tool;
 use crate::parse_mcp_tool;
-use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use serde::Deserialize;
 use serde::Serialize;
@@ -57,16 +56,18 @@ pub enum LoadableToolSpec {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ResponsesApiNamespace {
     pub name: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub description: String,
     pub tools: Vec<ResponsesApiNamespaceTool>,
 }
 
 pub fn default_namespace_description(namespace_name: &str) -> String {
-    if namespace_name == DEFAULT_FUNCTION_NAMESPACE {
-        String::new()
-    } else {
-        format!("Tools in the {namespace_name} namespace.")
-    }
+    // Always return a non-empty description. Some Responses API endpoints reject
+    // an empty `description` with `empty_string` / `invalid_request_error`, and
+    // returning "" for the default namespace (regression in upstream #37022)
+    // broke codex against strict endpoints. The serde guard on
+    // `ResponsesApiNamespace.description` is the second layer of defense.
+    format!("Tools in the {namespace_name} namespace.")
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

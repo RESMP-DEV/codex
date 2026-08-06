@@ -335,6 +335,10 @@ pub(crate) struct PostToolUseCommandInput {
     pub tool_input: Value,
     pub tool_response: Value,
     pub tool_use_id: String,
+    /// File paths affected by this tool call, extracted from `tool_input`.
+    /// Enables hook scripts to run targeted validation without re-parsing tool input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affected_files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -585,6 +589,10 @@ pub(crate) struct StopCommandInput {
     pub permission_mode: String,
     pub stop_hook_active: bool,
     pub last_assistant_message: NullableString,
+    /// Files modified in the working directory since HEAD, populated lazily
+    /// only when Stop hooks are matched. Enables targeted quality gates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -606,6 +614,10 @@ pub(crate) struct SubagentStopCommandInput {
     pub agent_id: String,
     pub agent_type: String,
     pub last_assistant_message: NullableString,
+    /// Files modified in the working directory since HEAD, populated lazily
+    /// only when SubagentStop hooks are matched. Enables targeted quality gates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_files: Option<Vec<String>>,
 }
 
 pub fn write_schema_fixtures(schema_root: &Path) -> anyhow::Result<()> {

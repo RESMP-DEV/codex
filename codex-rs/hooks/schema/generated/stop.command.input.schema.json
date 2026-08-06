@@ -10,6 +10,13 @@
     }
   },
   "properties": {
+    "changed_files": {
+      "description": "Files modified in the working directory since HEAD, populated lazily only when Stop hooks are matched. Enables targeted quality gates.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "cwd": {
       "type": "string"
     },

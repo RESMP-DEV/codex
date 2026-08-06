@@ -113,6 +113,10 @@ pub(crate) async fn run(
         };
     }
 
+    // Lazily collect changed files only when hooks are actually matched.
+    // This avoids the cost of spawning git when no Stop hooks are configured.
+    let changed_files = collect_changed_files(request.cwd.as_path()).await;
+
     let input_json = match request.target {
         StopHookTarget::Stop => {
             let input = StopCommandInput {
@@ -127,6 +131,7 @@ pub(crate) async fn run(
                 last_assistant_message: NullableString::from_string(
                     request.last_assistant_message.clone(),
                 ),
+                changed_files: changed_files.clone(),
             };
             match serde_json::to_string(&input) {
                 Ok(input_json) => input_json,
@@ -161,6 +166,7 @@ pub(crate) async fn run(
                 last_assistant_message: NullableString::from_string(
                     request.last_assistant_message.clone(),
                 ),
+                changed_files,
             };
             match serde_json::to_string(&input) {
                 Ok(input_json) => input_json,
@@ -197,6 +203,60 @@ pub(crate) async fn run(
         block_reason: aggregate.block_reason,
         continuation_fragments: aggregate.continuation_fragments,
     }
+}
+
+/// Collect files changed in the working directory relative to HEAD.
+///
+/// Returns `None` when the directory is not a git repository, git is
+/// unavailable, or there are no changes. This is intentionally best-effort:
+/// hook consumers should treat `None` as "unknown" rather than "no changes."
+async fn collect_changed_files(cwd: &std::path::Path) -> Option<Vec<String>> {
+    use tokio::process::Command;
+
+    let diff_output = Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()?;
+
+    let untracked_output = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()?;
+
+    if !diff_output.status.success() && !untracked_output.status.success() {
+        return None;
+    }
+
+    let mut files: Vec<String> = Vec::new();
+
+    if diff_output.status.success() {
+        files.extend(
+            String::from_utf8_lossy(&diff_output.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(String::from),
+        );
+    }
+
+    if untracked_output.status.success() {
+        files.extend(
+            String::from_utf8_lossy(&untracked_output.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(String::from),
+        );
+    }
+
+    files.sort();
+    files.dedup();
+
+    if files.is_empty() { None } else { Some(files) }
 }
 
 fn parse_completed(

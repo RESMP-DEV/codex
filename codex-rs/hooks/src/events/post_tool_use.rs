@@ -151,6 +151,7 @@ pub(crate) async fn run(
 /// `tool_input`; MCP tools pass their resolved JSON arguments.
 fn command_input_json(request: &PostToolUseRequest) -> Result<String, serde_json::Error> {
     let subagent = SubagentCommandInputFields::from(request.subagent.as_ref());
+    let affected_files = extract_affected_files(&request.tool_input);
     serde_json::to_string(&PostToolUseCommandInput {
         session_id: request.session_id.to_string(),
         turn_id: request.turn_id.clone(),
@@ -165,7 +166,49 @@ fn command_input_json(request: &PostToolUseRequest) -> Result<String, serde_json
         tool_input: request.tool_input.clone(),
         tool_response: request.tool_response.clone(),
         tool_use_id: request.tool_use_id.clone(),
+        affected_files,
     })
+}
+
+/// Extract file paths affected by a tool call from its input JSON.
+///
+/// Handles common tool input shapes:
+/// - `{ "file_path": "..." }` or `{ "path": "..." }` — direct file tools
+/// - `{ "patch": "--- a/foo\n+++ b/foo\n..." }` — unified diff tools
+fn extract_affected_files(tool_input: &Value) -> Option<Vec<String>> {
+    let obj = tool_input.as_object()?;
+    let mut files: Vec<String> = Vec::new();
+
+    // Direct file path fields used by file-writing tools.
+    for key in ["file_path", "path", "filePath"] {
+        if let Some(Value::String(p)) = obj.get(key) {
+            if !p.is_empty() {
+                files.push(p.clone());
+            }
+        }
+    }
+
+    // Unified diff content — extract paths from --- / +++ headers.
+    for key in ["patch", "diff"] {
+        if let Some(Value::String(text)) = obj.get(key) {
+            for line in text.lines() {
+                let path = line
+                    .strip_prefix("+++ ")
+                    .or_else(|| line.strip_prefix("--- "));
+                if let Some(p) = path {
+                    let p = p.trim();
+                    let p = p.strip_prefix("a/").or_else(|| p.strip_prefix("b/")).unwrap_or(p);
+                    if p != "/dev/null" && !p.is_empty() {
+                        files.push(p.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    files.sort();
+    files.dedup();
+    if files.is_empty() { None } else { Some(files) }
 }
 
 fn parse_completed(

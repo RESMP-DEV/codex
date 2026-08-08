@@ -20,6 +20,9 @@ use crate::schema::NullableString;
 use crate::schema::StopCommandInput;
 use crate::schema::SubagentStopCommandInput;
 
+const CHANGED_FILES_GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const MAX_CHANGED_FILES: usize = 1_000;
+
 #[derive(Debug, Clone)]
 pub struct StopRequest {
     pub session_id: ThreadId,
@@ -113,6 +116,10 @@ pub(crate) async fn run(
         };
     }
 
+    // Lazily collect changed files only when hooks are actually matched.
+    // This avoids the cost of spawning git when no Stop hooks are configured.
+    let changed_files = collect_changed_files(request.cwd.as_path()).await;
+
     let input_json = match request.target {
         StopHookTarget::Stop => {
             let input = StopCommandInput {
@@ -127,6 +134,7 @@ pub(crate) async fn run(
                 last_assistant_message: NullableString::from_string(
                     request.last_assistant_message.clone(),
                 ),
+                changed_files,
             };
             match serde_json::to_string(&input) {
                 Ok(input_json) => input_json,
@@ -161,6 +169,7 @@ pub(crate) async fn run(
                 last_assistant_message: NullableString::from_string(
                     request.last_assistant_message.clone(),
                 ),
+                changed_files,
             };
             match serde_json::to_string(&input) {
                 Ok(input_json) => input_json,
@@ -197,6 +206,108 @@ pub(crate) async fn run(
         block_reason: aggregate.block_reason,
         continuation_fragments: aggregate.continuation_fragments,
     }
+}
+
+/// Collect files changed in the working directory relative to HEAD.
+///
+/// Returns `None` when the directory is not a git repository, git is
+/// unavailable, or there are no changes. This is intentionally best-effort:
+/// hook consumers should treat `None` as "unknown" rather than "no changes."
+async fn collect_changed_files(cwd: &std::path::Path) -> Option<Vec<String>> {
+    let (diff_output, untracked_output) = tokio::join!(
+        run_changed_files_git_query(cwd, &["diff", "--name-only", "-z", "HEAD"]),
+        run_changed_files_git_query(cwd, &["ls-files", "--others", "--exclude-standard", "-z"]),
+    );
+    let (Some(diff_output), Some(untracked_output)) = (diff_output, untracked_output) else {
+        return None;
+    };
+
+    let capacity = diff_output.stdout.iter().filter(|byte| **byte == 0).count()
+        + untracked_output
+            .stdout
+            .iter()
+            .filter(|byte| **byte == 0)
+            .count();
+    let mut files: Vec<String> = Vec::with_capacity(capacity);
+    let invalid_paths = extend_nul_delimited_paths(&mut files, &diff_output.stdout)
+        + extend_nul_delimited_paths(&mut files, &untracked_output.stdout);
+    if invalid_paths > 0 {
+        tracing::warn!(
+            invalid_paths,
+            "ignored changed file paths that were not valid UTF-8"
+        );
+    }
+
+    finalize_changed_files(files)
+}
+
+async fn run_changed_files_git_query(
+    cwd: &std::path::Path,
+    args: &[&str],
+) -> Option<std::process::Output> {
+    let mut command = tokio::process::Command::new("git");
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null());
+    command.kill_on_drop(true);
+
+    match tokio::time::timeout(CHANGED_FILES_GIT_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) if output.status.success() => Some(output),
+        Ok(Ok(output)) => {
+            tracing::warn!(?args, status = ?output.status, "changed-files git query failed");
+            None
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(?args, %error, "failed to execute changed-files git query");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                ?args,
+                timeout_seconds = CHANGED_FILES_GIT_TIMEOUT.as_secs(),
+                "changed-files git query timed out"
+            );
+            None
+        }
+    }
+}
+
+fn finalize_changed_files(files: Vec<String>) -> Option<Vec<String>> {
+    let changed_file_count = files.len();
+    let mut kept = std::collections::BTreeSet::new();
+    let mut truncated = false;
+    for file in files {
+        kept.insert(file);
+        if kept.len() > MAX_CHANGED_FILES {
+            kept.pop_last();
+            truncated = true;
+        }
+    }
+    if truncated {
+        tracing::warn!(
+            changed_file_count,
+            limit = MAX_CHANGED_FILES,
+            "truncated changed files supplied to stop hooks"
+        );
+    }
+    let files = kept.into_iter().collect::<Vec<_>>();
+
+    if files.is_empty() { None } else { Some(files) }
+}
+
+fn extend_nul_delimited_paths(files: &mut Vec<String>, output: &[u8]) -> usize {
+    let mut invalid_paths = 0;
+    for path in output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        match std::str::from_utf8(path) {
+            Ok(path) => files.push(path.to_string()),
+            Err(_) => invalid_paths += 1,
+        }
+    }
+    invalid_paths
 }
 
 fn parse_completed(
@@ -426,14 +537,105 @@ mod tests {
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
     use pretty_assertions::assert_eq;
+    use tempfile::tempdir;
 
     use codex_protocol::items::HookPromptFragment;
 
     use super::StopHandlerData;
     use super::aggregate_results;
+    use super::collect_changed_files;
+    use super::extend_nul_delimited_paths;
+    use super::finalize_changed_files;
     use super::parse_completed;
     use crate::engine::ConfiguredHandler;
     use crate::engine::command_runner::CommandRunResult;
+
+    #[test]
+    fn nul_delimited_paths_preserve_embedded_newlines() {
+        let mut files = Vec::new();
+
+        let invalid_paths = extend_nul_delimited_paths(&mut files, b"line\nbreak.rs\0normal.rs\0");
+
+        assert_eq!(invalid_paths, 0);
+        assert_eq!(
+            files,
+            vec!["line\nbreak.rs".to_string(), "normal.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn nul_delimited_paths_skip_invalid_utf8() {
+        let mut files = Vec::new();
+
+        let invalid_paths = extend_nul_delimited_paths(&mut files, b"valid.rs\0invalid-\xff.rs\0");
+
+        assert_eq!(invalid_paths, 1);
+        assert_eq!(files, vec!["valid.rs".to_string()]);
+    }
+
+    #[test]
+    fn changed_files_are_sorted_deduplicated_and_bounded() {
+        let files = (0..=super::MAX_CHANGED_FILES)
+            .rev()
+            .map(|index| format!("file-{index:04}.rs"))
+            .chain(std::iter::once("file-0000.rs".to_string()))
+            .collect();
+
+        let files = finalize_changed_files(files).expect("non-empty file list");
+
+        assert_eq!(files.len(), super::MAX_CHANGED_FILES);
+        assert_eq!(files.first().map(String::as_str), Some("file-0000.rs"));
+        assert_eq!(files.last().map(String::as_str), Some("file-0999.rs"));
+    }
+
+    #[tokio::test]
+    async fn changed_files_include_tracked_and_untracked_paths() {
+        let repo = tempdir().expect("create temp repo");
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "core.autocrlf", "false"]);
+        std::fs::write(repo.path().join("tracked.rs"), "original\n").expect("write tracked file");
+        run_git(repo.path(), &["add", "tracked.rs"]);
+        run_git(
+            repo.path(),
+            &[
+                "-c",
+                "user.name=Codex Test",
+                "-c",
+                "user.email=codex@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+            ],
+        );
+        std::fs::write(repo.path().join("tracked.rs"), "changed\n").expect("modify tracked file");
+        std::fs::write(repo.path().join("untracked.rs"), "new\n").expect("write untracked file");
+
+        assert_eq!(
+            collect_changed_files(repo.path()).await,
+            Some(vec!["tracked.rs".to_string(), "untracked.rs".to_string(),])
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_files_are_unknown_before_the_first_commit() {
+        let repo = tempdir().expect("create temp repo");
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "core.autocrlf", "false"]);
+        std::fs::write(repo.path().join("untracked.rs"), "new\n").expect("write untracked file");
+
+        assert_eq!(collect_changed_files(repo.path()).await, None);
+    }
+
+    fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed with {status}");
+    }
 
     #[test]
     fn block_decision_with_reason_sets_continuation_prompt() {

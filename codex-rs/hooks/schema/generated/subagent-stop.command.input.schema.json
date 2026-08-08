@@ -19,6 +19,14 @@
     "agent_type": {
       "type": "string"
     },
+    "changed_files": {
+      "description": "Files modified in the working directory since HEAD, populated lazily only when SubagentStop hooks are matched. Enables targeted quality gates.",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 1000,
+      "type": "array"
+    },
     "cwd": {
       "type": "string"
     },

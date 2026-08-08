@@ -3,8 +3,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::SkillInjections;
-use crate::build_skill_injections;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -20,12 +18,10 @@ use crate::feedback_tags;
 use crate::hook_runtime::inspect_pending_input;
 use crate::hook_runtime::record_additional_contexts;
 use crate::hook_runtime::record_pending_input;
+use crate::hook_runtime::reject_pending_input;
 use crate::hook_runtime::run_legacy_after_agent_hook;
 use crate::hook_runtime::run_pending_session_start_hooks;
 use crate::hook_runtime::run_turn_stop_hooks;
-use crate::injection::ToolMentionKind;
-use crate::injection::app_id_from_path;
-use crate::injection::tool_kind_for_path;
 use crate::mcp_skill_dependencies::maybe_prompt_and_install_mcp_dependencies;
 use crate::mentions::build_connector_slug_counts;
 use crate::mentions::build_skill_name_counts;
@@ -36,12 +32,14 @@ use crate::plugins::build_plugin_injections;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
+use crate::responses_retry::ResponsesStreamRetryState;
 use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
+use crate::skills::emit_explicit_skill_invocations;
 use crate::stream_events_utils::HandleOutputCtx;
 use crate::stream_events_utils::TurnItemContributorPolicy;
 use crate::stream_events_utils::finalize_non_tool_response_item;
@@ -72,7 +70,6 @@ use codex_analytics::build_track_events_context;
 use codex_async_utils::OrCancelExt;
 use codex_connectors::AppToolPolicyEvaluator;
 use codex_core_plugins::RecommendedPluginCandidatesInput;
-use codex_core_skills::injection::InjectedHostSkillPrompts;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::TurnInputContext;
 use codex_extension_api::TurnInputEnvironment;
@@ -109,6 +106,11 @@ use codex_protocol::protocol::SafetyBufferingEvent;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
+use codex_skills::ToolMentionKind;
+use codex_skills::app_id_from_path;
+use codex_skills::tool_kind_for_path;
+use codex_skills_extension::HostSkillPrompts;
+use codex_skills_extension::InjectedHostSkillPrompts;
 use codex_tools::DiscoverableTool;
 use codex_tools::ToolName;
 use codex_tools::filter_request_plugin_install_discoverable_tools_for_client;
@@ -583,25 +585,33 @@ pub(crate) async fn run_hooks_and_record_inputs(
 ) -> bool {
     let mut blocked_input = false;
     let mut accepted_user_input = false;
+    let mut persistence_failed = false;
     for input_item in input {
         let hook_outcome = inspect_pending_input(sess, turn_context, input_item).await;
         if hook_outcome.should_stop {
             blocked_input = true;
+            reject_pending_input(sess, turn_context, input_item).await;
             record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
         } else {
             if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {
                 accepted_user_input = true;
             }
-            record_pending_input(
+            if record_pending_input(
                 sess,
                 turn_context,
                 input_item.clone(),
                 hook_outcome.additional_contexts,
             )
-            .await;
+            .await
+            .is_err()
+            {
+                // Preserve later drained inputs, but stop before sampling so a
+                // later queue retry cannot execute this message twice.
+                persistence_failed = true;
+            }
         }
     }
-    blocked_input && !accepted_user_input
+    persistence_failed || (blocked_input && !accepted_user_input)
 }
 
 fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {
@@ -781,27 +791,26 @@ async fn build_skills_and_plugins(
     let injected_host_skill_prompts = turn_context
         .extension_data
         .get::<InjectedHostSkillPrompts>();
-    let SkillInjections {
-        items: skill_injections,
-        warnings: skill_warnings,
-    } = build_skill_injections(
+    let HostSkillPrompts {
+        fragments,
+        injected: injected_host_skills,
+        warnings: host_skill_warnings,
+    } = skills_snapshot.load_skill_prompts(&mentioned_skills).await;
+    emit_explicit_skill_invocations(
+        sess,
+        turn_context,
         &mentioned_skills,
-        Some(skills_outcome),
-        Some(&turn_context.session_telemetry),
-        &sess.services.analytics_events_client,
+        &injected_host_skills,
         tracking.clone(),
-    )
-    .await;
-
-    for message in skill_warnings {
+    );
+    for message in host_skill_warnings {
         sess.send_event(turn_context, EventMsg::Warning(WarningEvent { message }))
             .await;
     }
-
-    let skill_items: Vec<ResponseItem> = skill_injections
-        .iter()
-        .map(|skill| ContextualUserFragment::into(crate::context::SkillInstructions::from(skill)))
-        .collect();
+    let skill_items = fragments
+        .into_iter()
+        .map(ContextualUserFragment::into_boxed_response_item)
+        .collect::<Vec<_>>();
     let skill_connector_ids = collect_explicit_app_ids_from_skill_items(
         &skill_items,
         &available_connectors,
@@ -839,12 +848,14 @@ async fn build_skills_and_plugins(
         }
     }
 
-    let mut injection_items: Vec<ResponseItem> = match injected_host_skill_prompts {
-        Some(injected_host_skill_prompts) => skill_injections
-            .iter()
-            .filter(|skill| !injected_host_skill_prompts.contains_path(&skill.path))
-            .map(|skill| {
-                ContextualUserFragment::into(crate::context::SkillInstructions::from(skill))
+    let mut injection_items = match injected_host_skill_prompts {
+        Some(injected_host_skill_prompts) => skill_items
+            .into_iter()
+            .zip(injected_host_skills.iter())
+            .filter_map(|(item, skill)| {
+                (!injected_host_skill_prompts
+                    .contains_path(&skill.path_to_skills_md.to_string_lossy()))
+                .then_some(item)
             })
             .collect(),
         None => skill_items,
@@ -871,18 +882,14 @@ async fn build_extension_turn_input_items(
         return Some(Vec::new());
     }
 
-    let environments = turn_context
+    let environments = step_context
         .environments
         .turn_environments()
         .enumerate()
-        .filter_map(|(index, environment)| {
-            // TODO(anp): Migrate extension turn-input environments to PathUri so foreign cwd
-            // values are not omitted from extension context.
-            Some(TurnInputEnvironment {
-                environment_id: environment.environment_id.clone(),
-                cwd: environment.cwd().to_abs_path().ok()?.into_path_buf(),
-                is_primary: index == 0,
-            })
+        .map(|(index, environment)| TurnInputEnvironment {
+            environment_id: environment.environment_id.clone(),
+            cwd: environment.cwd().clone(),
+            is_primary: index == 0,
         })
         .collect::<Vec<_>>();
 
@@ -1331,7 +1338,7 @@ async fn run_sampling_request(
         Arc::clone(&turn_diff_tracker),
     );
     let max_retries = turn_context.provider.info().stream_max_retries();
-    let mut retries = 0;
+    let mut retry_state = ResponsesStreamRetryState::default();
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
@@ -1397,7 +1404,7 @@ async fn run_sampling_request(
         }
 
         handle_retryable_response_stream_error(
-            &mut retries,
+            &mut retry_state,
             max_retries,
             err,
             client_session,
@@ -1466,7 +1473,7 @@ pub(crate) async fn built_tools(
     sess: &Session,
     turn_context: &TurnContext,
     environments: &TurnEnvironmentSnapshot,
-    mcp: &codex_mcp::McpBinding,
+    mcp: &Arc<codex_mcp::McpBinding>,
     step_store: &ExtensionData,
     prepared_recommendations: PreparedToolRecommendations,
 ) -> CodexResult<Arc<ToolRouter>> {
@@ -1750,6 +1757,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::EnvironmentConnected(_)
         | EventMsg::EnvironmentDisconnected(_)
         | EventMsg::ThreadGoalUpdated(_)
+        | EventMsg::ThreadQueueChanged(_)
         | EventMsg::McpStartupUpdate(_)
         | EventMsg::McpStartupComplete(_)
         | EventMsg::McpToolCallBegin(_)

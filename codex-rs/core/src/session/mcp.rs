@@ -302,11 +302,32 @@ impl Session {
         {
             self.mark_mcp_runtime_dirty();
         }
+
+        let recovered_oauth_servers = self
+            .services
+            .mcp_runtime
+            .updated_oauth_credentials_after_auth_failure()
+            .await;
+        if !recovered_oauth_servers.is_empty()
+            && let Ok(_refresh) = self.mcp_refresh.acquire().await
+            && self
+                .services
+                .mcp_runtime
+                .has_authentication_failed_servers(&recovered_oauth_servers)
+                .await
+        {
+            self.mark_mcp_runtime_dirty();
+        }
         self.refresh_mcp_if_dirty().await;
+        let required_servers = required_servers
+            .iter()
+            .chain(&recovered_oauth_servers)
+            .cloned()
+            .collect::<Vec<_>>();
         if let Some(binding) = self
             .services
             .mcp_runtime
-            .current_binding_with_required_servers(required_servers)
+            .current_binding_with_required_servers(&required_servers)
             .await
         {
             return binding;
@@ -731,6 +752,7 @@ async fn review_guardian_mcp_elicitation(
             || crate::connectors::mcp_approvals_reviewer_from_layers(
                 &mcp_config.config_layer_stack,
                 ApprovalsReviewer::AutoReview,
+                Some(turn_context.model_info.slug.as_str()),
                 request.server_name.as_str(),
                 connector_id,
             ) != ApprovalsReviewer::AutoReview
@@ -800,6 +822,7 @@ async fn review_guardian_mcp_elicitation(
     let approvals_reviewer = crate::connectors::mcp_approvals_reviewer_from_layers(
         &mcp_config.config_layer_stack,
         mcp_config.approvals_reviewer,
+        Some(turn_context.model_info.slug.as_str()),
         request.server_name.as_str(),
         elicitation_connector_id(&request.elicitation),
     );

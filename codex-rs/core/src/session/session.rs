@@ -109,6 +109,8 @@ pub(crate) struct SessionConfiguration {
     pub(super) metrics_service_name: Option<String>,
     pub(super) app_server_client_name: Option<String>,
     pub(super) app_server_client_version: Option<String>,
+    /// Guardian reviewer identity is trusted only when established during an in-memory spawn.
+    pub(super) trusted_guardian_reviewer: bool,
     /// Source of the session (cli, vscode, exec, mcp, ...)
     pub(super) session_source: SessionSource,
     /// Persisted thread history contract selected when this thread was created.
@@ -251,6 +253,38 @@ impl SessionConfiguration {
         }
     }
 
+    pub(super) fn validate_auto_review_requirement(&self) -> ConstraintResult<()> {
+        if self.trusted_guardian_reviewer {
+            return Ok(());
+        }
+
+        let requirements = self
+            .original_config_do_not_use
+            .config_layer_stack
+            .requirements();
+        let model = self.collaboration_mode.model();
+        if !requirements.auto_review_required_for_model(model) {
+            return Ok(());
+        }
+
+        if self.approval_policy.value() == AskForApproval::OnRequest
+            && self.approvals_reviewer == ApprovalsReviewer::AutoReview
+            && !self
+                .file_system_sandbox_policy()
+                .has_full_disk_write_access()
+            && self
+                .original_config_do_not_use
+                .features
+                .enabled(Feature::GuardianApproval)
+        {
+            return Ok(());
+        }
+
+        Err(ConstraintError::AutoReviewRequired {
+            model: model.to_string(),
+        })
+    }
+
     pub(crate) fn apply(&self, updates: &SessionSettingsUpdate) -> ConstraintResult<Self> {
         let mut next_configuration = self.clone();
         let current_sandbox_policy = self.sandbox_policy();
@@ -303,7 +337,36 @@ impl SessionConfiguration {
             next_configuration.approval_policy.set(approval_policy)?;
         }
         if let Some(approvals_reviewer) = updates.approvals_reviewer {
+            next_configuration
+                .original_config_do_not_use
+                .config_layer_stack
+                .requirements()
+                .approvals_reviewer
+                .can_set(&approvals_reviewer)?;
             next_configuration.approvals_reviewer = approvals_reviewer;
+        }
+        if !next_configuration.trusted_guardian_reviewer
+            && self.collaboration_mode.model() != next_configuration.collaboration_mode.model()
+            && next_configuration
+                .original_config_do_not_use
+                .config_layer_stack
+                .requirements()
+                .auto_review_required_for_model(next_configuration.collaboration_mode.model())
+        {
+            if updates.approval_policy.is_none() {
+                next_configuration
+                    .approval_policy
+                    .set(AskForApproval::OnRequest)?;
+            }
+            if updates.approvals_reviewer.is_none() {
+                next_configuration
+                    .original_config_do_not_use
+                    .config_layer_stack
+                    .requirements()
+                    .approvals_reviewer
+                    .can_set(&ApprovalsReviewer::AutoReview)?;
+                next_configuration.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            }
         }
         if let Some(windows_sandbox_level) = updates.windows_sandbox_level {
             next_configuration.windows_sandbox_level = windows_sandbox_level;
@@ -405,6 +468,7 @@ impl SessionConfiguration {
         if let Some(app_server_client_version) = updates.app_server_client_version.clone() {
             next_configuration.app_server_client_version = Some(app_server_client_version);
         }
+        next_configuration.validate_auto_review_requirement()?;
         Ok(next_configuration)
     }
 
@@ -515,6 +579,7 @@ impl Session {
         installation_id: String,
         auth_manager: Arc<AuthManager>,
         models_manager: SharedModelsManager,
+        model_info: ModelInfo,
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
@@ -545,6 +610,27 @@ impl Session {
             session_configuration.collaboration_mode.model(),
             session_configuration.provider
         );
+        let base_instructions_provenance = if config.base_instructions.is_some() {
+            Some(
+                config
+                    .base_instructions_provenance
+                    .clone()
+                    .unwrap_or(BaseInstructionsProvenance::Custom),
+            )
+        } else if let Some(inherited_base_instructions) = initial_history.get_base_instructions() {
+            let BaseInstructions { text, provenance } = inherited_base_instructions;
+            provenance.or_else(|| {
+                (text == model_info.get_model_instructions(config.personality)).then(|| {
+                    BaseInstructionsProvenance::Model {
+                        model: model_info.slug.clone(),
+                    }
+                })
+            })
+        } else {
+            Some(BaseInstructionsProvenance::Model {
+                model: model_info.slug.clone(),
+            })
+        };
         let forked_from_id = session_configuration
             .forked_from_thread_id
             .or_else(|| initial_history.forked_from_id());
@@ -568,7 +654,7 @@ impl Session {
 
         let thread_id = match &initial_history {
             InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
-                ThreadId::default()
+                agent_control.generate_thread_id()
             }
             InitialHistory::Resumed(resumed_history) => resumed_history.conversation_id,
         };
@@ -594,6 +680,20 @@ impl Session {
             }
         });
         let initial_auto_compact_window_ids = AutoCompactWindowIds::new_initial();
+        let restore_child_window = matches!(&initial_history, InitialHistory::Forked(_))
+            && session_configuration.session_source.is_non_root_agent()
+            && config.features.enabled(Feature::TokenBudget);
+        if restore_child_window && let InitialHistory::Forked(items) = &mut initial_history {
+            let child_window_id = initial_auto_compact_window_ids.window_id.to_string();
+            for item in items {
+                if let RolloutItem::Compacted(checkpoint) = item {
+                    checkpoint.window_number = Some(0);
+                    checkpoint.first_window_id = Some(child_window_id.clone());
+                    checkpoint.previous_window_id = None;
+                    checkpoint.window_id = Some(child_window_id.clone());
+                }
+            }
+        }
         let agent_control = agent_control.with_session_id(
             session_id,
             config
@@ -645,6 +745,7 @@ impl Session {
                             originator: session_configuration.originator.clone(),
                             base_instructions: BaseInstructions {
                                 text: session_configuration.base_instructions.clone(),
+                                provenance: base_instructions_provenance.clone(),
                             },
                             dynamic_tools: session_configuration.dynamic_tools.clone(),
                             selected_capability_roots: selected_capability_roots.clone(),
@@ -997,12 +1098,22 @@ impl Session {
                 );
             }
             session_configuration.thread_name = thread_name.clone();
-            validate_config_lock_if_configured(&session_configuration).await?;
-            export_config_lock_if_configured(&session_configuration, thread_id).await?;
-            let state = SessionState::new_with_auto_compact_window_ids(
+            validate_config_lock_if_configured(
+                &session_configuration,
+                base_instructions_provenance.as_ref(),
+            )
+            .await?;
+            export_config_lock_if_configured(
+                &session_configuration,
+                thread_id,
+                base_instructions_provenance.as_ref(),
+            )
+            .await?;
+            let mut state = SessionState::new_with_auto_compact_window_ids(
                 session_configuration.clone(),
                 initial_auto_compact_window_ids,
             );
+            state.base_instructions_provenance = base_instructions_provenance.clone();
             let managed_network_requirements_configured = config
                 .config_layer_stack
                 .requirements_toml()
@@ -1110,6 +1221,7 @@ impl Session {
                 // Start with an empty connection set. The initialized set is
                 // published after SessionConfigured so MCP events follow it.
                 mcp_runtime,
+                mcp_handler_cache: Default::default(),
                 unified_exec_manager: UnifiedExecProcessManager::new(
                     config.background_terminal_max_timeout,
                 ),
@@ -1184,7 +1296,7 @@ impl Session {
                 executed_tool_calls,
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(
                     Arc::clone(&code_mode_session_provider),
-                    &config.features,
+                    &config.code_mode,
                 ),
                 tool_search_handler_cache: Default::default(),
                 turn_environments: Arc::clone(&turn_environments),
@@ -1307,6 +1419,12 @@ impl Session {
 
             // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
             Box::pin(sess.record_initial_history(initial_history)).await;
+            if restore_child_window {
+                sess.state.lock().await.restore_auto_compact_window(
+                    /*window_number*/ 0,
+                    initial_auto_compact_window_ids,
+                );
+            }
             if matches!(&sess.fork_persistence, ForkPersistence::Referenced { .. }) {
                 // Keep the source reserved until the child's history reference is durable.
                 sess.try_ensure_rollout_materialized().await?;

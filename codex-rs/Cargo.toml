@@ -41,7 +41,7 @@ members = [
     "core",
     "core-api",
     "core-plugins",
-    "core-skills",
+    "diagnostics",
     "hooks",
     "http-client",
     "secrets",
@@ -61,6 +61,7 @@ members = [
     "ext/items",
     "ext/memories",
     "ext/mcp",
+    "ext/queue",
     "ext/skills",
     "ext/web-search",
     "external-agent-migration",
@@ -182,7 +183,7 @@ codex-context-fragments = { path = "context-fragments" }
 codex-core = { path = "core" }
 codex-core-api = { path = "core-api" }
 codex-core-plugins = { path = "core-plugins" }
-codex-core-skills = { path = "core-skills" }
+codex-diagnostics = { path = "diagnostics" }
 codex-exec = { path = "exec" }
 codex-file-system = { path = "file-system" }
 codex-exec-server-protocol = { path = "exec-server-protocol" }
@@ -226,6 +227,7 @@ codex-model-provider = { path = "model-provider" }
 codex-process-hardening = { path = "process-hardening" }
 codex-protocol = { path = "protocol" }
 codex-prompts = { path = "prompts" }
+codex-queue-extension = { path = "ext/queue" }
 codex-responses-api-proxy = { path = "responses-api-proxy" }
 codex-response-debug-context = { path = "response-debug-context" }
 codex-rmcp-client = { path = "rmcp-client" }

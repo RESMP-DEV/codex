@@ -149,7 +149,7 @@ pub(crate) async fn run(
 /// `tool_input`; MCP tools pass their resolved JSON arguments.
 fn command_input_json(request: &PostToolUseRequest) -> Result<String, serde_json::Error> {
     let subagent = SubagentCommandInputFields::from(request.subagent.as_ref());
-    let affected_files = extract_affected_files(&request.tool_input);
+    let affected_files = extract_affected_files(&request.tool_name, &request.tool_input);
     serde_json::to_string(&PostToolUseCommandInput {
         session_id: request.session_id.to_string(),
         turn_id: request.turn_id.clone(),
@@ -173,33 +173,83 @@ fn command_input_json(request: &PostToolUseRequest) -> Result<String, serde_json
 /// Handles common tool input shapes:
 /// - `{ "file_path": "..." }` or `{ "path": "..." }` — direct file tools
 /// - `{ "patch": "--- a/foo\n+++ b/foo\n..." }` — unified diff tools
-fn extract_affected_files(tool_input: &Value) -> Option<Vec<String>> {
+/// - `{ "command": "*** Begin Patch\n*** Update File: foo\n..." }` — `apply_patch`
+fn extract_affected_files(tool_name: &str, tool_input: &Value) -> Option<Vec<String>> {
     let obj = tool_input.as_object()?;
     let mut files: Vec<String> = Vec::new();
 
     // Direct file path fields used by file-writing tools.
     for key in ["file_path", "path", "filePath"] {
-        if let Some(Value::String(p)) = obj.get(key) {
-            if !p.is_empty() {
-                files.push(p.clone());
-            }
+        if let Some(Value::String(p)) = obj.get(key)
+            && !p.is_empty()
+        {
+            files.push(p.clone());
         }
     }
 
     // Unified diff content — extract paths from --- / +++ headers.
     for key in ["patch", "diff"] {
         if let Some(Value::String(text)) = obj.get(key) {
-            for line in text.lines() {
-                let path = line
-                    .strip_prefix("+++ ")
-                    .or_else(|| line.strip_prefix("--- "));
-                if let Some(p) = path {
-                    let p = p.trim();
-                    let p = p.strip_prefix("a/").or_else(|| p.strip_prefix("b/")).unwrap_or(p);
-                    if p != "/dev/null" && !p.is_empty() {
-                        files.push(p.to_string());
+            let lines = text.lines().collect::<Vec<_>>();
+            for (index, pair) in lines.windows(2).enumerate() {
+                let Some(old_path) = pair[0].strip_prefix("--- ") else {
+                    continue;
+                };
+                let Some(new_path) = pair[1].strip_prefix("+++ ") else {
+                    continue;
+                };
+                let old_path = old_path
+                    .split_once('\t')
+                    .map_or(old_path, |(path, _)| path)
+                    .trim();
+                let new_path = new_path
+                    .split_once('\t')
+                    .map_or(new_path, |(path, _)| path)
+                    .trim();
+                let has_standard_prefix = (old_path == "/dev/null" || old_path.starts_with("a/"))
+                    && (new_path == "/dev/null" || new_path.starts_with("b/"));
+                let has_header_boundary = index == 0
+                    || lines[index - 1].starts_with("diff --git ")
+                    || lines[index - 1].starts_with("+++ b/")
+                    || lines[index - 1].starts_with("+++ /dev/null")
+                    || lines
+                        .get(index + 2)
+                        .is_some_and(|line| line.starts_with("@@"));
+                if !has_standard_prefix || !has_header_boundary {
+                    continue;
+                }
+                for path in [old_path, new_path] {
+                    let path = path
+                        .strip_prefix("a/")
+                        .or_else(|| path.strip_prefix("b/"))
+                        .unwrap_or(path);
+                    if path != "/dev/null" && !path.is_empty() {
+                        files.push(path.to_string());
                     }
                 }
+            }
+        }
+    }
+
+    // The native apply_patch tool carries its patch text in `command` and
+    // names files with the markers from the apply-patch grammar. Include both
+    // sides of a move so hook consumers can invalidate the source and target.
+    if tool_name == "apply_patch"
+        && let Some(Value::String(command)) = obj.get("command")
+    {
+        for line in command.lines() {
+            let path = [
+                "*** Add File: ",
+                "*** Delete File: ",
+                "*** Update File: ",
+                "*** Move to: ",
+            ]
+            .into_iter()
+            .find_map(|marker| line.strip_prefix(marker));
+            if let Some(path) = path.map(str::trim)
+                && !path.is_empty()
+            {
+                files.push(path.to_string());
             }
         }
     }
@@ -372,6 +422,7 @@ mod tests {
 
     use super::PostToolUseHandlerData;
     use super::command_input_json;
+    use super::extract_affected_files;
     use super::parse_completed;
     use super::preview;
     use crate::engine::ConfiguredHandler;
@@ -390,6 +441,88 @@ mod tests {
             serde_json::from_str(&input_json).expect("parse command input");
 
         assert_eq!(input["tool_name"], "apply_patch");
+    }
+
+    #[test]
+    fn affected_files_include_direct_and_patch_paths() {
+        let tool_input = json!({
+            "file_path": "src/direct.rs",
+            "path": "src/direct.rs",
+            "patch": "--- a/src/old.rs\n+++ b/src/new.rs\n--- /dev/null\n+++ b/src/created.rs\n",
+        });
+
+        assert_eq!(
+            extract_affected_files("Edit", &tool_input),
+            Some(vec![
+                "src/created.rs".to_string(),
+                "src/direct.rs".to_string(),
+                "src/new.rs".to_string(),
+                "src/old.rs".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn command_input_reports_native_apply_patch_paths() {
+        let mut request = request_for_tool_use("call-apply-patch");
+        request.tool_name = "apply_patch".to_string();
+        request.tool_input = json!({
+            "command": "*** Begin Patch\n*** Add File: src/new.rs\n+new\n*** Update File: src/old.rs\n*** Move to: src/moved.rs\n@@\n-old\n+new\n*** Delete File: src/gone.rs\n*** End Patch"
+        });
+
+        let input_json = command_input_json(&request).expect("serialize command input");
+        let input: serde_json::Value =
+            serde_json::from_str(&input_json).expect("parse command input");
+
+        assert_eq!(
+            input["affected_files"],
+            json!(["src/gone.rs", "src/moved.rs", "src/new.rs", "src/old.rs"])
+        );
+    }
+
+    #[test]
+    fn affected_files_ignore_diff_content_that_looks_like_headers() {
+        let tool_input = json!({
+            "diff": "diff --git a/src/code.rs b/src/code.rs\n--- a/src/code.rs\n+++ b/src/code.rs\n@@ -1,2 +1,2 @@\n--- bogus-old-path\n+++ bogus-new-path\n"
+        });
+
+        assert_eq!(
+            extract_affected_files("Edit", &tool_input),
+            Some(vec!["src/code.rs".to_string()])
+        );
+    }
+
+    #[test]
+    fn affected_files_include_multiple_plain_unified_diff_files() {
+        let tool_input = json!({
+            "diff": "--- a/src/one.rs\n+++ b/src/one.rs\n@@ -1 +1 @@\n-old\n+new\n--- a/src/two.rs\n+++ b/src/two.rs\n@@ -1 +1 @@\n-old2\n+new2\n"
+        });
+
+        assert_eq!(
+            extract_affected_files("Edit", &tool_input),
+            Some(vec!["src/one.rs".to_string(), "src/two.rs".to_string()])
+        );
+    }
+
+    #[test]
+    fn affected_files_ignore_apply_patch_markers_in_other_commands() {
+        let tool_input = json!({
+            "command": "echo '*** Update File: not-really-edited.rs'"
+        });
+
+        assert_eq!(extract_affected_files("Bash", &tool_input), None);
+    }
+
+    #[test]
+    fn command_input_omits_affected_files_when_no_path_is_present() {
+        let mut request = request_for_tool_use("call-shell");
+        request.tool_input = json!({"command": "cargo test"});
+
+        let input_json = command_input_json(&request).expect("serialize command input");
+        let input: serde_json::Value =
+            serde_json::from_str(&input_json).expect("parse command input");
+
+        assert_eq!(input.get("affected_files"), None);
     }
 
     #[test]

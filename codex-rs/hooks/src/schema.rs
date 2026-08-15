@@ -592,6 +592,7 @@ pub(crate) struct StopCommandInput {
     /// Files modified in the working directory since HEAD, populated lazily
     /// only when Stop hooks are matched. Enables targeted quality gates.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 1000))]
     pub changed_files: Option<Vec<String>>,
 }
 
@@ -617,6 +618,7 @@ pub(crate) struct SubagentStopCommandInput {
     /// Files modified in the working directory since HEAD, populated lazily
     /// only when SubagentStop hooks are matched. Enables targeted quality gates.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 1000))]
     pub changed_files: Option<Vec<String>>,
 }
 

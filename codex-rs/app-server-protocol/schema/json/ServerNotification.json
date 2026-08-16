@@ -606,6 +606,7 @@
             "usageLimitExceeded",
             "serverOverloaded",
             "cyberPolicy",
+            "misalignmentPolicyViolation",
             "internalServerError",
             "unauthorized",
             "badRequest",
@@ -2098,6 +2099,7 @@
     "HookHandlerType": {
       "enum": [
         "command",
+        "mcpTool",
         "prompt",
         "agent"
       ],
@@ -2285,6 +2287,37 @@
         "original"
       ],
       "type": "string"
+    },
+    "ImageGenerationFailure": {
+      "oneOf": [
+        {
+          "properties": {
+            "limitId": {
+              "type": "string"
+            },
+            "resetsAt": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "usageLimitExceeded"
+              ],
+              "title": "UsageLimitExceededImageGenerationFailureType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "limitId",
+            "type"
+          ],
+          "title": "UsageLimitExceededImageGenerationFailure",
+          "type": "object"
+        }
+      ]
     },
     "ItemCompletedNotification": {
       "properties": {
@@ -4706,6 +4739,17 @@
         },
         {
           "properties": {
+            "failure": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImageGenerationFailure"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "id": {
               "type": "string"
             },
@@ -4835,6 +4879,17 @@
             "string",
             "null"
           ]
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadQueueChangedNotification": {
+      "properties": {
+        "threadId": {
+          "type": "string"
         }
       },
       "required": [
@@ -5020,6 +5075,17 @@
       "required": [
         "role",
         "text",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadRevertedNotification": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
         "threadId"
       ],
       "type": "object"
@@ -6111,6 +6177,26 @@
       "properties": {
         "method": {
           "enum": [
+            "thread/reverted"
+          ],
+          "title": "Thread/revertedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadRevertedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/revertedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
             "skills/changed"
           ],
           "title": "Skills/changedNotificationMethod",
@@ -6185,6 +6271,26 @@
         "params"
       ],
       "title": "Thread/goal/clearedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/queue/changed"
+          ],
+          "title": "Thread/queue/changedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadQueueChangedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/queue/changedNotification",
       "type": "object"
     },
     {

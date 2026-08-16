@@ -12,7 +12,6 @@ use serde::Deserialize;
 
 use crate::function_tool::FunctionCallError;
 use crate::original_image_detail::can_request_original_image_detail;
-use crate::tools::context::ToolCallSource;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -25,8 +24,6 @@ use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolExecutor;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
-use image::ImageFormat;
-use std::io::Cursor;
 
 pub struct ViewImageHandler {
     options: ViewImageToolOptions,
@@ -54,8 +51,6 @@ const VIEW_IMAGE_UNSUPPORTED_MESSAGE: &str =
     "view_image is not allowed because you do not support image inputs";
 const VIEW_IMAGE_INVALID_MESSAGE: &str =
     "unable to process image: invalid or unsupported image data";
-const VIEW_IMAGE_ENCODING_ERROR_MESSAGE: &str =
-    "unable to process image: could not encode validated image";
 
 #[derive(Deserialize)]
 struct ViewImageArgs {
@@ -111,7 +106,6 @@ impl ViewImageHandler {
             step_context,
             payload,
             call_id,
-            source,
             ..
         } = invocation;
 
@@ -181,7 +175,9 @@ impl ViewImageHandler {
                     "unable to read image at `{model_visible_path}`: {error}"
                 ))
             })?;
-        let decoded_image = image::load_from_memory(&file_bytes).map_err(|_| {
+        // Reject non-images before their bytes can reach code mode without changing
+        // valid image bytes, metadata, or centralized image preparation.
+        image::load_from_memory(&file_bytes).map_err(|_| {
             FunctionCallError::RespondToModel(VIEW_IMAGE_INVALID_MESSAGE.to_string())
         })?;
 
@@ -194,21 +190,8 @@ impl ViewImageHandler {
             DEFAULT_IMAGE_DETAIL
         };
 
-        let image_url = if matches!(source, ToolCallSource::CodeMode { .. }) {
-            // Code mode must receive only image pixels, while keeping the original
-            // dimensions for centralized resizing and resize notices.
-            let mut sanitized_bytes = Vec::new();
-            decoded_image
-                .write_to(&mut Cursor::new(&mut sanitized_bytes), ImageFormat::Png)
-                .map_err(|_| {
-                    FunctionCallError::RespondToModel(VIEW_IMAGE_ENCODING_ERROR_MESSAGE.to_string())
-                })?;
-            data_url_from_bytes("image/png", &sanitized_bytes)
-        } else {
-            // Direct tool calls retain image metadata for centralized preparation.
-            data_url_from_bytes("application/octet-stream", &file_bytes)
-        };
-        drop(decoded_image);
+        // The history insertion path owns image preparation and resizing.
+        let image_url = data_url_from_bytes("application/octet-stream", &file_bytes);
 
         let item = TurnItem::ImageView(ImageViewItem {
             id: call_id,
@@ -279,6 +262,7 @@ mod tests {
     use crate::session::step_context::StepContext;
     use crate::session::tests::make_session_and_context;
     use crate::session::turn_context::TurnEnvironment;
+    use crate::tools::context::ToolCallSource;
     use crate::tools::context::ToolInvocation;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_protocol::models::PermissionProfile;
@@ -286,9 +270,11 @@ mod tests {
     use codex_utils_path_uri::PathUri;
     use core_test_support::TempDirExt;
     use image::ImageBuffer;
+    use image::ImageFormat;
     use image::Rgba;
     use pretty_assertions::assert_eq;
     use serde_json::json;
+    use std::io::Cursor;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -299,18 +285,23 @@ mod tests {
             .next()
             .cloned()
             .expect("default local turn environment");
+        let mut selection = current.selection;
+        selection.cwd = PathUri::from_abs_path(&cwd);
+        selection.workspace_roots.clear();
         turn.environments.environments[0] = TurnEnvironmentState::Ready(TurnEnvironment::new(
-            current.environment_id,
+            selection,
+            current.config_origin,
             current.environment,
-            PathUri::from_abs_path(&cwd),
-            Vec::new(),
             current.shell,
-            current.config,
         ));
     }
 
     fn tiny_png() -> Vec<u8> {
-        let image = ImageBuffer::from_pixel(1, 1, Rgba([255u8, 0, 0, 255]));
+        let image = ImageBuffer::from_pixel(
+            /*width*/ 1,
+            /*height*/ 1,
+            Rgba([255u8, 0, 0, 255]),
+        );
         let mut bytes = Vec::new();
         image
             .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
@@ -367,7 +358,7 @@ mod tests {
         else {
             panic!("primary environment should be ready");
         };
-        environment.config.permission_profile =
+        environment.config_mut().permission_profile =
             PermissionProfileSnapshot::legacy(PermissionProfile::read_only());
         let turn = Arc::new(turn);
 
@@ -439,7 +430,7 @@ mod tests {
         else {
             panic!("primary environment should be ready");
         };
-        environment.config.permission_profile =
+        environment.config_mut().permission_profile =
             PermissionProfileSnapshot::legacy(PermissionProfile::Disabled);
         let turn = Arc::new(turn);
 
@@ -463,53 +454,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn handle_returns_png_image_for_code_mode() {
-        let (session, mut turn) = make_session_and_context().await;
-        let image_dir = tempfile::tempdir().expect("create image temp dir");
-        let image_cwd = image_dir.abs();
-
-        replace_primary_environment_cwd(&mut turn, image_cwd.clone());
-        let image_path = image_cwd.join("image.png");
-        std::fs::write(image_path.as_path(), tiny_png()).expect("write test image");
-        let TurnEnvironmentState::Ready(environment) = &mut turn.environments.environments[0]
-        else {
-            panic!("primary environment should be ready");
-        };
-        environment.config.permission_profile =
-            PermissionProfileSnapshot::legacy(PermissionProfile::Disabled);
-        let turn = Arc::new(turn);
-
-        let output = ViewImageHandler::default()
-            .handle(ToolInvocation {
-                session: Arc::new(session),
-                step_context: StepContext::for_test(Arc::clone(&turn)),
-                turn,
-                cancellation_token: tokio_util::sync::CancellationToken::new(),
-                tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
-                call_id: "call-view-image".to_string(),
-                tool_name: codex_tools::ToolName::plain("view_image"),
-                source: ToolCallSource::CodeMode {
-                    cell_id: "cell-1".to_string(),
-                    runtime_tool_call_id: "tool-1".to_string(),
-                },
-                payload: ToolPayload::Function {
-                    arguments: json!({ "path": "image.png" }).to_string(),
-                },
-            })
-            .await
-            .expect("code mode image should be accepted");
-
-        let result = output.code_mode_result(&ToolPayload::Function {
-            arguments: "{}".to_string(),
-        });
-        let image_url = result["image_url"]
-            .as_str()
-            .expect("code mode image URL should be a string");
-        assert!(image_url.starts_with("data:image/png;base64,"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn handle_rejects_invalid_image_before_returning_output() {
+    async fn handle_rejects_invalid_image_before_returning_output_to_code_mode() {
         let (session, mut turn) = make_session_and_context().await;
         let image_dir = tempfile::tempdir().expect("create image temp dir");
         let image_cwd = image_dir.abs();
@@ -522,7 +467,7 @@ mod tests {
         else {
             panic!("primary environment should be ready");
         };
-        environment.config.permission_profile =
+        environment.config_mut().permission_profile =
             PermissionProfileSnapshot::legacy(PermissionProfile::Disabled);
         let turn = Arc::new(turn);
 
@@ -535,7 +480,10 @@ mod tests {
                 tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
                 call_id: "call-view-image".to_string(),
                 tool_name: codex_tools::ToolName::plain("view_image"),
-                source: ToolCallSource::Direct,
+                source: ToolCallSource::CodeMode {
+                    cell_id: "cell-1".to_string(),
+                    runtime_tool_call_id: "tool-1".to_string(),
+                },
                 payload: ToolPayload::Function {
                     arguments: json!({ "path": "not-an-image.txt" }).to_string(),
                 },

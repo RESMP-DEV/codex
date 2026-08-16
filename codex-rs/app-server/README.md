@@ -36,7 +36,7 @@ When running with `--listen ws://IP:PORT`, the same listener also serves basic H
 
 Websocket transport is currently experimental and unsupported. Do not rely on it for production workloads.
 
-Pass `--code-mode-host wss://HOST/PATH` to connect this app-server process to a remote code-mode host instead of starting a local host. This outbound connection is independent of `--listen` and is shared by the process's threads. Use `ws://` for a local code-mode host.
+Pass `--code-mode-host URL` to connect this app-server process to a remote code-mode host instead of starting a local host. Use `ws://` or `wss://` for the WebSocket protocol, or a root `http://` or `https://` URL without a path or query for gRPC. Remote hosts require the `code_mode_host` feature. This outbound connection is independent of `--listen` and is shared by the process's threads.
 
 The unix socket transport is intended for local app-server control-plane clients. `codex app-server proxy`
 opens exactly one raw stream connection to `$CODEX_HOME/app-server-control/app-server-control.sock`
@@ -93,15 +93,11 @@ extended forms, clients must handle the request envelope, including a fallback
 for unsupported field types. `mcpServerOpenaiFormElicitation: true` remains a
 legacy alias for declaring the `openai/form` extension.
 
-`openai/standard-form-input` indicates support for collecting and returning
-input from standard MCP forms.
-
 ```json
 {
   "capabilities": {
     "extensions": {
       "openai/form": {},
-      "openai/standard-form-input": {},
       "io.modelcontextprotocol/ui": {
         "mimeTypes": ["text/html;profile=mcp-app"]
       }
@@ -189,6 +185,13 @@ Example with notification opt-out:
 - `thread/goal/clear` — clear the current persisted goal for a materialized thread; returns whether a goal was removed and emits `thread/goal/cleared` when state changes.
 - `thread/goal/updated` — notification emitted whenever a thread goal changes; includes the full current goal.
 - `thread/goal/cleared` — notification emitted whenever a thread goal is removed.
+- `thread/queue/add` — experimental; persist a user turn for automatic FIFO submission when the thread next becomes idle.
+- `thread/queue/list` — experimental; return one page of a thread's queued turns.
+- `thread/queue/update` — experimental; edit a queued turn while preserving its stable submission ID, client message ID, and position.
+- `thread/queue/delete` — experimental; remove a queued turn by submission ID.
+- `thread/queue/reorder` — experimental; replace the order of a thread's queued turns.
+- `thread/queue/start` — experimental; start the queue head or a selected queued submission when the thread is idle.
+- `thread/queue/changed` — experimental notification emitted with the changed `threadId`.
 - `thread/settings/updated` — experimental notification emitted to subscribed clients when a loaded thread’s effective next-turn settings change; includes `threadId` and the full `threadSettings`.
 - `thread/status/changed` — notification emitted when a loaded thread’s status changes (`threadId` + new `status`).
 - `thread/archive` — move a thread’s rollout file into the archived directory and attempt to move any spawned descendant thread rollout files; returns `{}` on success and emits `thread/archived` for each archived thread.
@@ -202,6 +205,7 @@ Example with notification opt-out:
 - `thread/backgroundTerminals/list` — list running background terminals for a loaded thread (experimental; requires `capabilities.experimentalApi`); returns `data` with the running terminal ids.
 - `thread/backgroundTerminals/terminate` — terminate one running background terminal by app-server `processId` (experimental; requires `capabilities.experimentalApi`); returns whether a process was terminated.
 - `thread/rollback` — deprecated and will be removed soon. Drop the last N turns from the agent’s in-memory context and persist a rollback marker in the rollout so future resumes see the pruned history; returns the updated `thread` (with `turns` populated) on success. Paginated threads do not support rollback.
+- `thread/revert` — experimental. Replace a loaded paginated thread's durable history with the prefix strictly before `beforeTurnId` while preserving its thread id. The operation interrupts an active turn if needed, leaves older rollout files immutable, reloads the thread, returns updated thread metadata with empty `turns` plus pagination cursors, and emits `thread/reverted`. It does not revert local file changes.
 - `turn/start` — add user input to a thread and begin Codex generation; responds with the initial `turn` object and streams `turn/started`, `item/*`, and `turn/completed` notifications. `clientUserMessageId` is optional; when supplied, the corresponding `userMessage` item echoes it as `clientId`. Experimental `runtimeWorkspaceRoots` supplies the default roots for newly resolved environment selections. Explicit `environments[].runtimeWorkspaceRoots` override that fallback with environment-native absolute paths. Prefer experimental `permissions` profile selection by id for permission overrides; the legacy `sandboxPolicy` field is still accepted but cannot be combined with `permissions`. For `collaborationMode`, `settings.developer_instructions: null` means "use built-in instructions for the selected mode". Deprecated experimental `multiAgentMode` is ignored; Ultra reasoning effort selects proactive behavior.
 - `thread/inject_items` — append raw Responses API items to a loaded thread’s model-visible history without starting a user turn; returns `{}` on success.
 - `turn/steer` — add user input to an already in-flight regular turn without starting a new turn; returns the active `turnId` that accepted the input. `clientUserMessageId` is optional; when supplied, the corresponding `userMessage` item echoes it as `clientId`. Review and manual compaction turns reject `turn/steer`.
@@ -233,7 +237,7 @@ Example with notification opt-out:
 - `fs/watch` — subscribe this connection to filesystem change notifications for an absolute file or directory path and caller-provided `watchId`; returns the canonicalized `path`.
 - `fs/unwatch` — stop sending notifications for a prior `fs/watch`; returns `{}`.
 - `fs/changed` — notification emitted when watched paths change, including the `watchId` and `changedPaths`.
-- `model/list` — list available models (set `includeHidden: true` to include entries with `hidden: true`), with model-advertised string reasoning effort options in the catalog's intended progression order, optional `modelSpecialty`, nullable `multiAgentVersion` (`disabled`, `v1`, or `v2`), `additionalSpeedTiers`, `serviceTiers`, optional `defaultServiceTier`, optional legacy `upgrade` model ids, optional `upgradeInfo` metadata (`model`, `upgradeCopy`, `modelLink`, `migrationMarkdown`), and optional `availabilityNux` metadata. Clients should preserve the `supportedReasoningEfforts` array order rather than deriving order from the effort names.
+- `model/list` — list available models (set `includeHidden: true` to include entries with `hidden: true`), with model-advertised string reasoning effort options in the catalog's intended progression order, optional `modelSpecialty`, nullable `multiAgentVersion` (`disabled`, `v1`, or `v2`), `additionalSpeedTiers`, `serviceTiers`, optional `defaultServiceTier`, optional legacy `upgrade` model ids, optional `upgradeInfo` metadata (`model`, `upgradeCopy`, `modelLink`, `migrationMarkdown`, nullable informational `retirementAt` Unix timestamp), and optional `availabilityNux` metadata. Clients should preserve the `supportedReasoningEfforts` array order rather than deriving order from the effort names.
 - `modelProvider/capabilities/read` — read provider-level capabilities for the currently configured model provider.
 - `experimentalFeature/list` — list feature flags with stage metadata (`beta`, `underDevelopment`, `stable`, etc.), enabled/default-enabled state, and cursor pagination. Pass `threadId` when showing feature state for an existing loaded thread so `enabled` is computed from that thread's refreshed config, including project-local config for the thread's cwd; if omitted, the server uses its default config resolution context. For non-beta flags, `displayName`/`description`/`announcement` are `null`.
 - `permissionProfile/list` — beta; list available permission profile ids with optional display `description` text and an `allowed` flag reflecting effective requirements, using cursor pagination. Pass `cwd` when the caller needs project-local `[permissions.<id>]` entries to be included in the current catalog view.
@@ -268,7 +272,7 @@ Example with notification opt-out:
 - `skills/config/write` — write user-level skill config by name or absolute path.
 - `plugin/install` — install a plugin from a discovered marketplace entry, rejecting marketplace entries marked unavailable for install, install MCPs if any, and return the effective plugin auth policy plus any apps that still need auth. For remote installs, clients may include an optional `installAttemptId`; app-server forwards it unchanged as `install_attempt_id` in the backend POST body, while omission preserves the legacy empty-body request (**under development; do not call from production clients yet**).
 - `plugin/uninstall` — uninstall a local plugin by `pluginId` in `<plugin>@<marketplace>` form by removing its cached files and clearing its user-level config entry, or uninstall a remote ChatGPT plugin by backend `pluginId` by forwarding the uninstall to the ChatGPT plugin backend and removing any downloaded remote-plugin cache (**under development; do not call from production clients yet**).
-- `mcpServer/oauth/login` — start an OAuth login for a configured MCP server; pass `threadId` to resolve servers from that thread's selected plugins and executor, and receive an `authorization_url` followed by `mcpServer/oauthLogin/completed` once the browser flow finishes.
+- `mcpServer/oauth/login` — start an OAuth login for a configured MCP server; pass `threadId` to resolve servers from that thread's selected plugins and executor, optionally pass `clientRegistration` (`auto`, `cimd`, or `dcr`) to override client registration for this login only, and receive an `authorization_url` followed by `mcpServer/oauthLogin/completed` once the browser flow finishes. Omitting `clientRegistration` automatically discovers the authorization server's supported registration methods; the override is never persisted in server configuration.
 - `tool/requestUserInput` — prompt the user with 1–3 short questions for a tool call and return their answers (experimental).
 - `config/mcpServer/reload` — reload MCP server config from disk and queue a refresh for loaded threads (applied on each thread's next active turn); returns `{}`. Use this after editing `config.toml` without restarting the server.
 - `mcpServerStatus/list` — enumerate configured MCP servers with their tools, auth status, server info, owning `pluginId` (`null` for servers not contributed by a plugin), plus resources/resource templates for `full` detail; supports optional `threadId` and cursor+limit pagination. If `threadId` is omitted, the server reads from the latest global config directly. If `detail` is omitted, the server defaults to `full`. An `unknown` auth status means OAuth support could not be determined; `unsupported` means OAuth is known not to be supported.
@@ -356,7 +360,7 @@ To continue a stored session, call `thread/resume` with the `thread.id` you prev
 
 By default, `thread/resume` includes the reconstructed turn history in `thread.turns`. Experimental clients can pass `excludeTurns: true` to return only thread metadata and live resume state, then call `thread/turns/list` separately if they want to page the turn history over the network. A cold paginated resume can still replay persisted `thread/tokenUsage/updated` when it can identify the corresponding stored turn; resuming an already-loaded thread waits for the next live update.
 
-Paginated threads keep the same resume contract as legacy threads. A default resume materializes the full projected history into `thread.turns`; `excludeTurns: true` keeps that array empty and includes `turnsBackwardsCursor` and `itemsBackwardsCursor` for the durable history visible at the resume boundary. Pass each cursor directly to its matching list API with `sortDirection: "desc"`; the first page includes the cursor's head row, while newer records arrive through live notifications. Either cursor is `null` when there is no durable row yet.
+Paginated threads keep the same resume contract as legacy threads. A default resume materializes the full projected history into `thread.turns`; `excludeTurns: true` keeps that array empty and includes `turnsBackwardsCursor` and `itemsBackwardsCursor` for the durable history visible at the resume boundary. Pass each cursor directly to its matching list API with `sortDirection: "desc"`; the first page includes the row identified by the cursor, while newer records arrive through live notifications. Either cursor is `null` when there is no durable row yet.
 
 Only one app-server process can hold a paginated thread open for writing at a time. If another process already owns the thread, `thread/resume`, `thread/archive`, and `thread/delete` fail with JSON-RPC error `-32600`. Archive and deletion also fail if another process owns any spawned descendant. Read-only requests remain available without resuming the thread.
 
@@ -379,8 +383,8 @@ Example:
 } }
 { "id": 12, "result": {
     "thread": { "id": "thr_123", "turns": [], … },
-    "turnsBackwardsCursor": "turn-head-cursor-or-null",
-    "itemsBackwardsCursor": "item-head-cursor-or-null"
+    "turnsBackwardsCursor": "turn-backwards-cursor-or-null",
+    "itemsBackwardsCursor": "item-backwards-cursor-or-null"
 } }
 
 { "method": "thread/resume", "id": 13, "params": {
@@ -779,6 +783,30 @@ Use `thread/goal/clear` to remove the current goal.
 { "method": "thread/goal/cleared", "params": { "threadId": "thr_123" } }
 ```
 
+### Example: Queue a follow-up user turn (experimental)
+
+Queued turns require `capabilities.experimentalApi = true`. Use `thread/queue/add` to persist a follow-up while a turn is running. Each thread can queue up to 100 messages, and the server starts the next queued turn when the thread becomes idle.
+
+A queued submission contains its user input and a required, client-provided `clientUserMessageId`. The server assigns a separate stable submission ID and preserves both IDs when the submission is edited. Application context and Responses API client metadata remain available on ordinary `turn/start`; queued submissions do not persist or replay those optional turn features.
+
+```json
+{ "method": "thread/queue/add", "id": 40, "params": {
+    "threadId": "thr_123",
+    "input": [{ "type": "text", "text": "Now fix the failing tests." }],
+    "clientUserMessageId": "019faba0-0000-7000-8000-000000000003"
+} }
+{ "id": 40, "result": { "queuedSubmission": {
+    "id": "019faba0-0000-7000-8000-000000000001",
+    "input": [{ "type": "text", "text": "Now fix the failing tests." }],
+    "clientUserMessageId": "019faba0-0000-7000-8000-000000000003"
+} } }
+{ "method": "thread/queue/changed", "params": { "threadId": "thr_123" } }
+```
+
+Use `thread/queue/list` to read the ordered queue. Pass optional `cursor` and `limit` values to request a page, and continue with the returned `nextCursor` until it is `null`. Each `thread/queue/changed` notification contains the changed `threadId`; fetch the current pages to refresh the queue. Update a queued turn by passing its `queuedSubmissionId` and replacement `input` to `thread/queue/update`; the submission keeps its IDs and position. Pass that ID to `thread/queue/delete` to remove it, or pass every queued ID in its new order as `queuedSubmissionIds` to `thread/queue/reorder`.
+
+Completed and failed turns automatically start the next queued submission. Interrupted turns leave the queue paused, including after `thread/resume`. Start the queue head with `thread/queue/start`, or select a queued submission by passing `queuedSubmissionId`. An idle thread starts a new turn and returns it; an active thread returns an invalid-request error and leaves the queue unchanged. The queued submission's client message ID remains stable, and its queue entry is removed when Core accepts the new turn. An ordinary `turn/start` does not consume queued submissions.
+
 ### Example: Archive a thread
 
 Use `thread/archive` to move the persisted rollout (stored as a JSONL file on disk) into the archived sessions directory and attempt to move any spawned descendant thread rollouts.
@@ -880,7 +908,7 @@ required_on_models = ["protected-model"]
 ignore_rules = ["protected-model"]
 ```
 
-Models in `required_on_models` always start with `approvalPolicy: "on-request"` and `approvalsReviewer: "auto_review"`, even when clients provide incompatible startup values. Full Access is automatically downgraded to workspace-write access. Incompatible runtime overrides or disabled Guardian automatic review are rejected. Models in `ignore_rules` ignore saved command-prefix approvals.
+Models in `required_on_models` use `approvalsReviewer: "auto_review"` while preserving any valid configured `approvalPolicy`. Full Access is downgraded to workspace-write access. Incompatible runtime overrides or disabled Guardian automatic review are rejected. Models in `ignore_rules` ignore saved command-prefix approvals.
 
 ```json
 { "method": "turn/start", "id": 30, "params": {
@@ -1634,6 +1662,7 @@ There are additional item-specific events:
 - `ContextWindowExceeded`
 - `SessionBudgetExceeded`
 - `UsageLimitExceeded`
+- `misalignmentPolicyViolation`: a non-retryable request blocked by the misalignment policy
 - `HttpConnectionFailed { httpStatusCode? }`: upstream HTTP failures including 4xx/5xx
 - `ResponseStreamConnectionFailed { httpStatusCode? }`: failure to connect to the response SSE stream
 - `ResponseStreamDisconnected { httpStatusCode? }`: disconnect of the response SSE stream in the middle of a turn before completion
@@ -1932,9 +1961,11 @@ For linked Git worktrees, project hook declarations come from the matching `.cod
 
 Hooks are returned even when disabled so clients can render and re-enable them. User-controlled state lives under `hooks.state`. Managed hooks are non-configurable, and user entries for managed hook keys are ignored during loading.
 
-`executionMode` reports how a command hook runs. `sync` hooks participate in the current operation, while `async` hooks run in the background and deliver informational output through the existing steer-based injection path. Output is injected immediately into an active turn or persisted without starting a new turn when the session is idle.
+A command hook's `async` field reports its effective execution behavior. Hooks with `async: false` participate in the current operation, while hooks with `async: true` run in the background and deliver informational output through the existing steer-based injection path. Output is injected immediately into an active turn or persisted without starting a new turn when the session is idle. MCP tool hooks do not have an `async` field and always run synchronously. Lifecycle notifications continue to report `executionMode` on hook run summaries.
 
 For unmanaged hooks, `currentHash` and `trustStatus` describe whether the current definition is first-seen, approved, or changed since approval. Only trusted unmanaged hooks become runnable. Hook keys combine the source identity with a trailing event/group/handler selector that is currently positional.
+
+MCP tool hooks appear with `handlerType: "mcpTool"`. Their `server` and `tool` fields identify the configured MCP target. Command hooks instead include a `command` field.
 
 ```json
 {
@@ -1956,7 +1987,7 @@ For unmanaged hooks, `currentHash` and `trustStatus` describe whether the curren
         "key": "/Users/me/.codex/config.toml:pre_tool_use:0:0",
         "eventName": "pre_tool_use",
         "handlerType": "command",
-        "executionMode": "sync",
+        "async": false,
         "isManaged": false,
         "matcher": "Bash",
         "command": "python3 /Users/me/hook.py",
@@ -2215,7 +2246,7 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 - `account/updated` (notify) — emitted whenever auth mode changes (`authMode`: `apikey`, `bedrockApiKey`, `chatgpt`, `personalAccessToken`, or `null`) and includes the current ChatGPT `planType` when available.
 - `account/rateLimits/read` — fetch ChatGPT rate limits, an optional effective monthly credit limit, whether spend control has been reached, and the earned rate-limit resets currently available, including expiry details when provided by the backend. Rate-limit updates arrive via `account/rateLimits/updated` (notify); reset-credit data is snapshot-only.
 - `account/rateLimitResetCredit/consume` — consume one earned reset using a caller-provided idempotency key, optionally selecting a reset-credit ID returned by `account/rateLimits/read`.
-- `account/usage/read` — fetch ChatGPT account token-activity summary and daily buckets.
+- `account/usage/read` — fetch ChatGPT account token-activity summary and daily buckets, or pass a valid thread UUID as `threadId` to read estimated credits, optional cost, and usage breakdowns for one thread using the app-server's active account. The optional `threadUsage` response field is absent on older servers and `null` when the billing route is unavailable.
 - `account/workspaceMessages/read` — fetch active workspace messages, including workspace notification headlines when available.
 - `account/rateLimits/updated` (notify) — emitted whenever a user's ChatGPT rate limits change. This is a sparse rolling update; merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot.
   `spendControlReached` is `true` or `false` when the backend reports spend-control state; `null` means unavailable and must not clear a previously observed value in a sparse update.

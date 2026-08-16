@@ -21,11 +21,12 @@ pub fn apply_rollout_item(
         RolloutItem::SessionMeta(meta_line) => apply_session_meta_from_item(metadata, meta_line),
         RolloutItem::TurnContext(turn_ctx) => apply_turn_context(metadata, turn_ctx),
         RolloutItem::EventMsg(event) => apply_event_msg(metadata, event),
-        RolloutItem::ResponseItem(item) => apply_response_item(metadata, item),
+        RolloutItem::ResponseItem(item) => apply_response_item(metadata, &item.item),
         RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
         RolloutItem::Compacted(_) => {}
         RolloutItem::WorldState(_) => {}
+        RolloutItem::SecurityRiskScore(_) => {}
     }
     if metadata.model_provider.is_empty() {
         metadata.model_provider = default_provider.to_string();
@@ -52,6 +53,7 @@ pub fn rollout_item_affects_thread_metadata(item: &RolloutItem) -> bool {
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
+        | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::WorldState(_) => false,
     }
 }
@@ -206,15 +208,18 @@ mod tests {
     #[test]
     fn response_item_user_messages_do_not_set_title_or_first_user_message() {
         let mut metadata = metadata_for_test();
-        let item = RolloutItem::ResponseItem(ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "hello from response item".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        });
+        let item = RolloutItem::ResponseItem(
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "hello from response item".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        );
 
         apply_rollout_item(&mut metadata, &item, "test-provider");
 

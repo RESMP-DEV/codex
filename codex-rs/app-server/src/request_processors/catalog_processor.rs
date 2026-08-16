@@ -1,5 +1,6 @@
 use super::*;
 use codex_core::config::permission_profile_catalog;
+use codex_hooks::HookListEntryHandler;
 use futures::StreamExt;
 
 #[derive(Clone)]
@@ -16,7 +17,7 @@ pub(crate) struct CatalogRequestProcessor {
 const SKILLS_LIST_CWD_CONCURRENCY: usize = 5;
 
 fn skills_to_info(
-    skills: &[codex_core::skills::SkillMetadata],
+    skills: &[codex_skills::SkillMetadata],
     disabled_paths: &HashSet<AbsolutePathBuf>,
 ) -> Vec<codex_app_server_protocol::SkillMetadata> {
     skills
@@ -66,30 +67,42 @@ fn skills_to_info(
 fn hooks_to_info(hooks: &[codex_hooks::HookListEntry]) -> Vec<HookMetadata> {
     hooks
         .iter()
-        .map(|hook| HookMetadata {
-            key: hook.key.clone(),
-            event_name: hook.event_name.into(),
-            handler_type: hook.handler_type.into(),
-            execution_mode: hook.execution_mode.into(),
-            matcher: hook.matcher.clone(),
-            command: hook.command.clone(),
-            timeout_sec: hook.timeout_sec,
-            status_message: hook.status_message.clone(),
-            additional_context_limit: hook.additional_context_limit,
-            source_path: hook.source_path.clone(),
-            source: hook.source.into(),
-            plugin_id: hook.plugin_id.clone(),
-            display_order: hook.display_order,
-            enabled: hook.enabled,
-            is_managed: hook.is_managed,
-            current_hash: hook.current_hash.clone(),
-            trust_status: hook.trust_status.into(),
+        .map(|hook| {
+            let handler = match &hook.handler {
+                HookListEntryHandler::Command { command, r#async } => {
+                    HookHandlerMetadata::Command {
+                        command: command.clone(),
+                        r#async: *r#async,
+                    }
+                }
+                HookListEntryHandler::McpTool { server, tool } => HookHandlerMetadata::McpTool {
+                    server: server.clone(),
+                    tool: tool.clone(),
+                },
+            };
+            HookMetadata {
+                key: hook.key.clone(),
+                event_name: hook.event_name.into(),
+                handler,
+                matcher: hook.matcher.clone(),
+                timeout_sec: hook.timeout_sec,
+                status_message: hook.status_message.clone(),
+                additional_context_limit: hook.additional_context_limit,
+                source_path: hook.source_path.clone(),
+                source: hook.source.into(),
+                plugin_id: hook.plugin_id.clone(),
+                display_order: hook.display_order,
+                enabled: hook.enabled,
+                is_managed: hook.is_managed,
+                current_hash: hook.current_hash.clone(),
+                trust_status: hook.trust_status.into(),
+            }
         })
         .collect()
 }
 
 fn errors_to_info(
-    errors: &[codex_core::skills::SkillError],
+    errors: &[codex_skills::SkillError],
 ) -> Vec<codex_app_server_protocol::SkillErrorInfo> {
     errors
         .iter()
@@ -533,7 +546,6 @@ impl CatalogRequestProcessor {
         let skills_request = skills_service.for_request();
         let mut data = futures::stream::iter(cwds.into_iter().enumerate())
             .map(|(index, cwd)| {
-                let config = &config;
                 let fs = fs.clone();
                 let skills_request = &skills_request;
                 let effective_skill_roots = effective_skill_roots.clone();
@@ -556,11 +568,10 @@ impl CatalogRequestProcessor {
                             );
                         }
                     };
-                    let skills_input = codex_core::skills::HostSkillsLoadInput::new(
+                    let skills_input = codex_skills_extension::HostSkillsLoadInput::new(
                         cwd_abs.clone(),
                         effective_skill_roots,
                         config_layer_stack,
-                        config.bundled_skills_enabled(),
                     )
                     .with_plugin_skill_snapshots(plugin_skill_snapshots);
                     let snapshot = skills_request

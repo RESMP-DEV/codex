@@ -159,16 +159,30 @@ pub async fn load_config_layers_state(
                 ),
             )
         })?;
-        Some(ConfigLayerEntry::new(
+        ConfigLayerEntry::new(
             ConfigLayerSource::PackagedDefaults { file: file.clone() },
             resolve_relative_paths_in_config_toml(config, base_dir)?,
-        ))
+        )
     } else {
-        None
+        let file = AbsolutePathBuf::from_absolute_path(std::env::current_exe()?)?;
+        let raw_toml = include_str!("../../defaults.toml");
+        let config = toml::from_str(raw_toml).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid embedded packaged defaults; this is a Codex build error: {error}"),
+            )
+        })?;
+        ConfigLayerEntry::new_with_raw_toml(
+            ConfigLayerSource::PackagedDefaults { file },
+            config,
+            raw_toml.to_owned(),
+            AbsolutePathBuf::from_absolute_path(codex_home)?,
+        )
     };
     let active_user_profile = overrides.user_config_profile.clone();
     let ignore_managed_requirements = overrides.ignore_managed_requirements;
     let ignore_user_config = overrides.ignore_user_config;
+    let ignore_project_config = overrides.ignore_project_config;
     let ignore_user_and_project_exec_policy_rules =
         overrides.ignore_user_and_project_exec_policy_rules;
     let mut requirements_layers = Vec::new();
@@ -250,7 +264,7 @@ pub async fn load_config_layers_state(
         .map_err(io::Error::other)?;
 
     let mut layers = Vec::<ConfigLayerEntry>::new();
-    layers.extend(packaged_defaults_layer);
+    layers.push(packaged_defaults_layer);
 
     let cli_overrides_layer = if cli_overrides.is_empty() {
         None
@@ -340,7 +354,7 @@ pub async fn load_config_layers_state(
     }
 
     let mut startup_warnings = None;
-    if let Some(cwd) = cwd {
+    if !ignore_project_config && let Some(cwd) = cwd {
         let mut merged_so_far = TomlValue::Table(toml::map::Map::new());
         for layer in &layers {
             merge_toml_values(&mut merged_so_far, &layer.config);
@@ -715,6 +729,25 @@ fn system_requirements_toml_file_with_overrides(
         Some(path) => AbsolutePathBuf::from_absolute_path(path),
         None => system_requirements_toml_file(),
     }
+}
+
+/// Check local managed configuration sources without loading or parsing configuration.
+///
+/// Filesystem or managed-preference errors are returned so callers can conservatively avoid
+/// assuming that administrator-controlled configuration is absent.
+pub fn has_local_managed_configuration(codex_home: &Path) -> io::Result<bool> {
+    if layer_io::managed_config_default_path(codex_home).try_exists()?
+        || system_requirements_toml_file()?.as_path().try_exists()?
+    {
+        return Ok(true);
+    }
+
+    #[cfg(target_os = "macos")]
+    if macos::has_managed_preferences()? {
+        return Ok(true);
+    }
+
+    Ok(false)
 }
 
 #[cfg(unix)]

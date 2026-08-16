@@ -2,7 +2,6 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use crate::RolloutItem;
 use codex_otel::MetricsClient;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
@@ -10,6 +9,8 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadHistoryMode;
 
+use crate::ResponseItemEnvelope;
+use crate::RolloutItem;
 use crate::policy::is_persisted_rollout_item;
 
 const ITEM_BYTES_METRIC: &str = "codex.rollout.persistence.item_bytes";
@@ -235,6 +236,7 @@ fn rollout_item_type(item: &RolloutItem) -> String {
         RolloutItem::Compacted(_) => "compacted".to_string(),
         RolloutItem::TurnContext(_) => "turn_context".to_string(),
         RolloutItem::WorldState(_) => "world_state".to_string(),
+        RolloutItem::SecurityRiskScore(_) => "security_risk_score".to_string(),
         RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => {
             format!("event.item_completed.{}", turn_item_type(&event.item))
         }
@@ -265,8 +267,8 @@ fn turn_item_type(item: &TurnItem) -> &'static str {
     }
 }
 
-fn response_item_type(item: &ResponseItem) -> &'static str {
-    match item {
+fn response_item_type(item: &ResponseItemEnvelope) -> &'static str {
+    match &item.item {
         ResponseItem::Message { .. } => "response.message",
         ResponseItem::AdditionalTools { .. } => "response.additional_tools",
         ResponseItem::AgentMessage { .. } => "response.agent_message",

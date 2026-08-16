@@ -1,7 +1,9 @@
+use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_protocol::models::ShellCommandToolCallParams;
 use codex_tools::ShellCommandBackendConfig;
 use codex_tools::ToolName;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 
 use crate::exec::ExecCapturePolicy;
 use crate::exec::ExecParams;
@@ -99,8 +101,10 @@ impl ShellCommandHandler {
             .shell
             .as_ref()
             .unwrap_or(session_shell.as_ref());
-        let use_login_shell =
-            Self::resolve_use_login_shell(params.login, turn_environment.config.allow_login_shell)?;
+        let use_login_shell = Self::resolve_use_login_shell(
+            params.login,
+            turn_environment.config().allow_login_shell,
+        )?;
         let command = Self::base_command(shell, &params.command, use_login_shell);
 
         let mut env = create_env(
@@ -123,7 +127,7 @@ impl ShellCommandHandler {
             capture_policy: ExecCapturePolicy::ShellTool,
             env,
             network: turn_context.network.clone(),
-            network_environment_id: Some(turn_environment.environment_id.clone()),
+            network_environment_id: Some(turn_environment.selection.environment_id.clone()),
             sandbox_permissions,
             windows_sandbox_level: turn_context.windows_sandbox_level,
             windows_sandbox_private_desktop: turn_context
@@ -208,7 +212,9 @@ impl ShellCommandHandler {
             session.as_ref(),
             turn.as_ref(),
             &params.command,
-            &cwd,
+            &PathUri::from_abs_path(&cwd),
+            Some(&cwd),
+            LOCAL_ENVIRONMENT_ID,
         )
         .await;
         let prefix_rule = params.prefix_rule.clone();

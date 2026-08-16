@@ -1,5 +1,4 @@
 use crate::CodexAppsToolsCache;
-use crate::HostSkillsService;
 use crate::agent::AgentControl;
 use crate::attestation::AttestationProvider;
 use crate::codex_thread::CodexThread;
@@ -68,6 +67,7 @@ use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout::state_db::StateDbHandle;
+use codex_skills_extension::HostSkillsService;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::LocalThreadStore;
@@ -115,19 +115,6 @@ pub(crate) type ThreadIdGenerator = Arc<dyn Fn() -> ThreadId + Send + Sync>;
 fn capture_test_op(op: &Op) -> Option<Op> {
     match op {
         Op::Interrupt => Some(Op::Interrupt),
-        Op::UserInput {
-            items,
-            final_output_json_schema,
-            responsesapi_client_metadata,
-            additional_context,
-            thread_settings,
-        } => Some(Op::UserInput {
-            items: items.clone(),
-            final_output_json_schema: final_output_json_schema.clone(),
-            responsesapi_client_metadata: responsesapi_client_metadata.clone(),
-            additional_context: additional_context.clone(),
-            thread_settings: thread_settings.clone(),
-        }),
         Op::InterAgentCommunication { communication } => Some(Op::InterAgentCommunication {
             communication: communication.clone(),
         }),
@@ -685,6 +672,22 @@ impl ThreadManager {
         }
     }
 
+    /// Rebuilds loaded hook runtimes without reloading their session configurations.
+    pub async fn refresh_hook_runtimes(&self) {
+        let threads = self
+            .state
+            .threads
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for thread in threads {
+            let config = thread.session.get_config().await;
+            thread.session.refresh_hooks(config).await;
+        }
+    }
+
     fn invalidate_starting_mcp_runtimes(&self) {
         let mut starting = self
             .state
@@ -772,7 +775,8 @@ impl ThreadManager {
     ///
     /// Loaded threads route through `CodexThread`/`LiveThread`, so metadata changes stay ordered
     /// with live rollout writes. Cold threads go directly to the store, which owns unloaded JSONL
-    /// compatibility and SQLite metadata updates.
+    /// compatibility and SQLite metadata updates. This API always returns a materialized thread;
+    /// if the store reports a successful no-op without one, it performs a fallback read.
     pub async fn update_thread_metadata(
         &self,
         thread_id: ThreadId,
@@ -790,7 +794,8 @@ impl ThreadManager {
                 .await
                 .map_err(|err| thread_store_metadata_update_error(thread_id, err));
         }
-        self.state
+        let updated = self
+            .state
             .thread_store
             .update_thread_metadata(UpdateThreadMetadataParams {
                 thread_id,
@@ -803,7 +808,20 @@ impl ThreadManager {
                     CodexErr::ThreadNotFound(thread_id)
                 }
                 err => thread_store_metadata_update_error(thread_id, err),
-            })
+            })?;
+        match updated {
+            Some(thread) => Ok(thread),
+            None => self
+                .state
+                .thread_store
+                .read_thread(ReadThreadParams {
+                    thread_id,
+                    include_archived,
+                    include_history: false,
+                })
+                .await
+                .map_err(|err| thread_store_metadata_update_error(thread_id, err)),
+        }
     }
 
     /// Moves a persisted thread to, within, or out of a server-ordered section.
@@ -1036,6 +1054,26 @@ impl ThreadManager {
     /// Returns the thread if the thread was found and removed.
     pub async fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<CodexThread>> {
         self.state.threads.write().await.remove(thread_id)
+    }
+
+    /// Removes a thread only if `thread_id` still maps to `expected`.
+    ///
+    /// Delayed cleanup uses this to avoid removing a replacement runtime registered under the
+    /// same thread ID.
+    pub async fn remove_thread_if_matches(
+        &self,
+        thread_id: &ThreadId,
+        expected: &Arc<CodexThread>,
+    ) -> Option<Arc<CodexThread>> {
+        let mut threads = self.state.threads.write().await;
+        if threads
+            .get(thread_id)
+            .is_some_and(|thread| Arc::ptr_eq(thread, expected))
+        {
+            threads.remove(thread_id)
+        } else {
+            None
+        }
     }
 
     /// Tries to shut down all tracked threads concurrently within the provided timeout.
@@ -1374,6 +1412,7 @@ impl ThreadManagerState {
         thread_id: ThreadId,
         op: Op,
         parent_turn_id: Option<String>,
+        root_turn_id: Option<String>,
     ) -> CodexResult<String> {
         let thread = self.get_thread(thread_id).await?;
         if let Some(ops_log) = &self.ops_log
@@ -1384,7 +1423,7 @@ impl ThreadManagerState {
         }
         thread
             .io
-            .submit_with_trace(op, /*trace*/ None, parent_turn_id)
+            .submit_with_trace(op, /*trace*/ None, parent_turn_id, root_turn_id)
             .await
     }
 
@@ -2120,14 +2159,14 @@ fn append_interrupted_boundary(
         InitialHistory::New | InitialHistory::Cleared => {
             let mut history = Vec::new();
             if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
-                history.push(RolloutItem::ResponseItem(marker));
+                history.push(RolloutItem::ResponseItem(marker.into()));
             }
             history.push(aborted_event);
             InitialHistory::Forked(history)
         }
         InitialHistory::Forked(mut history) => {
             if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
-                history.push(RolloutItem::ResponseItem(marker));
+                history.push(RolloutItem::ResponseItem(marker.into()));
             }
             history.push(aborted_event);
             InitialHistory::Forked(history)
@@ -2135,7 +2174,7 @@ fn append_interrupted_boundary(
         InitialHistory::Resumed(resumed) => {
             let mut history = Arc::unwrap_or_clone(resumed.history);
             if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
-                history.push(RolloutItem::ResponseItem(marker));
+                history.push(RolloutItem::ResponseItem(marker.into()));
             }
             history.push(aborted_event);
             InitialHistory::Forked(history)

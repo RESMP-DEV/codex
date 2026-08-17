@@ -319,6 +319,53 @@ async fn cyber_model_auto_review_notice_snapshot() -> Result<()> {
 }
 
 #[tokio::test]
+#[serial_test::serial]
+async fn external_editor_writable_directory_rejected_snapshot() -> Result<()> {
+    struct RestoreVisual(Option<std::ffi::OsString>);
+
+    impl Drop for RestoreVisual {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => unsafe { std::env::set_var("VISUAL", value) },
+                None => unsafe { std::env::remove_var("VISUAL") },
+            }
+        }
+    }
+
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let codex_home = app.chat_widget.config_ref().codex_home.clone();
+    let fallback_home = dirs::home_dir()
+        .expect("home directory")
+        .join(".codex")
+        .abs();
+    let workspace_codex_home = app.chat_widget.config_ref().cwd.join(".codex");
+    let permission_profile = PermissionProfile::workspace_write_with(
+        &[codex_home, fallback_home, workspace_codex_home],
+        codex_protocol::permissions::NetworkSandboxPolicy::Restricted,
+        /*exclude_tmpdir_env_var*/ true,
+        /*exclude_slash_tmp*/ true,
+    );
+    app.chat_widget
+        .set_permission_profile_from_session_snapshot(PermissionProfileSnapshot::legacy(
+            permission_profile,
+        ))?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let restore_visual = RestoreVisual(std::env::var_os("VISUAL"));
+    unsafe { std::env::set_var("VISUAL", "editor") };
+
+    app.launch_external_editor(&mut tui).await;
+    drop(restore_visual);
+
+    let cell = match app_event_rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        other => panic!("expected InsertHistoryCell event, got {other:?}"),
+    };
+    let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
+    assert_app_snapshot!("external_editor_writable_directory_rejected", rendered);
+    Ok(())
+}
+
+#[tokio::test]
 async fn enqueue_primary_thread_session_replays_buffered_approval_after_attach() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let thread_id = ThreadId::new();
@@ -4820,6 +4867,7 @@ async fn make_test_app() -> App {
         chat_widget,
         workspace_command_runner: None,
         launch_cwd: config.cwd.to_path_buf(),
+        runtime_working_directory_override: None,
         config,
         state_db: None,
         cli_kv_overrides: Vec::new(),
@@ -4895,6 +4943,7 @@ async fn make_test_app_with_channels() -> (
             chat_widget,
             workspace_command_runner: None,
             launch_cwd: config.cwd.to_path_buf(),
+            runtime_working_directory_override: None,
             config,
             state_db: None,
             cli_kv_overrides: Vec::new(),
@@ -6315,12 +6364,16 @@ async fn remote_resume_keeps_server_only_cwd_out_of_local_config() -> Result<()>
 
 #[tokio::test]
 async fn in_app_resume_uses_configured_or_explicit_cwd() -> Result<()> {
-    for (configured_mode, has_explicit_cwd, has_remote_exec, expected_directory) in [
-        ("current", false, false, "launch"),
-        ("session", false, false, "session"),
-        ("session", true, false, "explicit"),
-        ("session", false, true, "session"),
-        ("session", true, true, "explicit"),
+    for (configured_mode, has_explicit_cwd, has_remote_exec, has_runtime_cwd, expected_directory) in [
+        ("current", false, false, false, "launch"),
+        ("session", false, false, false, "session"),
+        ("session", true, false, false, "explicit"),
+        ("session", false, true, false, "session"),
+        ("session", true, true, false, "explicit"),
+        ("current", false, false, true, "runtime"),
+        ("current", true, false, true, "runtime"),
+        ("session", false, false, true, "runtime"),
+        ("session", true, false, true, "runtime"),
     ] {
         let temp_dir = tempdir()?;
         let codex_home = temp_dir.path().join("codex-home");
@@ -6328,15 +6381,25 @@ async fn in_app_resume_uses_configured_or_explicit_cwd() -> Result<()> {
         let active_cwd = temp_dir.path().join("active");
         let session_cwd = temp_dir.path().join("session");
         let explicit_cwd = temp_dir.path().join("explicit");
+        let runtime_cwd = temp_dir.path().join("runtime");
         std::fs::create_dir_all(&codex_home)?;
         std::fs::create_dir_all(&launch_cwd)?;
         std::fs::create_dir_all(&active_cwd)?;
         std::fs::create_dir_all(&session_cwd)?;
         std::fs::create_dir_all(&explicit_cwd)?;
+        std::fs::create_dir_all(&runtime_cwd)?;
         std::fs::write(
             codex_home.join("config.toml"),
             format!("[tui]\nresume_cwd = \"{configured_mode}\"\n"),
         )?;
+        if has_runtime_cwd {
+            crate::legacy_core::config::set_project_trust_level(
+                codex_home.as_path(),
+                runtime_cwd.as_path(),
+                codex_protocol::config_types::TrustLevel::Trusted,
+            )
+            .map_err(|error| color_eyre::eyre::eyre!(error.to_string()))?;
+        }
         let config = ConfigBuilder::default()
             .codex_home(codex_home.clone())
             .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
@@ -6408,6 +6471,30 @@ async fn in_app_resume_uses_configured_or_explicit_cwd() -> Result<()> {
         app.chat_widget
             .handle_thread_session_quiet(test_thread_session(ThreadId::new(), active_cwd));
         let mut tui = crate::tui::test_support::make_test_tui()?;
+        if has_runtime_cwd {
+            let started = app_server
+                .start_thread_with_session_start_source(
+                    &app.config,
+                    /*session_start_source*/ None,
+                )
+                .await?;
+            let empty_thread_id = started.session.thread_id;
+            app.replace_chat_widget_with_app_server_thread(
+                &mut tui,
+                started,
+                crate::app::session_lifecycle::ThreadAttachPresentation::SessionLineage,
+                /*initial_user_message*/ None,
+            )
+            .await?;
+            app.change_working_directory(&mut tui, &mut app_server, runtime_cwd.clone().abs())
+                .await;
+
+            assert_ne!(app.chat_widget.thread_id(), Some(empty_thread_id));
+            assert_eq!(
+                app.runtime_working_directory_override.as_deref(),
+                Some(runtime_cwd.as_path()),
+            );
+        }
 
         let control = app
             .resume_target_session(

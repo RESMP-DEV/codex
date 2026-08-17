@@ -16,6 +16,7 @@ use codex_protocol::SessionId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSpecialPath;
@@ -90,6 +91,8 @@ pub(crate) struct SessionConfiguration {
     /// active profile id, and profile-defined workspace roots in sync by using
     /// the methods below instead of mutating the fields independently.
     pub(super) permission_profile_state: PermissionProfileState,
+    pub(super) allow_login_shell: bool,
+    pub(super) shell_environment_policy: ShellEnvironmentPolicy,
     pub(super) windows_sandbox_level: WindowsSandboxLevel,
 
     /// Legacy thread cwd used when a turn does not select an environment.
@@ -136,13 +139,11 @@ impl SessionConfiguration {
         &self.permission_profile_state
     }
 
-    pub(super) fn turn_environment_config(&self) -> EnvironmentConfig {
+    pub(super) fn inferred_environment_config(&self) -> EnvironmentConfig {
         EnvironmentConfig {
-            allow_login_shell: self
-                .original_config_do_not_use
-                .permissions
-                .allow_login_shell,
+            allow_login_shell: self.allow_login_shell,
             permission_profile: self.permission_profile_state.snapshot(),
+            shell_environment_policy: self.shell_environment_policy.clone(),
             selected_capability_roots: Vec::new(),
         }
     }
@@ -605,6 +606,7 @@ impl Session {
         mut thread_extension_init: ExtensionDataInit,
         client_mcp_extensions: ClientMcpExtensions,
         agent_control: AgentControl,
+        reserved_thread_id: Option<ThreadId>,
         environment_manager: Arc<EnvironmentManager>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         analytics_events_client: Option<AnalyticsEventsClient>,
@@ -663,11 +665,20 @@ impl Session {
         let multi_agent_version = multi_agent_version.map(OnceLock::from).unwrap_or_default();
         let initial_multi_agent_version = multi_agent_version.get().copied();
 
-        let thread_id = match &initial_history {
-            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
+        let thread_id = match (&initial_history, reserved_thread_id) {
+            (
+                InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_),
+                Some(thread_id),
+            ) => thread_id,
+            (InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_), None) => {
                 agent_control.generate_thread_id()
             }
-            InitialHistory::Resumed(resumed_history) => resumed_history.conversation_id,
+            (InitialHistory::Resumed(resumed_history), None) => resumed_history.conversation_id,
+            (InitialHistory::Resumed(_), Some(_)) => {
+                return Err(anyhow::anyhow!(
+                    "reserved thread ID cannot be used when resuming a thread"
+                ));
+            }
         };
         let resumed_session_id = match &initial_history {
             InitialHistory::Resumed(resumed) => {
@@ -1070,14 +1081,14 @@ impl Session {
             let turn_environments = Arc::new(ThreadEnvironments::new(
                 environment_manager,
                 default_shell.clone(),
-                session_configuration.turn_environment_config(),
+                session_configuration.inferred_environment_config(),
                 shell_snapshot,
                 inherited_environments.unwrap_or_default(),
                 config.features.enabled(Feature::DeferredExecutor),
             ));
             turn_environments.update_selections(
                 environment_selections,
-                &session_configuration.turn_environment_config(),
+                &session_configuration.inferred_environment_config(),
             );
             let resolved_environments = turn_environments.snapshot().await;
             let agents_md_manager = Arc::new(AgentsMdManager::new(user_instructions));

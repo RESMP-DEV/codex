@@ -34,10 +34,26 @@ fn validate_environment_config(
     selection: &TurnEnvironmentSelection,
     config: &EnvironmentConfig,
 ) -> CodexResult<()> {
+    // The public type can be used by owners before runtime enforcement lands. Do not
+    // accept restrictions here until the managed proxy can actually enforce them.
+    if config.network_policy.is_some() {
+        return Err(CodexErr::InvalidRequest(
+            "attachment-owned network policy is not supported yet".to_string(),
+        ));
+    }
     if config.selected_capability_roots.len() > MAX_SELECTED_CAPABILITY_ROOTS {
         return Err(CodexErr::InvalidRequest(format!(
             "environment readiness contains more than {MAX_SELECTED_CAPABILITY_ROOTS} selected capability roots"
         )));
+    }
+    if config
+        .exec_policy
+        .as_ref()
+        .is_some_and(|policy| !policy.as_ref().get_allowed_prefixes().is_empty())
+    {
+        return Err(CodexErr::InvalidRequest(
+            "environment command policy cannot contain allow rules".to_string(),
+        ));
     }
 
     let mut root_ids = HashSet::with_capacity(config.selected_capability_roots.len());

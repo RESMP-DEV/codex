@@ -445,6 +445,7 @@ impl App {
                             app_server
                                 .start_thread_with_session_start_source(
                                     &config, /*session_start_source*/ None,
+                                    /*remote_cwd_override*/ None,
                                 )
                                 .await
                         }
@@ -820,6 +821,14 @@ impl App {
             } => {
                 if generation == self.chat_widget.connector_scope_generation() {
                     self.fetch_connectors_list(app_server, force_refetch);
+                }
+            }
+            AppEvent::FetchInstalledConnectorMentions {
+                force_refresh,
+                generation,
+            } => {
+                if generation == self.chat_widget.connector_scope_generation() {
+                    self.fetch_installed_connector_mentions(app_server, force_refresh, generation);
                 }
             }
             AppEvent::PluginInstallAuthAdvance { refresh_connectors } => {
@@ -1351,6 +1360,20 @@ impl App {
                     && generation == self.chat_widget.connector_scope_generation()
                 {
                     self.chat_widget.on_connectors_loaded(result, is_final);
+                }
+            }
+            AppEvent::InstalledConnectorMentionsLoaded {
+                thread_id,
+                cwd,
+                generation,
+                result,
+            } => {
+                if thread_id == self.current_displayed_thread_id()
+                    && cwd.as_path() == self.chat_widget.config_ref().cwd.as_path()
+                    && generation == self.chat_widget.connector_scope_generation()
+                {
+                    self.chat_widget
+                        .on_connector_mentions_loaded(generation, result);
                 }
             }
             AppEvent::UpdateReasoningEffort(effort) => {
@@ -2292,6 +2315,39 @@ impl App {
             AppEvent::OpenApprovalsPopup => {
                 self.chat_widget.open_approvals_popup();
             }
+            AppEvent::OpenAgentsOverview => {
+                self.open_agents_overview(app_server);
+            }
+            AppEvent::AgentsOverviewThreadsLoaded { request_id, result } => {
+                self.apply_agents_overview_thread_refresh(app_server, request_id, result);
+            }
+            AppEvent::SelectAgentsOverviewThread { thread_id } => {
+                match self
+                    .select_agents_overview_thread(tui, app_server, thread_id)
+                    .await?
+                {
+                    AppRunControl::Continue => {}
+                    AppRunControl::Exit(reason) => return Ok(AppRunControl::Exit(reason)),
+                }
+            }
+            AppEvent::DispatchAgentsOverviewTask { prompt, cwd } => {
+                self.dispatch_agents_overview_task(app_server, prompt, cwd)
+                    .await;
+            }
+            AppEvent::RenameAgentsOverviewThread { thread_id, name } => {
+                if let Err(error) = app_server.thread_set_name(thread_id, name.clone()).await {
+                    if let Ok(mut state) = self.agents_overview.view_state.lock() {
+                        state.input = name;
+                        state.renaming = true;
+                    }
+                    self.chat_widget
+                        .add_error_message(format!("Failed to rename task: {error}"));
+                }
+            }
+            AppEvent::StopAgentsOverviewThread { thread_id } => {
+                self.stop_agents_overview_thread(app_server, thread_id)
+                    .await;
+            }
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker(app_server).await;
             }
@@ -2719,6 +2775,8 @@ impl App {
     fn refresh_plugin_mentions_after_config_write(&mut self) {
         self.chat_widget.refresh_plugin_mentions();
         self.chat_widget.submit_op(AppCommand::reload_user_config());
+        self.chat_widget
+            .refresh_connector_mentions(/*force_refresh*/ true);
     }
 
     async fn apply_keymap_clear(&mut self, context: String, action: String) {

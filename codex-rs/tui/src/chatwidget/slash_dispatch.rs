@@ -145,6 +145,7 @@ impl ChatWidget {
     }
 
     pub(super) fn dispatch_command(&mut self, cmd: SlashCommand) {
+        self.flush_completed_command_activity();
         if !self.ensure_slash_command_allowed_in_side_conversation(cmd) {
             return;
         }
@@ -312,7 +313,10 @@ impl ChatWidget {
             SlashCommand::Side | SlashCommand::Btw => {
                 self.request_empty_side_conversation(cmd);
             }
-            SlashCommand::Agent | SlashCommand::MultiAgents => {
+            SlashCommand::Agents => {
+                self.app_event_tx.send(AppEvent::OpenAgentsOverview);
+            }
+            SlashCommand::MultiAgents => {
                 self.app_event_tx.send(AppEvent::OpenAgentPicker);
             }
             SlashCommand::Permissions => {
@@ -1138,7 +1142,7 @@ impl ChatWidget {
             | SlashCommand::Side
             | SlashCommand::Btw
             | SlashCommand::Keymap
-            | SlashCommand::Agent
+            | SlashCommand::Agents
             | SlashCommand::MultiAgents
             | SlashCommand::Permissions
             | SlashCommand::ElevateSandbox

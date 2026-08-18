@@ -1,6 +1,7 @@
 //! Key routing and composer-adjacent UI interaction for `ChatWidget`.
 
 use super::*;
+use crate::bottom_pane::BottomPaneView;
 
 impl ChatWidget {
     pub(crate) fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
@@ -24,6 +25,7 @@ impl ChatWidget {
             let should_pause_active_goal = self
                 .bottom_pane
                 .active_view_will_interrupt_turn_on_key_event(key_event);
+            self.flush_completed_command_activity();
             self.bottom_pane.handle_key_event(key_event);
             if should_pause_active_goal {
                 self.pause_active_goal_for_interrupt();
@@ -110,18 +112,7 @@ impl ChatWidget {
         }
 
         if key_event.kind == KeyEventKind::Press
-            && (self.chat_keymap.edit_queued_message.is_pressed(key_event)
-                || (self.bottom_pane.composer_is_empty()
-                    && self
-                        .bottom_pane
-                        .keymap_contexts()
-                        .contains(crate::keymap::KeymapContext::VimNormal)
-                    && self
-                        .bottom_pane
-                        .runtime_keymap()
-                        .vim_normal
-                        .move_up
-                        .is_pressed(key_event)))
+            && self.chat_keymap.edit_queued_message.is_pressed(key_event)
             && self.has_queued_follow_up_messages()
             && self.bottom_pane.no_modal_or_popup_active()
         {
@@ -194,6 +185,9 @@ impl ChatWidget {
                 let had_modal_or_popup = !self.bottom_pane.no_modal_or_popup_active();
                 let should_pause_active_goal =
                     self.bottom_pane.should_interrupt_running_task(key_event);
+                if key_event.code == KeyCode::Enter {
+                    self.flush_completed_command_activity();
+                }
                 let input_result = self.bottom_pane.handle_key_event(key_event);
                 if should_pause_active_goal {
                     self.pause_active_goal_for_interrupt();
@@ -246,6 +240,21 @@ impl ChatWidget {
         self.bottom_pane.show_selection_view(params);
         self.refresh_plan_mode_nudge();
         self.request_redraw();
+    }
+
+    pub(crate) fn show_bottom_pane_view(&mut self, view: Box<dyn BottomPaneView>) {
+        self.bottom_pane.show_view(view);
+        self.refresh_plan_mode_nudge();
+        self.request_redraw();
+    }
+
+    pub(crate) fn replace_bottom_pane_view_if_present(
+        &mut self,
+        view_id: &'static str,
+        view: Box<dyn BottomPaneView>,
+    ) {
+        self.bottom_pane.replace_view_if_present(view_id, view);
+        self.refresh_plan_mode_nudge();
     }
 
     pub(crate) fn selected_index_for_present_view(&self, view_id: &'static str) -> Option<usize> {

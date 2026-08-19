@@ -415,6 +415,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         sandbox_mode,
         permission_profile: None,
         default_permissions: permission_profile,
+        persisted_permission_profile_id: None,
         cwd: resolved_cwd,
         workspace_roots: None,
         model_provider: model_provider.clone(),

@@ -1421,7 +1421,10 @@ async fn stdio_server_uses_configured_cwd_before_runtime_fallback() -> anyhow::R
             let configured_cwd_uri = PathUri::from_host_native_path(&configured_cwd)?;
             fs.create_directory(
                 &configured_cwd_uri,
-                CreateDirectoryOptions { recursive: true },
+                CreateDirectoryOptions {
+                    recursive: true,
+                    follow_symlinks: true,
+                },
                 /*sandbox*/ None,
             )
             .await?;
@@ -2444,7 +2447,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                     effort: codex_protocol::openai_models::ReasoningEffort::Medium,
                     description: "Medium".to_string(),
                 }],
-                shell_type: ConfigShellToolType::Default,
+                shell_type: ConfigShellToolType::UnifiedExec,
                 visibility: ModelVisibility::List,
                 supported_in_api: true,
                 priority: 1,
@@ -4108,6 +4111,7 @@ fn write_fallback_oauth_tokens(
         "server_name": server_name,
         "url": server_url,
         "client_id": client_id,
+        "issuer": server_url,
         "token_response": {
             "access_token": access_token,
             "token_type": "Bearer",

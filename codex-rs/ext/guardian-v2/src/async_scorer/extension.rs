@@ -49,6 +49,32 @@ struct GuardianAction {
     payload: ToolPayload,
 }
 
+fn should_classify_tool(
+    tool_name: &ToolName,
+    payload: &ToolPayload,
+    sandboxed_exec_commands: bool,
+) -> bool {
+    if sandboxed_exec_commands
+        || !tool_name.is_default_namespace()
+        || tool_name.name != "exec_command"
+    {
+        return true;
+    }
+
+    matches!(
+        payload,
+        ToolPayload::Function { arguments }
+            if serde_json::from_str::<serde_json::Value>(arguments)
+                .ok()
+                .is_some_and(|arguments| {
+                    arguments
+                        .get("sandbox_permissions")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("require_escalated")
+                })
+    )
+}
+
 impl GuardianAction {
     fn render(self, max_action_tokens: usize) -> serde_json::Result<String> {
         let arguments = match self.payload {
@@ -401,6 +427,16 @@ impl GuardianV2Extension {
         let Some(score_progress) = input.thread_store.get::<GuardianV2ScoreProgress>() else {
             return;
         };
+        if !should_classify_tool(
+            input.tool_name,
+            input.payload,
+            guardian_config.sandboxed_exec_commands,
+        ) {
+            score_progress
+                .latest_tool_call
+                .fetch_add(/*val*/ 1, Ordering::Relaxed);
+            return;
+        }
         let metrics = score_progress.metrics.clone();
         let sampled_at = SystemTime::now();
         let parent_model = input.thread_store.get::<ModelInfo>();
@@ -425,21 +461,31 @@ impl GuardianV2Extension {
                 return;
             }
         };
+        if guardian_config.transcript.include_images {
+            input
+                .thread_store
+                .get_or_init(NodeReplReviewEvidence::default)
+                .enable_image_capture();
+        }
         input.thread_store.insert(guardian_config.clone());
         let tool_call_index = score_progress
             .latest_tool_call
             .fetch_add(/*val*/ 1, Ordering::Relaxed)
             .saturating_add(1);
-        let latest_parent_compaction = input
-            .conversation_history
-            .items()
-            .filter(|item| {
-                matches!(
-                    item,
-                    ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
-                )
-            })
-            .last();
+        let latest_parent_compaction = if guardian_config.reuse_parent_compaction {
+            input
+                .conversation_history
+                .items()
+                .filter(|item| {
+                    matches!(
+                        item,
+                        ResponseItem::Compaction { .. } | ResponseItem::ContextCompaction { .. }
+                    )
+                })
+                .last()
+        } else {
+            None
+        };
         let parent_compaction = latest_parent_compaction.and_then(|item| {
             encrypted_parent_compaction(
                 std::iter::once(item),

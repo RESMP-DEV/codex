@@ -471,10 +471,12 @@ impl McpRuntime {
         self.latest_connections().list_all_tools().await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn latest_call_tool(
         &self,
         server: &str,
         tool: &str,
+        environment_id: Option<&str>,
         arguments: Option<serde_json::Value>,
         meta: Option<serde_json::Value>,
         requested_timeout: Option<Duration>,
@@ -484,6 +486,7 @@ impl McpRuntime {
             .call_tool(
                 server,
                 tool,
+                environment_id,
                 arguments,
                 meta,
                 requested_timeout,
@@ -567,6 +570,7 @@ pub struct SandboxState {
 #[derive(Clone)]
 pub struct McpRuntimeContext {
     environment_manager: Arc<EnvironmentManager>,
+    selected_environments: HashMap<String, Arc<Environment>>,
     local_process_cwd: PathBuf,
     local_http_client: Arc<dyn HttpClient>,
 }
@@ -610,9 +614,19 @@ impl McpRuntimeContext {
         );
         Self {
             environment_manager,
+            selected_environments: HashMap::new(),
             local_process_cwd,
             local_http_client,
         }
+    }
+
+    /// Pins the concrete environment handles captured for this thread or model step.
+    pub fn with_selected_environments(
+        mut self,
+        selected_environments: HashMap<String, Arc<Environment>>,
+    ) -> Self {
+        self.selected_environments = selected_environments;
+        self
     }
 
     pub(crate) fn local_process_cwd(&self) -> PathBuf {
@@ -632,8 +646,13 @@ impl McpRuntimeContext {
         // HTTP is the one current exception: it can use the ambient HTTP client
         // even when no local Environment is configured.
         if let Some(environment) = self
-            .environment_manager
-            .get_environment(&config.environment_id)
+            .selected_environments
+            .get(&config.environment_id)
+            .cloned()
+            .or_else(|| {
+                self.environment_manager
+                    .get_environment(&config.environment_id)
+            })
         {
             return Ok(Some(environment));
         }

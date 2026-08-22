@@ -6,6 +6,8 @@ use crate::config::ConstraintError;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::hook_mcp_executor::CoreHookMcpExecutor;
+use crate::responses_metadata::CodexResponsesMetadata;
+use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::state::ActiveTurn;
 use codex_extension_api::ExtensionDataInit;
@@ -638,6 +640,22 @@ impl Session {
         state.session_configuration.originator.clone()
     }
 
+    pub(crate) async fn responses_metadata(
+        &self,
+        turn_context: &TurnContext,
+        request_kind: CodexResponsesRequestKind,
+    ) -> CodexResponsesMetadata {
+        let (window_id, context_window_id) = self.current_window().await;
+        CodexResponsesMetadata {
+            context_window_id: Some(context_window_id),
+            ..turn_context.turn_metadata_state.to_responses_metadata(
+                self.installation_id.clone(),
+                window_id,
+                request_kind,
+            )
+        }
+    }
+
     #[instrument(name = "session_init", level = "info", skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
@@ -1146,7 +1164,21 @@ impl Session {
             } else {
                 shell::default_user_shell()
             };
-            let shell_snapshot = if config.features.enabled(Feature::ShellSnapshot) {
+            let use_executor_shell_snapshots = config.features.enabled(Feature::ShellSnapshotV2)
+                && config.features.enabled(Feature::ShellTool)
+                && config.features.enabled(Feature::UnifiedExec)
+                && matches!(
+                    codex_tools::UnifiedExecShellMode::for_session(
+                        config.features.get(),
+                        crate::tools::tool_user_shell_type(&default_shell),
+                        config.zsh_path.as_ref(),
+                        config.main_execve_wrapper_exe.as_ref(),
+                    ),
+                    codex_tools::UnifiedExecShellMode::Direct
+                );
+            let shell_snapshot = if config.features.enabled(Feature::ShellSnapshot)
+                && !use_executor_shell_snapshots
+            {
                 ShellSnapshot::new(
                     config.codex_home.clone(),
                     thread_id,

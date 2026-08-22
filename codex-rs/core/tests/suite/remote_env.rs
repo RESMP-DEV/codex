@@ -1169,16 +1169,26 @@ impl NoiseRendezvousConnectProvider for FailingNoiseConnectProvider {
     }
 }
 
-struct ReadyNoiseConnectProvider {
+struct OfflineThenReadyNoiseConnectProvider {
     websocket_url: String,
     executor_public_key: NoiseChannelPublicKey,
+    calls: AtomicUsize,
 }
 
-impl NoiseRendezvousConnectProvider for ReadyNoiseConnectProvider {
+impl NoiseRendezvousConnectProvider for OfflineThenReadyNoiseConnectProvider {
     fn connect_bundle(
         &self,
         _: NoiseChannelPublicKey,
     ) -> BoxFuture<'_, std::result::Result<NoiseRendezvousConnectBundle, ExecServerError>> {
+        if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            return Box::pin(async {
+                Err(ExecServerError::EnvironmentRegistryHttp {
+                    status: http::StatusCode::CONFLICT,
+                    code: Some("environment_offline".to_string()),
+                    message: "test environment is offline".to_string(),
+                })
+            });
+        }
         let bundle = NoiseRendezvousConnectBundle {
             websocket_url: self.websocket_url.clone(),
             environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
@@ -1415,7 +1425,7 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn owner_network_policy_is_rejected_until_runtime_enforcement_exists() -> Result<()> {
+async fn owner_network_policy_rejects_unsupported_environment_authority() -> Result<()> {
     let server = start_mock_server().await;
     let test = test_codex().build_with_auto_env(&server).await?;
     let selections = test.codex.environment_selections().await;
@@ -1424,9 +1434,7 @@ async fn owner_network_policy_is_rejected_until_runtime_enforcement_exists() -> 
         .context("thread should select its executor environment")?;
     let owner_config = EnvironmentConfig {
         allow_login_shell: test.config.permissions.allow_login_shell,
-        permission_profile: PermissionProfileSnapshot::legacy(
-            test.config.permissions.permission_profile().clone(),
-        ),
+        permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::Disabled),
         shell_environment_policy: test.config.permissions.shell_environment_policy.clone(),
         exec_policy: None,
         mcp_policy: None,
@@ -1450,15 +1458,23 @@ async fn owner_network_policy_is_rejected_until_runtime_enforcement_exists() -> 
         })
         .await
         .err()
-        .context("preview must not accept an unenforced policy")?;
+        .context("preview must not accept an unsupported environment policy")?;
     let ready_error = test
         .codex
         .environment_ready(selection, owner_config)
         .await
-        .expect_err("readiness must not accept an unenforced policy");
+        .expect_err("readiness must not accept an unsupported environment policy");
 
+    let expected = if selection.environment_id == LOCAL_ENVIRONMENT_ID {
+        "attachment-owned network policy requires a remote executor"
+    } else {
+        "environment network policy requires managed network enforcement"
+    };
     for error in [preview_error.to_string(), ready_error.to_string()] {
-        assert!(error.contains("attachment-owned network policy is not supported yet"));
+        assert!(
+            error.contains(expected),
+            "unexpected validation error: {error}"
+        );
     }
     assert_eq!(test.codex.environment_selections().await, selections);
     Ok(())
@@ -1824,6 +1840,11 @@ async fn ready_before_selection_resolves_resumed_thread_capability_root_after_wa
     } else {
         stale_root.clone()
     };
+    let provider = Arc::new(OfflineThenReadyNoiseConnectProvider {
+        websocket_url: format!("{rendezvous_url}/relay?role=harness"),
+        executor_public_key,
+        calls: AtomicUsize::new(0),
+    });
     let environment = test
         .thread_manager
         .environment_manager()
@@ -1836,10 +1857,7 @@ async fn ready_before_selection_resolves_resumed_thread_capability_root_after_wa
                     Vec::new()
                 },
             }),
-            Arc::new(ReadyNoiseConnectProvider {
-                websocket_url: format!("{rendezvous_url}/relay?role=harness"),
-                executor_public_key,
-            }),
+            provider.clone(),
         )?
         .context("Ready-first report should create the environment")?;
 
@@ -1914,6 +1932,7 @@ async fn ready_before_selection_resolves_resumed_thread_capability_root_after_wa
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
+    assert_eq!(provider.calls.load(Ordering::Relaxed), 2);
     // Provisioning was reported ready before selection, but selection materialization remains
     // nonblocking while the transport starts.
     // The first request may legally see either Starting or Ready; the wait makes step two ready.

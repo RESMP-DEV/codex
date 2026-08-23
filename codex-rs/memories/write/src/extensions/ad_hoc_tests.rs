@@ -48,8 +48,11 @@ async fn propagates_errors_reading_existing_instructions() {
     let err = seed_instructions(&memory_root)
         .await
         .expect_err("directory should not be accepted as instructions file");
+    let direct = tokio::fs::read_to_string(&instructions_path)
+        .await
+        .expect_err("reading a directory should fail");
 
-    assert_ne!(err.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(err.kind(), direct.kind());
 }
 
 #[tokio::test]

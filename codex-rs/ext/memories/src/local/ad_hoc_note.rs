@@ -77,9 +77,10 @@ fn validate_note(note: &str) -> Result<(), MemoriesBackendError> {
         None
     };
     if !remaining.trim().is_empty() {
-        return Err(MemoriesBackendError::invalid_ad_hoc_note(
-            "unexpected content after the supported mutation fields",
-        ));
+        let unexpected = remaining.trim().chars().take(40).collect::<String>();
+        return Err(MemoriesBackendError::invalid_ad_hoc_note(format!(
+            "unexpected content after the supported mutation fields: {unexpected:?}"
+        )));
     }
     if target.trim().is_empty() {
         return Err(MemoriesBackendError::invalid_ad_hoc_note(
@@ -130,13 +131,36 @@ fn take_text_element<'a>(
         )));
     };
     let value = &after_open[..close_offset];
-    if value.contains('<') || value.contains('>') {
+    if value.contains('<') || value.contains('>') || !has_valid_xml_entities(value) {
         return Err(MemoriesBackendError::invalid_ad_hoc_note(format!(
-            "{element} text must XML-escape angle brackets"
+            "{element} text must use valid XML escaping"
         )));
     }
     *input = &after_open[close_offset + close.len()..];
     Ok(value)
+}
+
+fn has_valid_xml_entities(value: &str) -> bool {
+    let mut remaining = value;
+    while let Some(offset) = remaining.find('&') {
+        let after_ampersand = &remaining[offset + 1..];
+        let Some(end) = after_ampersand.find(';') else {
+            return false;
+        };
+        let entity = &after_ampersand[..end];
+        let valid = matches!(entity, "amp" | "apos" | "gt" | "lt" | "quot")
+            || entity.strip_prefix('#').is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+            })
+            || entity.strip_prefix("#x").is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+        if !valid {
+            return false;
+        }
+        remaining = &after_ampersand[end + 1..];
+    }
+    true
 }
 
 #[cfg(test)]

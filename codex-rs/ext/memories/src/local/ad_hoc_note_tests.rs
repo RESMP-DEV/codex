@@ -6,6 +6,10 @@ fn validates_bounded_memory_mutations() {
         "<memory_update version=\"1\"><operation>delete</operation><target>obsolete fact</target></memory_update>",
     )
     .expect("valid delete mutation");
+    validate_note(
+        "<memory_update version=\"1\"><operation>update</operation><target>AT&amp;T fact</target><content>replacement</content></memory_update>",
+    )
+    .expect("valid update mutation");
 
     let oversized = format!(
         "<memory_update version=\"1\"><operation>add</operation><target>fact</target><content>{}</content></memory_update>",
@@ -20,14 +24,55 @@ fn validates_bounded_memory_mutations() {
 }
 
 #[test]
-fn reports_required_element_order() {
-    let target_first = "<memory_update version=\"1\"><target>fact</target><operation>delete</operation></memory_update>";
+fn rejects_invalid_memory_mutation_shapes() {
+    let cases = [
+        (
+            "<memory_update version=\"1\"><target>fact</target><operation>delete</operation></memory_update>",
+            "fields must appear as operation",
+        ),
+        (
+            "<memory_update version=\"1\"><operation>remove</operation><target>fact</target></memory_update>",
+            "operation must be add, update, or delete",
+        ),
+        (
+            "<memory_update version=\"1\"><operation>delete</operation><target> </target></memory_update>",
+            "target must not be empty",
+        ),
+        (
+            "<memory_update version=\"1\"><operation>add</operation><target>fact</target></memory_update>",
+            "require non-empty content",
+        ),
+        (
+            "<memory_update version=\"1\"><operation>update</operation><target>fact</target><content> </content></memory_update>",
+            "require non-empty content",
+        ),
+        (
+            "<memory_update version=\"1\"><operation>delete</operation><target>fact</target><content>extra</content></memory_update>",
+            "must omit content",
+        ),
+        (
+            "<memory_update version=\"1\"><operation>delete</operation><target>bad<target</target></memory_update>",
+            "valid XML escaping",
+        ),
+        (
+            "<memory_update version=\"1\"><operation>delete</operation><target>AT&T</target></memory_update>",
+            "valid XML escaping",
+        ),
+        (
+            "<memory_update version=\"1\"><operation>add</operation><target>fact</target><content >value</content></memory_update>",
+            "unexpected content",
+        ),
+        (
+            "<memory_update version=\"1\"><operation>delete</operation><target>fact</target>junk</memory_update>",
+            "unexpected content",
+        ),
+    ];
 
-    let error = validate_note(target_first).expect_err("out-of-order fields should fail");
-
-    assert!(
-        error
-            .to_string()
-            .contains("fields must appear as operation")
-    );
+    for (note, expected) in cases {
+        let error = validate_note(note).expect_err("invalid mutation should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?} in {error}"
+        );
+    }
 }

@@ -158,9 +158,19 @@ Incremental update and forgetting mechanism:
 
 - Use the git-style diff in `{{ phase2_workspace_diff_file }}` to identify relevant changed
   sections and deleted inputs.
-- Every changes in `{{ phase2_workspace_diff_file }}` are authoritative and must propagated and consolidated. If a
-  changes appears to be randomly placed in the files, it is probably a user change and you shouldn't just drop it.
-  Make sure to add it to the overall memories consolidation
+- Every change in `{{ phase2_workspace_diff_file }}` is authoritative and must be propagated and
+  consolidated. If a change appears to be randomly placed in the files, it is probably a user
+  change and must not be silently dropped.
+- Added or modified `extensions/ad_hoc/notes/*.md` files are the explicit memory-mutation queue.
+  Read their extension instructions, process them in filename order, and apply them before
+  ingesting rollout additions. Prefer the structured XML fields when present; legacy free-form
+  Markdown notes remain authoritative and their operation/target must be inferred from the text.
+  - `add` and `update` operations contribute the requested durable content.
+  - `delete` operations remove matching facts from `MEMORY.md`, `memory_summary.md`, generated
+    skills, and all other prompt-facing derivatives. The deletion overrides still-present older
+    rollout evidence while the note remains retained.
+  - Never preserve a delete request as a tombstone, deprecation rule, summary bullet, or retained
+    implementation detail. The note is control metadata, not memory content.
 - Do not open raw sessions / original rollout transcripts.
 - For added or modified `raw_memories.md` and `rollout_summaries/*.md` files, read the changed
   raw-memory sections and the corresponding rollout summaries only when needed for stronger
@@ -783,21 +793,25 @@ WORKFLOW
    - Read existing `MEMORY.md` and, only when it starts with exactly `v1`, existing
      `memory_summary.md` first for continuity and to locate references that may need surgical cleanup.
    - Use the injected git-style workspace changes as the first routing pass:
+     - added/modified `extensions/ad_hoc/notes/*.md` = authoritative mutation queue; process first
      - added/modified `raw_memories.md` and `rollout_summaries/*.md` = ingestion queue
      - deleted `rollout_summaries/*.md` and `extensions/*/resources/*.md` = forgetting /
        stale-cleanup queue
    - Build an index of rollout references already present in existing `MEMORY.md` before
      scanning raw memories so you can route net-new evidence into the right blocks.
    - Work in this order:
-     1. For added or modified rollout inputs, search their paths/thread ids in `raw_memories.md`,
+     1. Apply ad-hoc mutations in filename order. For deletes, inventory every matching reference
+        across `MEMORY.md`, `memory_summary.md`, and `skills/`, remove it, and do not reintroduce it
+        from older rollout inputs later in this pass.
+     2. For added or modified rollout inputs, search their paths/thread ids in `raw_memories.md`,
         read those sections, and open the corresponding `rollout_summaries/*.md` files when
         necessary.
-     2. Route the new signal into existing `MEMORY.md` blocks or create new ones when needed.
-     3. For deleted inputs, search `MEMORY.md` and surgically delete or rewrite only the
+     3. Route the new signal into existing `MEMORY.md` blocks or create new ones when needed.
+     4. For deleted inputs, search `MEMORY.md` and surgically delete or rewrite only the
         unsupported memory.
-     4. If a block mixes deleted and still-present evidence, preserve the still-supported content;
+     5. If a block mixes deleted and still-present evidence, preserve the still-supported content;
         split or rewrite the block if that is the cleanest way to delete only the stale part.
-     5. After `MEMORY.md` is correct, revisit `memory_summary.md` and remove or rewrite stale
+     6. After `MEMORY.md` is correct, revisit `memory_summary.md` and remove or rewrite stale
         summary/index content that no longer has current support.
    - Integrate new signal into existing artifacts by:
      - scanning added or modified raw-memory entries in recency order and identifying which existing blocks they should update
@@ -854,6 +868,8 @@ WORKFLOW
    - verify `memory_summary.md` still begins with exactly `v1`
    - verify `memory_summary.md` is dense: brief high-level profile, compact actionable
      preferences, compact general tips, and a routing index rather than a second handbook
+   - verify every ad-hoc delete target is absent from all prompt-facing outputs; do not count the
+     retained control note itself as a failure
    - remove stale or low-signal blocks that are less likely to be useful in the future
    - remove or rewrite blocks/task sections whose supporting rollout references point only to
      deleted inputs or missing rollout summary files

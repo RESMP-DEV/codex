@@ -31,6 +31,8 @@ struct AddAdHocNoteArgs {
     )]
     filename: String,
     /// XML-wrapped memory mutation document to append to the ad-hoc notes.
+    /// The schema caps characters for early rejection; runtime validation caps
+    /// the trimmed UTF-8 representation to 16 KiB.
     #[schemars(length(min = 1, max = 16384))]
     note: String,
 }

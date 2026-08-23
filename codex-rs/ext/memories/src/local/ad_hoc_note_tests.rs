@@ -10,6 +10,12 @@ fn validates_bounded_memory_mutations() {
         "<memory_update version=\"1\"><operation>update</operation><target>AT&amp;T fact</target><content>replacement</content></memory_update>",
     )
     .expect("valid update mutation");
+    let padded = format!(
+        "{}<memory_update version=\"1\"><operation>delete</operation><target>fact</target></memory_update>{}",
+        " ".repeat(AD_HOC_NOTE_MAX_BYTES),
+        " ".repeat(AD_HOC_NOTE_MAX_BYTES)
+    );
+    validate_note(&padded).expect("surrounding whitespace should not count toward the byte cap");
 
     let oversized = format!(
         "<memory_update version=\"1\"><operation>add</operation><target>fact</target><content>{}</content></memory_update>",
@@ -56,6 +62,14 @@ fn rejects_invalid_memory_mutation_shapes() {
         ),
         (
             "<memory_update version=\"1\"><operation>delete</operation><target>AT&T</target></memory_update>",
+            "valid XML escaping",
+        ),
+        (
+            "<memory_update version=\"1\"><operation>delete</operation><target>bad&#0;target</target></memory_update>",
+            "valid XML escaping",
+        ),
+        (
+            "<memory_update version=\"1\"><operation>delete</operation><target>bad&#x1F;target</target></memory_update>",
             "valid XML escaping",
         ),
         (

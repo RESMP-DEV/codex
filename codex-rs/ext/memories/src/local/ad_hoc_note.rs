@@ -46,7 +46,7 @@ fn validate_note(note: &str) -> Result<(), MemoriesBackendError> {
     const ROOT_CLOSE: &str = "</memory_update>";
 
     let trimmed = note.trim();
-    if note.len() > AD_HOC_NOTE_MAX_BYTES {
+    if trimmed.len() > AD_HOC_NOTE_MAX_BYTES {
         return Err(MemoriesBackendError::invalid_ad_hoc_note(format!(
             "must be at most {AD_HOC_NOTE_MAX_BYTES} bytes"
         )));
@@ -149,18 +149,29 @@ fn has_valid_xml_entities(value: &str) -> bool {
         };
         let entity = &after_ampersand[..end];
         let valid = matches!(entity, "amp" | "apos" | "gt" | "lt" | "quot")
-            || entity.strip_prefix('#').is_some_and(|digits| {
-                !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
-            })
-            || entity.strip_prefix("#x").is_some_and(|digits| {
-                !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
-            });
+            || parse_numeric_entity(entity).is_some_and(is_valid_xml_character);
         if !valid {
             return false;
         }
         remaining = &after_ampersand[end + 1..];
     }
     true
+}
+
+fn parse_numeric_entity(entity: &str) -> Option<char> {
+    let codepoint = if let Some(hex) = entity.strip_prefix("#x") {
+        u32::from_str_radix(hex, 16).ok()?
+    } else {
+        entity.strip_prefix('#')?.parse::<u32>().ok()?
+    };
+    char::from_u32(codepoint)
+}
+
+fn is_valid_xml_character(character: char) -> bool {
+    matches!(character, '\t' | '\n' | '\r')
+        || ('\u{20}'..='\u{D7FF}').contains(&character)
+        || ('\u{E000}'..='\u{FFFD}').contains(&character)
+        || ('\u{10000}'..='\u{10FFFF}').contains(&character)
 }
 
 #[cfg(test)]

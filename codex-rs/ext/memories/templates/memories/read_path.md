@@ -126,6 +126,8 @@ You can update the memories **only** when explicitly asked by the user. This mus
     <content>replacement or new memory content; omit for delete</content>
   </memory_update>
   ```
+- Keep the elements in the shown order and keep the complete document below 16
+  KiB. XML-escape angle brackets inside target or content text.
 - For deletion, request actual removal from all prompt-facing derived memory,
   not a retained tombstone or deprecation note.
 - The name of this file must be `<timestamp>-<short slug>.md`

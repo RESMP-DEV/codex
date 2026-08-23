@@ -53,6 +53,27 @@ async fn propagates_errors_reading_existing_instructions() {
 }
 
 #[tokio::test]
+async fn concurrent_initial_seeding_is_idempotent() {
+    let codex_home = TempDir::new().expect("create temp codex home");
+    let memory_root = codex_home.path().join("memories");
+    let (left, right) = tokio::join!(
+        seed_instructions(&memory_root),
+        seed_instructions(&memory_root)
+    );
+
+    left.expect("first concurrent seed");
+    right.expect("second concurrent seed");
+    assert_eq!(
+        tokio::fs::read_to_string(
+            memory_extensions_root(&memory_root).join("ad_hoc/instructions.md")
+        )
+        .await
+        .expect("read concurrently seeded instructions"),
+        INSTRUCTIONS
+    );
+}
+
+#[tokio::test]
 async fn upgrades_legacy_managed_instructions() {
     let codex_home = TempDir::new().expect("create temp codex home");
     let memory_root = codex_home.path().join("memories");

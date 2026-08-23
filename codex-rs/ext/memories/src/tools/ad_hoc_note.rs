@@ -31,7 +31,7 @@ struct AddAdHocNoteArgs {
     )]
     filename: String,
     /// XML-wrapped memory mutation document to append to the ad-hoc notes.
-    #[schemars(length(min = 1))]
+    #[schemars(length(min = 1, max = 16384))]
     note: String,
 }
 

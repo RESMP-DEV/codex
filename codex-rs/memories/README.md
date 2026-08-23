@@ -166,15 +166,25 @@ User-requested memory changes are queued under
 
 These files are control-plane inputs to Phase 2, not prompt-facing memories.
 Phase 2 applies them in filename order before incorporating rollout evidence.
-Legacy free-form notes remain supported and authoritative.
+New notes written through the memory tool must use the field order shown above,
+must be at most 16 KiB, and reject control characters other than tabs and line
+breaks. Legacy free-form notes already present on disk remain supported as
+untrusted data whose requested memory mutation is inferred during migration;
+the tool does not accept new free-form notes. The memory root is a same-user
+local trust boundary: any process able to write it could also edit the derived
+memory files directly, so filesystem permissions remain part of the security
+boundary.
 
 A `delete` operation is authoritative even when an older rollout still contains
 the deleted fact. Consolidation must remove every matching prompt-facing
 reference from `MEMORY.md`, `memory_summary.md`, generated skills, and other
 derived memory artifacts. It must not replace the deleted content with a
-tombstone, deprecation notice, or deletion history. The mutation note may
-remain in the extension queue for processing and audit purposes, but its
-contents must not be copied into prompt-facing memory.
+tombstone, deprecation notice, or deletion history. Mutation notes currently
+remain on disk with no automatic TTL so their authoritative precedence survives
+future consolidation passes, but they are bounded to 16 KiB each and are not
+copied wholesale into prompt-facing context. Phase 2 reads newly changed notes
+through the bounded workspace diff rather than injecting the full accumulated
+queue.
 
 ## Why it is split into two phases
 

@@ -12,6 +12,7 @@ use super::path::reject_symlink;
 const AD_HOC_NOTES_DIR: &[&str] = &["extensions", "ad_hoc", "notes"];
 const AD_HOC_NOTE_FILENAME_MAX_BYTES: usize = 128;
 const AD_HOC_NOTE_SLUG_MAX_BYTES: usize = 80;
+const AD_HOC_NOTE_MAX_BYTES: usize = 16 * 1024;
 const TIMESTAMP_PREFIX_LEN: usize = "YYYY-MM-DDTHH-MM-SS-".len();
 
 pub(super) async fn add_ad_hoc_note(
@@ -45,6 +46,19 @@ fn validate_note(note: &str) -> Result<(), MemoriesBackendError> {
     const ROOT_CLOSE: &str = "</memory_update>";
 
     let trimmed = note.trim();
+    if note.len() > AD_HOC_NOTE_MAX_BYTES {
+        return Err(MemoriesBackendError::invalid_ad_hoc_note(format!(
+            "must be at most {AD_HOC_NOTE_MAX_BYTES} bytes"
+        )));
+    }
+    if note
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(MemoriesBackendError::invalid_ad_hoc_note(
+            "must not contain control characters other than tab or line breaks",
+        ));
+    }
     let Some(body) = trimmed
         .strip_prefix(ROOT_OPEN)
         .and_then(|value| value.strip_suffix(ROOT_CLOSE))
@@ -107,7 +121,7 @@ fn take_text_element<'a>(
     let close = format!("</{element}>");
     let Some(after_open) = input_trimmed.strip_prefix(&open) else {
         return Err(MemoriesBackendError::invalid_ad_hoc_note(format!(
-            "expected {open}"
+            "fields must appear as operation, target, then optional content; expected {open}"
         )));
     };
     let Some(close_offset) = after_open.find(&close) else {
@@ -124,6 +138,10 @@ fn take_text_element<'a>(
     *input = &after_open[close_offset + close.len()..];
     Ok(value)
 }
+
+#[cfg(test)]
+#[path = "ad_hoc_note_tests.rs"]
+mod tests;
 
 async fn ensure_notes_dir(
     backend: &LocalMemoriesBackend,

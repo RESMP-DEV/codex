@@ -87,6 +87,7 @@ pub async fn detached_memory_responses_metadata(
 ) -> CodexResponsesMetadata {
     CodexResponsesMetadata {
         request_kind: Some(CodexResponsesRequestKind::Memory),
+        thread_source: Some(ThreadSource::MemoryConsolidation),
         subagent_header: subagent_header_value(session_source),
         sandbox: sandbox.map(ToString::to_string),
         sandbox_mode: Some(
@@ -291,7 +292,11 @@ impl TurnMetadataState {
         }
         match &self.thread_source {
             // Desktop create/fork/send lacks trusted app-server provenance; fail closed.
-            Some(ThreadSource::Subagent | ThreadSource::MemoryConsolidation) => false,
+            Some(
+                ThreadSource::Subagent
+                | ThreadSource::GuardianReview
+                | ThreadSource::MemoryConsolidation,
+            ) => false,
             Some(ThreadSource::Feature(feature)) => {
                 !matches!(feature.as_str(), "system" | "title") && !feature.starts_with("ambient")
             }

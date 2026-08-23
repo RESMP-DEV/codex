@@ -13,15 +13,13 @@ async fn seeds_instructions_and_preserves_custom_file() {
         .await
         .expect("seed ad-hoc instructions");
 
-    assert_eq!(
-        tokio::fs::read_to_string(&instructions_path)
-            .await
-            .expect("read seeded ad-hoc instructions"),
-        INSTRUCTIONS
-    );
-    assert!(INSTRUCTIONS.contains("<memory_mutation_policy>"));
-    assert!(INSTRUCTIONS.contains("Do not retain a"));
-    assert!(INSTRUCTIONS.contains("tombstone"));
+    let seeded = tokio::fs::read_to_string(&instructions_path)
+        .await
+        .expect("read seeded ad-hoc instructions");
+    assert_eq!(seeded, INSTRUCTIONS);
+    assert!(seeded.contains("<memory_mutation_policy>"));
+    assert!(seeded.contains("Do not retain a"));
+    assert!(seeded.contains("tombstone"));
 
     tokio::fs::write(&instructions_path, "custom instructions")
         .await
@@ -36,6 +34,22 @@ async fn seeds_instructions_and_preserves_custom_file() {
             .expect("read custom ad-hoc instructions"),
         "custom instructions"
     );
+}
+
+#[tokio::test]
+async fn propagates_errors_reading_existing_instructions() {
+    let codex_home = TempDir::new().expect("create temp codex home");
+    let memory_root = codex_home.path().join("memories");
+    let instructions_path = memory_extensions_root(&memory_root).join("ad_hoc/instructions.md");
+    tokio::fs::create_dir_all(&instructions_path)
+        .await
+        .expect("create directory at instructions path");
+
+    let err = seed_instructions(&memory_root)
+        .await
+        .expect_err("directory should not be accepted as instructions file");
+
+    assert_ne!(err.kind(), std::io::ErrorKind::NotFound);
 }
 
 #[tokio::test]

@@ -208,7 +208,7 @@ async fn add_ad_hoc_note_tool_creates_note_file() {
     let payload = ToolPayload::Function {
         arguments: json!({
             "filename": "2026-05-26T13-42-08-remember-review-style.md",
-            "note": "Remember to keep PR review comments concise.",
+            "note": "<memory_update version=\"1\">\n<operation>add</operation>\n<target>PR review style</target>\n<content>Remember to keep PR review comments concise.</content>\n</memory_update>",
         })
         .to_string(),
     };
@@ -241,7 +241,45 @@ async fn add_ad_hoc_note_tool_creates_note_file() {
         )
         .await
         .expect("read ad-hoc note"),
-        "Remember to keep PR review comments concise."
+        "<memory_update version=\"1\">\n<operation>add</operation>\n<target>PR review style</target>\n<content>Remember to keep PR review comments concise.</content>\n</memory_update>"
+    );
+}
+
+#[tokio::test]
+async fn add_ad_hoc_note_tool_rejects_invalid_memory_update_xml() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let memory_root = tempdir.path().join("memories");
+    let tool = memory_tool(&memory_root, crate::ADD_AD_HOC_NOTE_TOOL_NAME);
+    let payload = ToolPayload::Function {
+        arguments: json!({
+            "filename": "2026-05-26T13-42-08-invalid-note.md",
+            "note": "Remember this as free-form text.",
+        })
+        .to_string(),
+    };
+
+    let result = tool
+        .handle(ToolCall {
+            turn_id: "turn-1".to_string(),
+            call_id: "call-1".to_string(),
+            tool_name: memory_tool_name(crate::ADD_AD_HOC_NOTE_TOOL_NAME),
+            model: "gpt-test".to_string(),
+            codex_turn_metadata: None,
+            truncation_policy: TruncationPolicy::Bytes(1024),
+            conversation_history: codex_extension_api::ConversationHistory::default(),
+            turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            environments: Vec::new(),
+            payload,
+        })
+        .await;
+
+    let err = match result {
+        Ok(_) => panic!("invalid mutation document should be rejected"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("not a valid memory_update document")
     );
 }
 

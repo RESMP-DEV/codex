@@ -22,6 +22,7 @@ pub(super) async fn add_ad_hoc_note(
     if request.note.trim().is_empty() {
         return Err(MemoriesBackendError::EmptyAdHocNote);
     }
+    validate_note(&request.note)?;
 
     let notes_dir = ensure_notes_dir(backend).await?;
     let path = notes_dir.join(&request.filename);
@@ -37,6 +38,91 @@ pub(super) async fn add_ad_hoc_note(
     file.write_all(request.note.as_bytes())?;
 
     Ok(AddAdHocMemoryNoteResponse {})
+}
+
+fn validate_note(note: &str) -> Result<(), MemoriesBackendError> {
+    const ROOT_OPEN: &str = "<memory_update version=\"1\">";
+    const ROOT_CLOSE: &str = "</memory_update>";
+
+    let trimmed = note.trim();
+    let Some(body) = trimmed
+        .strip_prefix(ROOT_OPEN)
+        .and_then(|value| value.strip_suffix(ROOT_CLOSE))
+    else {
+        return Err(MemoriesBackendError::invalid_ad_hoc_note(
+            "expected one <memory_update version=\"1\"> root element",
+        ));
+    };
+
+    let mut remaining = body.trim();
+    let operation = take_text_element(&mut remaining, "operation")?;
+    let target = take_text_element(&mut remaining, "target")?;
+    let content = if remaining.trim_start().starts_with("<content>") {
+        Some(take_text_element(&mut remaining, "content")?)
+    } else {
+        None
+    };
+    if !remaining.trim().is_empty() {
+        return Err(MemoriesBackendError::invalid_ad_hoc_note(
+            "unexpected content after the supported mutation fields",
+        ));
+    }
+    if target.trim().is_empty() {
+        return Err(MemoriesBackendError::invalid_ad_hoc_note(
+            "target must not be empty",
+        ));
+    }
+
+    match operation.trim() {
+        "add" | "update" => {
+            if content.is_none_or(|value| value.trim().is_empty()) {
+                return Err(MemoriesBackendError::invalid_ad_hoc_note(
+                    "add and update operations require non-empty content",
+                ));
+            }
+        }
+        "delete" => {
+            if content.is_some() {
+                return Err(MemoriesBackendError::invalid_ad_hoc_note(
+                    "delete operations must omit content",
+                ));
+            }
+        }
+        _ => {
+            return Err(MemoriesBackendError::invalid_ad_hoc_note(
+                "operation must be add, update, or delete",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn take_text_element<'a>(
+    input: &mut &'a str,
+    element: &str,
+) -> Result<&'a str, MemoriesBackendError> {
+    let input_trimmed = input.trim_start();
+    let open = format!("<{element}>");
+    let close = format!("</{element}>");
+    let Some(after_open) = input_trimmed.strip_prefix(&open) else {
+        return Err(MemoriesBackendError::invalid_ad_hoc_note(format!(
+            "expected {open}"
+        )));
+    };
+    let Some(close_offset) = after_open.find(&close) else {
+        return Err(MemoriesBackendError::invalid_ad_hoc_note(format!(
+            "missing {close}"
+        )));
+    };
+    let value = &after_open[..close_offset];
+    if value.contains('<') || value.contains('>') {
+        return Err(MemoriesBackendError::invalid_ad_hoc_note(format!(
+            "{element} text must XML-escape angle brackets"
+        )));
+    }
+    *input = &after_open[close_offset + close.len()..];
+    Ok(value)
 }
 
 async fn ensure_notes_dir(

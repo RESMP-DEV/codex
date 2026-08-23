@@ -31,6 +31,7 @@ codex-state = { workspace = true }
 codex-terminal-detection = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-output-truncation = { workspace = true }
+codex-utils-path = { workspace = true }
 codex-utils-template = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

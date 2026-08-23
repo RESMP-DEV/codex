@@ -104,6 +104,7 @@ fn backend_error_to_function_call(err: MemoriesBackendError) -> FunctionCallErro
         | MemoriesBackendError::NotFile { .. }
         | MemoriesBackendError::EmptyQuery
         | MemoriesBackendError::EmptyAdHocNote
+        | MemoriesBackendError::InvalidAdHocNote { .. }
         | MemoriesBackendError::AdHocNoteAlreadyExists { .. }
         | MemoriesBackendError::InvalidMatchWindow => {
             FunctionCallError::RespondToModel(err.to_string())

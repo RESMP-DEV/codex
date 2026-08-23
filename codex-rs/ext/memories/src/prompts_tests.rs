@@ -27,7 +27,7 @@ async fn build_memory_tool_developer_instructions_renders_embedded_template() {
     )));
     assert!(instructions.contains("Short memory summary for tests."));
     assert!(instructions.contains("<memory_update version=\"1\">"));
-    assert!(instructions.contains("not a retained tombstone"));
+    assert!(instructions.contains("<operation>add|update|delete</operation>"));
     assert_eq!(
         instructions
             .matches("========= MEMORY_SUMMARY BEGINS =========")

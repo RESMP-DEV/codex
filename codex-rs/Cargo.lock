@@ -3715,6 +3715,7 @@ dependencies = [
  "codex-terminal-detection",
  "codex-utils-absolute-path",
  "codex-utils-output-truncation",
+ "codex-utils-path",
  "codex-utils-template",
  "core_test_support",
  "futures",

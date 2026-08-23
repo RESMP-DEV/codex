@@ -1,4 +1,5 @@
 use crate::memory_extensions_root;
+use codex_utils_path::write_atomically;
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 
@@ -14,9 +15,18 @@ pub(super) async fn seed_instructions(memory_root: &Path) -> std::io::Result<()>
     match tokio::fs::read_to_string(&instructions_path).await {
         Ok(existing) if existing == INSTRUCTIONS => Ok(()),
         Ok(existing) if existing == LEGACY_INSTRUCTIONS => {
-            tokio::fs::write(&instructions_path, INSTRUCTIONS).await
+            let write_path = instructions_path.clone();
+            tokio::task::spawn_blocking(move || write_atomically(&write_path, INSTRUCTIONS))
+                .await
+                .map_err(std::io::Error::other)?
         }
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            tracing::debug!(
+                path = %instructions_path.display(),
+                "preserving custom ad-hoc memory instructions"
+            );
+            Ok(())
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let mut file = tokio::fs::OpenOptions::new()
                 .write(true)

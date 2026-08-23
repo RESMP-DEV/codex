@@ -118,7 +118,18 @@ Updating memories:
 
 You can update the memories **only** when explicitly asked by the user. This must always come from a direct request from the user.
 - Write your update in {{ base_path }}/extensions/ad_hoc/notes/
-- Each update must be one small file containing what you want to add/delete/update from the memories.
+- Each update must be one small XML-wrapped mutation document:
+  ```xml
+  <memory_update version="1">
+    <operation>add|update|delete</operation>
+    <target>stable memory name or an exact description of the material</target>
+    <content>replacement or new memory content; omit for delete</content>
+  </memory_update>
+  ```
+- Keep the elements in the shown order and keep the complete document below 16
+  KiB. XML-escape angle brackets inside target or content text.
+- For deletion, request actual removal from all prompt-facing derived memory,
+  not a retained tombstone or deprecation note.
 - The name of this file must be `<timestamp>-<short slug>.md`
 - Do not try to edit the memory files yourself, only add one update note in {{ base_path }}/extensions/ad_hoc/notes/
 

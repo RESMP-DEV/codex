@@ -30,8 +30,10 @@ struct AddAdHocNoteArgs {
         regex(pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{0,79}\.md$")
     )]
     filename: String,
-    /// Verbatim Markdown note to append to the ad-hoc memory notes.
-    #[schemars(length(min = 1))]
+    /// XML-wrapped memory mutation document to append to the ad-hoc notes.
+    /// The schema caps characters for early rejection; runtime validation caps
+    /// the trimmed UTF-8 representation to 16 KiB.
+    #[schemars(length(min = 1, max = 16384))]
     note: String,
 }
 
@@ -52,7 +54,7 @@ where
     fn spec(&self) -> ToolSpec {
         memory_function_tool::<AddAdHocNoteArgs, AddAdHocMemoryNoteResponse>(
             ADD_AD_HOC_NOTE_TOOL_NAME,
-            "Create one append-only ad-hoc memory note after the user explicitly asks Codex to remember, forget, or update something.",
+            "Create one XML-wrapped ad-hoc memory mutation after the user explicitly asks Codex to remember, forget, or update something.",
         )
     }
 

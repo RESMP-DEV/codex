@@ -68,4 +68,6 @@ fn build_consolidation_prompt_points_to_workspace_diff_and_extension_tree() {
         memory_extensions_root.display()
     )));
     assert!(prompt.contains("workspace diff shows deleted extension resource files"));
+    assert!(prompt.contains("explicit memory-mutation queue"));
+    assert!(prompt.contains("Never preserve a delete request as a tombstone"));
 }

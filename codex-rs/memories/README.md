@@ -151,6 +151,31 @@ Watermark behavior:
 
 In practice, this phase is responsible for refreshing the on-disk memory workspace and producing/updating the higher-level consolidated memory outputs.
 
+## Ad-hoc memory mutations
+
+User-requested memory changes are queued under
+`~/.codex/memories/extensions/ad_hoc/notes/` as XML documents:
+
+```xml
+<memory_update version="1">
+  <operation>add|update|delete</operation>
+  <target>the memory fact or topic to mutate</target>
+  <content>replacement or added content when applicable</content>
+</memory_update>
+```
+
+These files are control-plane inputs to Phase 2, not prompt-facing memories.
+Phase 2 applies them in filename order before incorporating rollout evidence.
+Legacy free-form notes remain supported and authoritative.
+
+A `delete` operation is authoritative even when an older rollout still contains
+the deleted fact. Consolidation must remove every matching prompt-facing
+reference from `MEMORY.md`, `memory_summary.md`, generated skills, and other
+derived memory artifacts. It must not replace the deleted content with a
+tombstone, deprecation notice, or deletion history. The mutation note may
+remain in the extension queue for processing and audit purposes, but its
+contents must not be copied into prompt-facing memory.
+
 ## Why it is split into two phases
 
 - Phase 1 scales across many rollouts and produces normalized per-rollout memory records.

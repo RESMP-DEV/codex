@@ -235,8 +235,13 @@ fn responses_lite_default_functions_namespace_has_nonempty_description() {
     // The default `functions` namespace must carry a non-empty description.
     // Some Responses API endpoints reject an empty `description` with
     // `empty_string` / `invalid_request_error` (regression in upstream #37022).
-    let desc = tools[0]["description"].as_str().expect("description should be a string");
-    assert!(!desc.is_empty(), "functions namespace description must be non-empty, got: {desc:?}");
+    let desc = tools[0]["description"]
+        .as_str()
+        .expect("description should be a string");
+    assert!(
+        !desc.is_empty(),
+        "functions namespace description must be non-empty, got: {desc:?}"
+    );
     assert_eq!(desc, "Tools in the functions namespace.");
 }
 

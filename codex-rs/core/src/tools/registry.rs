@@ -11,8 +11,6 @@ use crate::hook_runtime::run_post_tool_use_hooks;
 use crate::hook_runtime::run_pre_tool_use_hooks;
 use crate::memory_usage::emit_metric_for_tool_read;
 use crate::memory_usage::shell_script_for_invocation;
-use crate::sandbox_tags::permission_profile_policy_tag;
-use crate::sandbox_tags::permission_profile_sandbox_tag;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::context::FunctionToolOutput;
@@ -29,6 +27,7 @@ use crate::tools::router::tool_log_payload;
 use crate::tools::tool_dispatch_trace::ToolDispatchTrace;
 use crate::util::error_or_panic;
 use codex_analytics::ControlToolCallStatus;
+use codex_extension_api::AllowedTools;
 use codex_extension_api::ToolCallOutcome;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
@@ -205,7 +204,7 @@ impl AnyToolResult {
             metadata: result
                 .fallback_token_limit_override()
                 .map(|limit| CodexHarnessMetadata {
-                    fallback_token_limit_override: Some(limit),
+                    history_truncation_token_limit: Some(limit),
                     ..Default::default()
                 }),
         }
@@ -243,6 +242,10 @@ impl ToolOutput for PostToolUseFeedbackOutput {
 
     fn code_mode_result(&self, payload: &ToolPayload) -> Value {
         self.original.code_mode_result(payload)
+    }
+
+    fn tool_result_metadata(&self) -> Option<&Value> {
+        self.original.tool_result_metadata()
     }
 }
 
@@ -285,9 +288,17 @@ pub(crate) struct RegisteredTool {
 pub struct ToolRegistry {
     tools: IndexMap<ToolName, RegisteredTool>,
     first_collision: Option<ToolName>,
+    pub(crate) allowed_tools: Option<Arc<AllowedTools>>,
 }
 
 impl ToolRegistry {
+    pub(crate) fn with_allowed_tools(allowed_tools: Option<Arc<AllowedTools>>) -> Self {
+        Self {
+            allowed_tools,
+            ..Self::default()
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn from_tools(tools: impl IntoIterator<Item = Arc<dyn CoreToolRuntime>>) -> Self {
         let mut registry = Self::default();
@@ -324,6 +335,13 @@ impl ToolRegistry {
         exposure: ToolExposure,
     ) {
         let tool_name = runtime.tool_name().with_default_namespace();
+        if self
+            .allowed_tools
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&tool_name))
+        {
+            return;
+        }
         match self.tools.entry(tool_name) {
             Entry::Vacant(entry) => {
                 entry.insert(RegisteredTool { runtime, exposure });
@@ -337,6 +355,13 @@ impl ToolRegistry {
 
     pub(crate) fn prepend_trusted(&mut self, runtime: Arc<dyn CoreToolRuntime>) {
         let tool_name = runtime.tool_name().with_default_namespace();
+        if self
+            .allowed_tools
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&tool_name))
+        {
+            return;
+        }
         if self.tools.contains_key(&tool_name) {
             error_or_panic(format!("tool {tool_name} already registered"));
             return;
@@ -358,6 +383,13 @@ impl ToolRegistry {
         exposure: ToolExposure,
     ) -> bool {
         let tool_name = runtime.tool_name().with_default_namespace();
+        if self
+            .allowed_tools
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&tool_name))
+        {
+            return false;
+        }
         if tool_name.is_default_namespace()
             && matches!(tool_name.name.as_str(), "exec_command" | "shell_command")
         {
@@ -497,28 +529,10 @@ impl ToolRegistry {
     ) -> Result<AnyToolResult, FunctionCallError> {
         let tool_name = invocation.tool_name.clone();
         let call_id_owned = invocation.call_id.clone();
-        let otel = invocation.turn.session_telemetry.clone();
-        let permission_profile = invocation.turn.permission_profile();
+        let otel = invocation.step_context.session_telemetry.clone();
         // TODO(anp): Reconcile these tags with TurnEnvironment::sandbox_context
         // instead of reporting the thread-wide backend for environment-scoped tools.
-        let base_tool_result_tags = [
-            (
-                "sandbox",
-                permission_profile_sandbox_tag(
-                    &permission_profile,
-                    invocation.turn.windows_sandbox_level,
-                    invocation.turn.network.is_some(),
-                ),
-            ),
-            (
-                "sandbox_policy",
-                permission_profile_policy_tag(
-                    &permission_profile,
-                    #[allow(deprecated)]
-                    invocation.turn.cwd.as_path(),
-                ),
-            ),
-        ];
+        let sandbox_tags = invocation.turn.turn_metadata_state.sandbox_tags;
 
         {
             let mut active = invocation.session.active_turn.lock().await;
@@ -534,6 +548,8 @@ impl ToolRegistry {
             None => {
                 let message = unsupported_tool_call_message(&invocation.payload, &tool_name);
                 let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
+                let mut tool_result_tags = Vec::with_capacity(2);
+                sandbox_tags.append_metric_tags(&mut tool_result_tags);
                 otel.tool_result_with_tags(
                     &tool_name,
                     &call_id_owned,
@@ -541,7 +557,7 @@ impl ToolRegistry {
                     Duration::ZERO,
                     /*success*/ false,
                     &message,
-                    &base_tool_result_tags,
+                    &tool_result_tags,
                     /*extra_trace_fields*/ &[],
                 );
                 let err = FunctionCallError::RespondToModel(message);
@@ -550,10 +566,9 @@ impl ToolRegistry {
             }
         };
         let telemetry_tags = tool.telemetry_tags(&invocation);
-        let mut tool_result_tags =
-            Vec::with_capacity(base_tool_result_tags.len() + telemetry_tags.len() + 1);
+        let mut tool_result_tags = Vec::with_capacity(2 + telemetry_tags.len() + 1);
         let mut extra_trace_fields = Vec::new();
-        tool_result_tags.extend_from_slice(&base_tool_result_tags);
+        sandbox_tags.append_metric_tags(&mut tool_result_tags);
         for (key, value) in &telemetry_tags {
             if matches!(*key, "mcp_server" | "mcp_server_origin") {
                 extra_trace_fields.push((*key, value.as_str()));
@@ -582,7 +597,7 @@ impl ToolRegistry {
         if let Some(pre_tool_use_payload) = tool.pre_tool_use_payload(&invocation) {
             match run_pre_tool_use_hooks(
                 &invocation.session,
-                &invocation.turn,
+                invocation.step_context.as_ref(),
                 invocation.call_id.clone(),
                 &pre_tool_use_payload.tool_name,
                 &pre_tool_use_payload.tool_input,
@@ -698,7 +713,7 @@ impl ToolRegistry {
             Some(
                 run_post_tool_use_hooks(
                     &invocation.session,
-                    &invocation.turn,
+                    invocation.step_context.as_ref(),
                     post_tool_use_payload.tool_use_id,
                     post_tool_use_payload.tool_name.name().to_string(),
                     post_tool_use_payload.tool_name.matcher_aliases().to_vec(),

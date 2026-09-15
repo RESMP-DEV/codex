@@ -49,13 +49,7 @@ mod delegate;
 mod grpc;
 mod grpc_transport;
 mod peer;
-mod trace_transport;
 mod transport;
-
-pub use self::trace_transport::bind_otlp_trace_receiver;
-pub use self::trace_transport::run_otel_trace_listener;
-pub use self::trace_transport::run_otlp_trace_receiver;
-pub use self::trace_transport::trace_batch_channel;
 
 const MAX_IN_FLIGHT_REQUESTS: usize = 256;
 const MAX_ACTIVE_CELLS: usize = 128;
@@ -418,7 +412,11 @@ impl HostState {
                     );
                     return;
                 };
-                let result = session.execute(request).await;
+                let delegate = Arc::new(RemoteDelegate::new(
+                    session_id.clone(),
+                    Arc::clone(&self.peer),
+                ));
+                let result = session.execute(request, delegate).await;
                 match result {
                     Ok(started) => {
                         let cell_id = started.cell_id.clone();
@@ -523,10 +521,6 @@ impl HostState {
         {
             return Err(format!("code-mode session ID `{session_id}` was reused"));
         }
-        let delegate = Arc::new(RemoteDelegate::new(
-            session_id.clone(),
-            Arc::clone(&self.peer),
-        ));
         let peer = Arc::downgrade(&self.peer);
         let task_failure_handler = Arc::new(move |reason| {
             if let Some(peer) = peer.upgrade() {
@@ -535,13 +529,10 @@ impl HostState {
         });
         sessions.insert(
             session_id,
-            Arc::new(
-                InProcessCodeModeSession::with_delegate_and_task_failure_handler(
-                    delegate,
-                    task_failure_handler,
-                    cell_execution_limits,
-                ),
-            ),
+            Arc::new(InProcessCodeModeSession::with_task_failure_handler(
+                task_failure_handler,
+                cell_execution_limits,
+            )),
         );
         Ok(())
     }

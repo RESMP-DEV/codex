@@ -169,6 +169,7 @@ fn turn_started_emits_turn_started_event() {
 fn command_execution_started_and_completed_translate_to_thread_events() {
     let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
     let command_item = ThreadItem::CommandExecution {
+        model_context: None,
         id: "cmd-1".to_string(),
         command: "ls".to_string(),
         cwd: test_path_buf("/tmp/project").abs().into(),
@@ -211,6 +212,7 @@ fn command_execution_started_and_completed_translate_to_thread_events() {
     let completed = processor.collect_thread_events(ServerNotification::ItemCompleted(
         ItemCompletedNotification {
             item: ThreadItem::CommandExecution {
+                model_context: None,
                 id: "cmd-1".to_string(),
                 command: "ls".to_string(),
                 cwd: test_path_buf("/tmp/project").abs().into(),
@@ -306,6 +308,7 @@ fn unsupported_items_do_not_consume_synthetic_ids() {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -928,6 +931,7 @@ fn agent_message_item_updates_final_message() {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -964,6 +968,7 @@ fn agent_message_item_started_is_ignored() {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -1315,6 +1320,7 @@ fn turn_completion_recovers_final_message_from_turn_items() {
                     phase: None,
                     memory_citation: None,
                     delivery: None,
+                    questions: None,
                 }],
                 status: TurnStatus::Completed,
                 error: None,
@@ -1344,6 +1350,7 @@ fn turn_completion_reconciles_started_items_from_turn_items() {
     let started =
         processor.collect_thread_events(ServerNotification::ItemStarted(ItemStartedNotification {
             item: ThreadItem::CommandExecution {
+                model_context: None,
                 id: "cmd-1".to_string(),
                 command: "ls".to_string(),
                 cwd: test_path_buf("/tmp/project").abs().into(),
@@ -1386,6 +1393,7 @@ fn turn_completion_reconciles_started_items_from_turn_items() {
                 id: "turn-1".to_string(),
                 items_view: codex_app_server_protocol::TurnItemsView::Full,
                 items: vec![ThreadItem::CommandExecution {
+                    model_context: None,
                     id: "cmd-1".to_string(),
                     command: "ls".to_string(),
                     cwd: test_path_buf("/tmp/project").abs().into(),
@@ -1443,6 +1451,7 @@ fn turn_completion_overwrites_stale_final_message_from_turn_items() {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -1462,6 +1471,7 @@ fn turn_completion_overwrites_stale_final_message_from_turn_items() {
                     phase: None,
                     memory_citation: None,
                     delivery: None,
+                    questions: None,
                 }],
                 status: TurnStatus::Completed,
                 error: None,
@@ -1495,6 +1505,7 @@ fn turn_completion_preserves_streamed_final_message_when_turn_items_are_empty() 
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
@@ -1542,6 +1553,7 @@ fn failed_turn_clears_stale_final_message() {
                 phase: None,
                 memory_citation: None,
                 delivery: None,
+                questions: None,
             },
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),

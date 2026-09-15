@@ -6,6 +6,7 @@ use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::CollaborationModeMessages;
 use codex_protocol::openai_models::ConfirmationPolicies;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
+use codex_protocol::openai_models::ModelInstructionsVariables;
 use codex_protocol::openai_models::ModelTokenBudgetConfig;
 use codex_protocol::openai_models::MultiAgentMessages;
 use codex_protocol::openai_models::MultiAgentModeMessages;
@@ -42,6 +43,7 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
     let auto_review = AutoReviewMessages {
         policy: Some("review policy".to_string()),
         policy_template: Some("review policy template".to_string()),
+        node_repl_policy: None,
         rejection_instructions: Some("rejection instructions".to_string()),
         timeout_instructions: Some(String::new()),
     };
@@ -62,6 +64,8 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
         }),
     };
     let token_budget = ModelTokenBudgetConfig {
+        enabled: false,
+        use_history_notes_extension: false,
         reminder_threshold_tokens: 128,
         reminder_message_template: "budget reminder".to_string(),
         guidance_message: "budget guidance".to_string(),
@@ -130,99 +134,6 @@ fn base_instruction_override_is_literal_and_preserves_catalog_messages() {
         updated.get_model_instructions(/*personality*/ None),
         override_instructions
     );
-}
-
-#[test]
-fn disabled_personality_bakes_default_and_preserves_catalog_approval_messages() {
-    let mut model = model_info_from_slug("unknown-model");
-    let approvals = ApprovalMessages {
-        on_request: Some("user approvals".to_string()),
-        on_request_auto_review: None,
-        never: None,
-        unless_trusted: None,
-    };
-    model.model_messages = Some(ModelMessages {
-        persistent_instructions: Some(String::new()),
-        tools: Some(ToolMessages {
-            send_user_message_async: Some(ToolMessage {
-                description: Some(String::new()),
-            }),
-        }),
-        instructions_template: Some("before {{ personality }} after".to_string()),
-        instructions_variables: Some(ModelInstructionsVariables {
-            personality_default: Some("default".to_string()),
-            personality_friendly: Some("friendly".to_string()),
-            personality_pragmatic: Some("pragmatic".to_string()),
-        }),
-        approvals: Some(approvals.clone()),
-        collaboration_modes: None,
-        auto_review: None,
-        permissions: None,
-        multi_agent: None,
-        token_budget: None,
-        confirmation_policies: None,
-        guardian_v2: None,
-    });
-    let config = ModelsManagerConfig {
-        personality_enabled: false,
-        ..Default::default()
-    };
-
-    let updated = with_config_overrides(model, &config);
-
-    assert_eq!(
-        updated.model_messages,
-        Some(ModelMessages {
-            persistent_instructions: Some(String::new()),
-            tools: Some(ToolMessages {
-                send_user_message_async: Some(ToolMessage {
-                    description: Some(String::new()),
-                }),
-            }),
-            instructions_template: Some("before default after".to_string()),
-            instructions_variables: None,
-            approvals: Some(approvals),
-            collaboration_modes: None,
-            auto_review: None,
-            permissions: None,
-            multi_agent: None,
-            token_budget: None,
-            confirmation_policies: None,
-            guardian_v2: None,
-        })
-    );
-}
-
-#[test]
-fn disabled_personality_uses_plain_base_instructions_for_local_personality_models() {
-    let config = ModelsManagerConfig {
-        personality_enabled: false,
-        personality: Some(Personality::Friendly),
-        ..Default::default()
-    };
-
-    for slug in ["gpt-5.2-codex", "exp-codex-personality"] {
-        let updated = with_config_overrides(model_info_from_slug(slug), &config);
-
-        assert_eq!(
-            updated.model_messages,
-            Some(ModelMessages {
-                persistent_instructions: None,
-                tools: None,
-                instructions_template: Some(BASE_INSTRUCTIONS.to_string()),
-                instructions_variables: None,
-                approvals: None,
-                collaboration_modes: None,
-                auto_review: None,
-                permissions: None,
-                multi_agent: None,
-                token_budget: None,
-                confirmation_policies: None,
-                guardian_v2: None,
-            }),
-            "unexpected model messages for {slug}"
-        );
-    }
 }
 
 #[test]

@@ -9,6 +9,7 @@ mod connect_policy;
 mod connection_lifecycle;
 mod credential_broker;
 mod environment_policy;
+mod executor_os;
 mod http_proxy;
 mod mitm;
 mod mitm_hook;
@@ -25,6 +26,8 @@ mod responses;
 mod runtime;
 mod socks5;
 mod state;
+#[cfg(target_os = "macos")]
+mod system_dns;
 mod upstream;
 #[cfg(target_os = "windows")]
 mod windows_proxy_ingress;
@@ -58,6 +61,7 @@ pub use credential_broker::credential_broker_provider_context_env_keys;
 pub use credential_broker::credential_broker_provider_sources_allowed;
 pub use credential_broker::is_credential_broker_provider_env_key;
 pub use environment_policy::EnvironmentNetworkPolicy;
+pub use executor_os::NetworkProxyExecutorOs;
 pub use mitm_hook::InjectedHeaderConfig;
 pub use mitm_hook::MitmHookActionsConfig;
 pub use mitm_hook::MitmHookBodyConfig;

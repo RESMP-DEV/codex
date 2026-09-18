@@ -45,7 +45,10 @@ use codex_mcp::auth_elicitation_completed_result;
 use codex_mcp::build_auth_elicitation_plan;
 use codex_mcp::is_connector_auth_failure_from_tool_result;
 use codex_mcp::mcp_permission_prompt_is_auto_approved;
+use codex_prompts::ResolvedModelMessages;
 use codex_protocol::approvals::ElicitationRequest;
+use codex_protocol::items::McpAppDisplayMode;
+use codex_protocol::items::McpAppUi;
 use codex_protocol::items::McpToolCallError;
 use codex_protocol::items::McpToolCallItem;
 use codex_protocol::items::McpToolCallStatus;
@@ -328,7 +331,10 @@ pub(crate) async fn handle_mcp_tool_call(
                     &call_id,
                     invocation,
                     item_metadata.clone(),
-                    crate::guardian::guardian_timeout_message(turn_context.model_info()),
+                    ResolvedModelMessages::from_model(turn_context.model_info())
+                        .auto_review()
+                        .timeout_instructions
+                        .to_string(),
                     /*already_started*/ true,
                 )
                 .await
@@ -390,7 +396,7 @@ pub(crate) struct HandledMcpToolCall {
 struct McpToolCallItemMetadata {
     connector_id: Option<String>,
     link_id: Option<String>,
-    mcp_app_resource_uri: Option<String>,
+    mcp_app_ui: Option<McpAppUi>,
     app_name: Option<String>,
     action_name: Option<String>,
     plugin_id: Option<String>,
@@ -408,8 +414,7 @@ impl McpToolCallItemMetadata {
             connector_id: trusted_mcp_app_metadata
                 .and_then(|metadata| metadata.connector_id.clone()),
             link_id: trusted_mcp_app_metadata.and_then(|metadata| metadata.link_id.clone()),
-            mcp_app_resource_uri: metadata
-                .and_then(|metadata| metadata.mcp_app_resource_uri.clone()),
+            mcp_app_ui: metadata.and_then(|metadata| metadata.mcp_app_ui.clone()),
             app_name: trusted_mcp_app_metadata.and_then(|metadata| metadata.connector_name.clone()),
             action_name: trusted_mcp_app_metadata
                 .and_then(|metadata| metadata.codex_apps_meta.as_ref())
@@ -776,7 +781,7 @@ async fn maybe_request_codex_apps_auth_elicitation(
         url: plan.elicitation.url,
         elicitation_id: plan.elicitation.elicitation_id,
     };
-    let response = sess
+    let outcome = match sess
         .request_mcp_server_elicitation(
             turn_context,
             CODEX_APPS_MCP_SERVER_NAME.to_string(),
@@ -784,8 +789,33 @@ async fn maybe_request_codex_apps_auth_elicitation(
             request,
         )
         .await
-        .response;
-    if !response
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let mut result = result;
+            // Direct output prefers structured content. Preserve its diagnostic as
+            // text so both output paths show it alongside the recovery guidance.
+            if let Some(structured_content) = result.structured_content.take() {
+                result.content.push(serde_json::json!({
+                    "type": "text",
+                    "text": structured_content.to_string(),
+                }));
+            }
+            result.content.insert(
+                /*index*/ 0,
+                serde_json::json!({
+                    "type": "text",
+                    "text": format!(
+                        "Authentication for {} could not be completed. {error}",
+                        plan.auth_failure.connector_name
+                    ),
+                }),
+            );
+            return result;
+        }
+    };
+    if !outcome
+        .response
         .as_ref()
         .is_some_and(|response| response.action == ElicitationAction::Accept)
     {
@@ -1004,7 +1034,11 @@ async fn notify_mcp_tool_call_started(
         tool,
         arguments: arguments.unwrap_or(JsonValue::Null),
         connector_id: item_metadata.connector_id,
-        mcp_app_resource_uri: item_metadata.mcp_app_resource_uri,
+        mcp_app_resource_uri: item_metadata
+            .mcp_app_ui
+            .as_ref()
+            .map(|ui| ui.resource_uri.clone()),
+        mcp_app_ui: item_metadata.mcp_app_ui,
         link_id: item_metadata.link_id,
         app_name: item_metadata.app_name,
         action_name: item_metadata.action_name,
@@ -1049,7 +1083,11 @@ async fn notify_mcp_tool_call_completed(
         tool,
         arguments: arguments.unwrap_or(JsonValue::Null),
         connector_id: item_metadata.connector_id,
-        mcp_app_resource_uri: item_metadata.mcp_app_resource_uri,
+        mcp_app_resource_uri: item_metadata
+            .mcp_app_ui
+            .as_ref()
+            .map(|ui| ui.resource_uri.clone()),
+        mcp_app_ui: item_metadata.mcp_app_ui,
         link_id: item_metadata.link_id,
         app_name: item_metadata.app_name,
         action_name: item_metadata.action_name,
@@ -1171,7 +1209,7 @@ pub(crate) struct McpToolApprovalMetadata {
     plugin_id: Option<String>,
     tool_title: Option<String>,
     tool_description: Option<String>,
-    mcp_app_resource_uri: Option<String>,
+    mcp_app_ui: Option<McpAppUi>,
     codex_apps_meta: Option<serde_json::Map<String, serde_json::Value>>,
     openai_file_input_optional_fields: Option<HashMap<String, Vec<String>>>,
 }
@@ -1346,12 +1384,8 @@ fn build_confirmation_policies_request_meta(
     }
 
     let mut policies = serde_json::Map::new();
-    if let Some(confirmation_policies) = step_context
-        .settings
-        .model_info
-        .model_messages
-        .as_ref()
-        .and_then(|messages| messages.confirmation_policies.as_ref())
+    if let Some(confirmation_policies) =
+        ResolvedModelMessages::from_model(&step_context.settings.model_info).confirmation_policies()
     {
         for (name, policy) in [
             ("browser_use", confirmation_policies.browser_use.as_ref()),
@@ -1588,6 +1622,10 @@ pub(crate) async fn request_mcp_tool_user_approval(
         );
     }
 
+    if turn_context.session_source.is_non_root_agent() {
+        return ReviewDecision::denied(codex_mcp::MCP_ELICITATION_HANDOFF_MESSAGE);
+    }
+
     let tool_call_mcp_elicitation_enabled = turn_context
         .config
         .features
@@ -1633,7 +1671,7 @@ pub(crate) async fn request_mcp_tool_user_approval(
             plugin_id: None,
             tool_title: tool_title.clone(),
             tool_description: tool_description.clone(),
-            mcp_app_resource_uri: None,
+            mcp_app_ui: None,
             codex_apps_meta: None,
             openai_file_input_optional_fields: None,
         };
@@ -1653,9 +1691,13 @@ pub(crate) async fn request_mcp_tool_user_approval(
                     .map(|rendered_template| rendered_template.elicitation_message.as_str()),
                 prompt_options,
             });
-        let outcome = sess
+        let outcome = match sess
             .request_mcp_server_elicitation(turn_context, server.clone(), request_id, request)
-            .await;
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => return ReviewDecision::denied(error.to_string()),
+        };
         (
             outcome.sent,
             parse_mcp_tool_approval_elicitation_response(outcome.response, &question_id),
@@ -1783,6 +1825,24 @@ fn mcp_tool_metadata(
         None
     };
 
+    let mcp_app_ui = get_mcp_app_resource_uri(tool_info.tool.meta.as_deref()).map(|resource_uri| {
+        let preferred_model_display_mode = match tool_info
+            .tool
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("openai/ui"))
+            .and_then(|ui| ui.get("preferredModelDisplayMode"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("fullscreen") => McpAppDisplayMode::Fullscreen,
+            _ => McpAppDisplayMode::Inline,
+        };
+        McpAppUi {
+            resource_uri,
+            preferred_model_display_mode,
+        }
+    });
+
     Ok(McpToolApprovalMetadata {
         annotations: tool_info.tool.annotations,
         connector_id: tool_info.connector_id,
@@ -1793,7 +1853,7 @@ fn mcp_tool_metadata(
         plugin_id: plugin_id.map(str::to_string),
         tool_title: tool_info.tool.title,
         tool_description: tool_info.tool.description.map(std::borrow::Cow::into_owned),
-        mcp_app_resource_uri: get_mcp_app_resource_uri(tool_info.tool.meta.as_deref()),
+        mcp_app_ui,
         codex_apps_meta,
         // Disallow custom MCPs from uploading files via fileParams.
         openai_file_input_optional_fields: openai_file_input_optional_fields_for_server(

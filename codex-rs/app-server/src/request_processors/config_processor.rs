@@ -371,7 +371,10 @@ pub(super) async fn reload_user_config(
         };
         let current_config = thread.config().await;
         let next_config = match config_manager
-            .load_latest_config_for_thread(current_config.as_ref())
+            .load_latest_config_with_session_layers(
+                &current_config.config_layer_stack,
+                &current_config.cwd,
+            )
             .await
         {
             Ok(config) => config,
@@ -469,10 +472,10 @@ fn map_requirements_to_api(
                     implementations
                         .into_iter()
                         .map(|implementation| match implementation {
-                            codex_config::types::WindowsSandboxModeToml::Elevated => {
+                            codex_config::WindowsSandboxImplementationToml::Elevated => {
                                 WindowsSandboxImplementation::Elevated
                             }
-                            codex_config::types::WindowsSandboxModeToml::Unelevated => {
+                            codex_config::WindowsSandboxImplementationToml::Unelevated => {
                                 WindowsSandboxImplementation::Unelevated
                             }
                         })
@@ -1099,8 +1102,8 @@ mod tests {
         let mapped = map_test_requirements(ConfigRequirementsToml {
             windows: Some(WindowsRequirementsToml {
                 allowed_sandbox_implementations: Some(vec![
-                    codex_config::types::WindowsSandboxModeToml::Elevated,
-                    codex_config::types::WindowsSandboxModeToml::Unelevated,
+                    codex_config::WindowsSandboxImplementationToml::Elevated,
+                    codex_config::WindowsSandboxImplementationToml::Unelevated,
                 ]),
                 sandbox_private_desktop: Some(false),
             }),

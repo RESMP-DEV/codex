@@ -47,6 +47,7 @@ use crate::models::ImageDetail;
 use crate::models::InternalChatMessageMetadataPassthrough;
 use crate::models::MessagePhase;
 use crate::models::PermissionProfile;
+use crate::models::ProfileWorkspaceRoot;
 use crate::models::ResponseInputItem;
 use crate::models::ResponseItem;
 use crate::models::SandboxEnforcement;
@@ -528,7 +529,7 @@ pub struct ThreadSettingsOverrides {
 
     /// Updated profile-defined workspace roots for status summaries and
     /// per-turn config reconstruction.
-    pub profile_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    pub profile_workspace_roots: Option<Vec<ProfileWorkspaceRoot>>,
 
     /// Updated command approval policy.
     pub approval_policy: Option<AskForApproval>,
@@ -1857,6 +1858,7 @@ pub enum CodexErrorInfo {
     RateLimitExceeded,
     ServerOverloaded,
     CyberPolicy,
+    BioPolicy,
     MisalignmentPolicyViolation,
     HttpConnectionFailed {
         http_status_code: Option<u16>,
@@ -1898,6 +1900,7 @@ impl CodexErrorInfo {
             | Self::RateLimitExceeded
             | Self::ServerOverloaded
             | Self::CyberPolicy
+            | Self::BioPolicy
             | Self::MisalignmentPolicyViolation
             | Self::HttpConnectionFailed { .. }
             | Self::ResponseStreamConnectionFailed { .. }
@@ -2670,6 +2673,9 @@ pub struct McpToolCallBeginEvent {
     pub mcp_app_resource_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub mcp_app_ui: Option<crate::items::McpAppUi>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub link_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -2700,6 +2706,9 @@ pub struct McpToolCallEndEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub mcp_app_resource_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mcp_app_ui: Option<crate::items::McpAppUi>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub link_id: Option<String>,
@@ -5392,6 +5401,7 @@ mod tests {
                 arguments: json!({"arg": "value"}),
                 connector_id: Some("connector".into()),
                 mcp_app_resource_uri: Some("app://connector".into()),
+                mcp_app_ui: None,
                 link_id: Some("link_123".into()),
                 app_name: Some("Calendar".into()),
                 action_name: Some("create_event".into()),
@@ -5513,6 +5523,7 @@ mod tests {
                 arguments: json!({"arg": "value"}),
                 connector_id: Some("connector".into()),
                 mcp_app_resource_uri: Some("app://connector".into()),
+                mcp_app_ui: None,
                 link_id: Some("link_123".into()),
                 app_name: Some("Calendar".into()),
                 action_name: Some("create_event".into()),

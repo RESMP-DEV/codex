@@ -12,6 +12,7 @@ use codex_experimental_api_macros::ExperimentalApi;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::ToolExposureSurface;
 use codex_protocol::config_types::Verbosity;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WebSearchToolConfig;
@@ -234,6 +235,8 @@ pub struct AppLinksConfig {
 pub struct AppConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Additional model-facing surfaces omitted for this connector's tools.
+    pub omit_tools_from: Option<Vec<ToolExposureSurface>>,
     pub approvals_reviewer: Option<ApprovalsReviewer>,
     pub destructive_enabled: Option<bool>,
     pub open_world_enabled: Option<bool>,
@@ -1089,8 +1092,8 @@ pub struct ConfigBatchWriteParams {
     #[ts(optional = nullable)]
     pub expected_version: Option<String>,
     /// When true, hot-reload updated runtime settings into loaded threads after writing.
-    /// Session-static model, reasoning-effort, Plan-mode reasoning-effort, service-tier, and
-    /// personality defaults are not reloaded.
+    /// Session-static model, reasoning-effort, Plan-mode reasoning-effort, and service-tier
+    /// defaults are not reloaded. The deprecated personality setting is also not reloaded.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reload_user_config: bool,
 }

@@ -82,14 +82,17 @@ impl SamplingExecution {
             | LunaSamplerError::IncompatibleCompaction
             | LunaSamplerError::InputTooLarge
             | LunaSamplerError::Api(
-                ApiError::Transport(TransportError::Build(_))
+                ApiError::Transport(
+                    TransportError::Build(_) | TransportError::ResponseTooLarge { .. },
+                )
                 | ApiError::ContextWindowExceeded
                 | ApiError::QuotaExceeded
                 | ApiError::UsageNotIncluded
                 | ApiError::RateLimit(_)
                 | ApiError::InvalidRequest { .. }
                 | ApiError::MisalignmentPolicyViolation { .. }
-                | ApiError::CyberPolicy { .. },
+                | ApiError::CyberPolicy { .. }
+                | ApiError::BioPolicy { .. },
             ) => false,
         };
         if retryable && *retries < MAX_SAMPLING_RETRIES {

@@ -95,6 +95,21 @@ fi
 
 echo "Install path: ${install_path}"
 echo "Linked to: $(readlink "${install_path}")"
+
+# --- code-mode host skew check ------------------------------------------------
+# cargo build -p codex-cli does not compile codex-code-mode-host (it needs the
+# V8 ptrcomp_sandbox artifacts), so a daily rebuild silently leaves a stale host
+# in place. A host older than the codex binary breaks the TUI tool bridge with
+# "failed to decode code-mode IPC frame: missing field ..." errors.
+host_path="$(dirname "${install_path}")/codex-code-mode-host"
+if [[ ! -x "${host_path}" ]]; then
+  echo "warning: no codex-code-mode-host beside the install path; the code-mode tool bridge will be unavailable." >&2
+elif [[ "${host_path}" -ot "${release_bin}" ]]; then
+  echo "warning: ${host_path} predates the freshly built codex binary." >&2
+  echo "warning: a stale host breaks the tool bridge via IPC frame decode errors." >&2
+  echo "warning: rebuild it (cargo build -p codex-code-mode-host --release, V8 artifacts via scripts/codex_package/v8.py)" >&2
+  echo "warning: or install the official host from the matching openai/codex release (codex-code-mode-host-aarch64-apple-darwin.tar.gz)." >&2
+fi
 echo "Release SHA: ${release_sha}"
 
 if command -v codex >/dev/null 2>&1; then

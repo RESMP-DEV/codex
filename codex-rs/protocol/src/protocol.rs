@@ -188,23 +188,6 @@ impl GitSha {
     }
 }
 
-/// Submission Queue Entry - requests from user
-#[derive(Debug)]
-pub struct Submission {
-    /// Unique id for this Submission to correlate with Events
-    pub id: String,
-    /// Payload
-    pub op: Op,
-    /// Optional W3C trace carrier propagated across async submission handoffs.
-    pub trace: Option<W3cTraceContext>,
-    /// Core-provided ID of the parent turn that directly initiated this submission.
-    ///
-    /// This is only used for inter-agent communication.
-    pub parent_turn_id: Option<String>,
-    /// Core-provided ID of the top-level turn that causally initiated this submission.
-    pub root_turn_id: Option<String>,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct W3cTraceContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -603,6 +586,13 @@ pub enum Op {
     /// This server sends [`EventMsg::TurnAborted`] in response.
     Interrupt,
 
+    /// Interrupt the named turn only if no input is queued for it.
+    /// The decision is acknowledged before cancellation finishes.
+    InterruptIfNoPendingInput {
+        turn_id: String,
+        reply: oneshot::Sender<bool>,
+    },
+
     /// Terminate all running background terminal processes for this thread.
     /// Use this when callers intentionally want to stop long-lived background shells.
     CleanBackgroundTerminals,
@@ -934,6 +924,7 @@ impl Op {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Interrupt => "interrupt",
+            Self::InterruptIfNoPendingInput { .. } => "interrupt_if_no_pending_input",
             Self::CleanBackgroundTerminals => "clean_background_terminals",
             Self::RealtimeConversationStart(_) => "realtime_conversation_start",
             Self::RealtimeConversationAudio(_) => "realtime_conversation_audio",
@@ -1848,8 +1839,8 @@ pub enum NonSteerableTurnKind {
 }
 
 /// Codex errors that we expose to clients.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+#[schemars(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
 pub enum CodexErrorInfo {
     ContextWindowExceeded,
@@ -1870,6 +1861,7 @@ pub enum CodexErrorInfo {
     InternalServerError,
     Unauthorized,
     BadRequest,
+    InvalidPrompt,
     SandboxError,
     /// The response SSE stream disconnected in the middle of a turnbefore completion.
     ResponseStreamDisconnected {
@@ -1907,6 +1899,7 @@ impl CodexErrorInfo {
             | Self::InternalServerError
             | Self::Unauthorized
             | Self::BadRequest
+            | Self::InvalidPrompt
             | Self::SandboxError
             | Self::ResponseStreamDisconnected { .. }
             | Self::ResponseTooManyFailedAttempts { .. }
@@ -2190,7 +2183,7 @@ pub struct TurnStartedEvent {
     pub collaboration_mode_kind: ModeKind,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct ThreadSettingsAppliedEvent {
     /// Logical task that owns this snapshot, independent of the physical rollout file.
     /// Absent in older histories; copied snapshots retain their original owner's ID.
@@ -3115,6 +3108,12 @@ pub struct HistoryPosition {
 /// and should be used when there is no config override.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
 pub struct SessionMeta {
+    /// ChatGPT user that created this thread; absent when unavailable or for older threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_user_id: Option<String>,
+    /// ChatGPT account selected when this thread was created. Never updated on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator_account_id: Option<String>,
     /// session_id is equal to the root thread's ID.
     pub session_id: SessionId,
     pub id: ThreadId,
@@ -3189,6 +3188,8 @@ impl Default for SessionMeta {
     fn default() -> Self {
         let id = ThreadId::default();
         SessionMeta {
+            creator_user_id: None,
+            creator_account_id: None,
             session_id: id.into(),
             id,
             forked_from_id: None,

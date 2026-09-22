@@ -67,6 +67,7 @@ fn validate_environment_config(
             policy,
             config.permission_profile.permission_profile(),
             &Policy::empty(),
+            codex_network_proxy::LocalBindingPolicy::DefaultFalse,
         )
         .map_err(|error| {
             CodexErr::InvalidRequest(format!("invalid environment network policy: {error}"))
@@ -157,12 +158,10 @@ impl Session {
                     }
                 }
                 if environments != self.services.turn_environments.selections() {
-                    self.mark_mcp_runtime_dirty();
                     self.services.turn_environments.update_selections(
                         &environments,
                         &configuration.inferred_environment_config(),
                     );
-                    self.schedule_mcp_prewarm();
                 }
             }
             self.services.turn_environments.snapshot()

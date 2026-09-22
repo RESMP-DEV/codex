@@ -7,6 +7,7 @@ use super::rate_limits::RateLimitWindowDisplay;
 use super::rate_limits::SpendControlLimitSnapshotDisplay;
 use super::rate_limits::StatusRateLimitData;
 use super::rate_limits::compose_rate_limit_data_many;
+use crate::clock_format::ClockFormat;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::keymap::RuntimeKeymap;
@@ -329,7 +330,12 @@ async fn status_snapshot_includes_reasoning_details() {
         plan_type: None,
         rate_limit_reached_type: None,
     };
-    let rate_display = rate_limit_snapshot_display(&snapshot, captured_at);
+    let rate_display = super::rate_limits::rate_limit_snapshot_display_for_limit(
+        &snapshot,
+        "codex".to_string(),
+        captured_at,
+        ClockFormat::TwelveHour,
+    );
 
     let model_slug = get_model_offline_for_tests(config.model.as_deref());
     let token_info = token_info_for(&model_slug, &config, &usage);
@@ -1638,41 +1644,51 @@ async fn status_snapshot_uses_default_reasoning_when_config_empty() {
         .with_ymd_and_hms(2024, 2, 3, 4, 5, 6)
         .single()
         .expect("timestamp");
-    let remote_connection = RemoteConnectionStatus {
-        address: "unix:///tmp/codex-home/app-server-control/app-server-control.sock".to_string(),
-        version: "v0.133.0".to_string(),
-    };
+    for (is_local_daemon, snapshot) in [
+        (
+            false,
+            "status_snapshot_uses_default_reasoning_when_config_empty",
+        ),
+        (true, "status_snapshot_local_background_server"),
+    ] {
+        let remote_connection = RemoteConnectionStatus {
+            address: "unix:///tmp/codex-home/app-server-control/app-server-control.sock"
+                .to_string(),
+            version: "v0.133.0".to_string(),
+            is_local_daemon,
+        };
 
-    let model_slug = get_model_offline_for_tests(config.model.as_deref());
-    let token_info = token_info_for(&model_slug, &config, &usage);
-    let (composite, _) = new_status_output_with_rate_limits_handle(
-        &config,
-        /*requires_openai_auth*/ true,
-        /*model_provider_id*/ None,
-        Some(&remote_connection),
-        account_display.as_ref(),
-        Some(&token_info),
-        &usage,
-        &None,
-        /*thread_name*/ None,
-        /*forked_from*/ None,
-        &[],
-        None,
-        now,
-        &model_slug,
-        /*collaboration_mode*/ None,
-        /*reasoning_effort_override*/ Some(Some(ReasoningEffort::Medium)),
-        "<none>".to_string(),
-        /*refreshing_rate_limits*/ false,
-    );
-    let mut rendered_lines = render_lines(&composite.display_lines(/*width*/ 80));
-    if cfg!(windows) {
-        for line in &mut rendered_lines {
-            *line = line.replace('\\', "/");
+        let model_slug = get_model_offline_for_tests(config.model.as_deref());
+        let token_info = token_info_for(&model_slug, &config, &usage);
+        let (composite, _) = new_status_output_with_rate_limits_handle(
+            &config,
+            /*requires_openai_auth*/ true,
+            /*model_provider_id*/ None,
+            Some(&remote_connection),
+            account_display.as_ref(),
+            Some(&token_info),
+            &usage,
+            &None,
+            /*thread_name*/ None,
+            /*forked_from*/ None,
+            &[],
+            None,
+            now,
+            &model_slug,
+            /*collaboration_mode*/ None,
+            /*reasoning_effort_override*/ Some(Some(ReasoningEffort::Medium)),
+            "<none>".to_string(),
+            /*refreshing_rate_limits*/ false,
+        );
+        let mut rendered_lines = render_lines(&composite.display_lines(/*width*/ 80));
+        if cfg!(windows) {
+            for line in &mut rendered_lines {
+                *line = line.replace('\\', "/");
+            }
         }
+        let sanitized = sanitize_directory(rendered_lines).join("\n");
+        assert_snapshot!(snapshot, sanitized);
     }
-    let sanitized = sanitize_directory(rendered_lines).join("\n");
-    assert_snapshot!(sanitized);
 }
 
 #[tokio::test]
@@ -2262,4 +2278,37 @@ async fn status_permissions_include_executor_profile_root() {
         permissions_text_for_width(&config, /*width*/ 160).expect("permissions line"),
         @r"Profile executor (workspace [\\server\share\foreign], Ask for approval)"
     );
+}
+
+#[test]
+fn reset_timestamps_follow_clock_preference() {
+    let captured_at = Local
+        .with_ymd_and_hms(
+            /*year*/ 2026, /*month*/ 9, /*day*/ 21, /*hour*/ 0, /*min*/ 0,
+            /*sec*/ 0,
+        )
+        .single()
+        .unwrap();
+    let labels = [ClockFormat::TwelveHour, ClockFormat::TwentyFourHour]
+        .into_iter()
+        .flat_map(|clock_format| {
+            [0, 12, 23, 24].map(|hours| {
+                super::helpers::format_reset_timestamp(
+                    captured_at + ChronoDuration::hours(hours),
+                    captured_at,
+                    clock_format,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_snapshot!(labels.join("\n"), @"
+    12:00 AM
+    12:00 PM
+    11:00 PM
+    12:00 AM on 22 Sep
+    00:00
+    12:00
+    23:00
+    00:00 on 22 Sep
+    ");
 }

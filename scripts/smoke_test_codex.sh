@@ -1,26 +1,29 @@
 #!/usr/bin/env bash
-# Smoke test the freshly-linked codex binary with a real model round-trip.
+# Smoke test the freshly-published codex snapshot with a real model round-trip.
 #
 # After a daily rebuild, send a trivial prompt through `codex exec` and assert
-# the literal reply comes back. On failure, roll the install symlink back to a
-# real-file last-known-good copy and fire a loud macOS notification so a human
-# (or another model) can intervene. Exits 0 on pass, 1 on smoke failure, 2 on
-# configuration errors (e.g., no rollback target).
+# the literal reply comes back. On failure, flip the `current` package symlink
+# back to the `previous-good` snapshot (a complete package, so the app-server
+# daemon keeps working — unlike a bare binary rollback), re-pin the daemon, and
+# fire a loud macOS notification so a human (or another model) can intervene.
+# Exits 0 on pass, 1 on smoke failure, 2 on configuration errors (e.g., no
+# rollback target).
 #
 # Usage:
 #   scripts/smoke_test_codex.sh                 # probe + rollback-on-fail + notify
-#   scripts/smoke_test_codex.sh --no-rollback   # probe only, leave binary linked on fail
+#   scripts/smoke_test_codex.sh --no-rollback   # probe only, leave snapshot selected
 #   scripts/smoke_test_codex.sh --no-notify     # skip the macOS modal/banner
 #   scripts/smoke_test_codex.sh --probe '...'   # override the probe prompt
 #
-# Design: see docs/superpowers/specs/ (smoke-test design doc).
+# Design: see docs/superpowers/specs/ (smoke-test design doc) and
+# ~/AlphaHENG/docs/operations/codex_local_package_flow.md.
 
 set -euo pipefail
 
 # --- configuration -----------------------------------------------------------
 
 INSTALL_PATH="${CODEX_INSTALL_PATH:-${HOME}/.local/bin/codex}"
-LAST_KNOWN_GOOD="${CODEX_LAST_KNOWN_GOOD:-${HOME}/.local/bin/codex.last-known-good}"
+LIB_ROOT="${CODEX_LIB_ROOT:-${HOME}/.local/lib/alphaheng}"
 LOG_DIR="${CODEX_SMOKE_LOG_DIR:-${HOME}/.codex/smoke-logs}"
 PROBE_PROMPT_DEFAULT="Reply with exactly: codex-smoke-ok"
 PROBE_REPLY_TOKEN="codex-smoke-ok"
@@ -35,8 +38,8 @@ usage() {
 Usage: scripts/smoke_test_codex.sh [options]
 
 Options:
-  --no-rollback         Leave the freshly-linked binary in place on failure
-                        (default: roll back to last-known-good).
+  --no-rollback         Leave the freshly-published snapshot selected on failure
+                        (default: flip `current` back to previous-good).
   --no-notify           Skip the macOS blocking modal + banner on failure.
   --probe <prompt>      Override the probe prompt (default replies with a
                         fixed token that the assertion looks for).
@@ -44,10 +47,12 @@ Options:
   -h, --help            Show this help.
 
 Environment:
-  CODEX_INSTALL_PATH        Override the codex install path.
-  CODEX_LAST_KNOWN_GOOD     Override the rollback target path.
-  CODEX_SMOKE_LOG_DIR       Directory for per-run logs (default: ~/.codex/smoke-logs).
-  CODEX_SMOKE_TIMEOUT       Per-probe timeout in seconds (default: 60).
+  CODEX_INSTALL_PATH   Override the codex install path.
+  CODEX_LIB_ROOT       Snapshot root (default: ~/.local/lib/alphaheng); expects
+                      `current` and `previous-good` symlinks managed by
+                      scripts/build_and_link_codex.sh.
+  CODEX_SMOKE_LOG_DIR  Directory for per-run logs (default: ~/.codex/smoke-logs).
+  CODEX_SMOKE_TIMEOUT  Per-probe timeout in seconds (default: 60).
 EOF
 }
 
@@ -66,6 +71,9 @@ while (($# > 0)); do
   esac
 done
 
+current_link="${LIB_ROOT}/current"
+previous_good="${LIB_ROOT}/previous-good"
+
 mkdir -p "$LOG_DIR"
 run_stamp="$(date +%Y%m%d%H%M%S)"
 log_path="${LOG_DIR}/smoke-${run_stamp}.log"
@@ -79,8 +87,9 @@ if [[ ! -e "$INSTALL_PATH" ]]; then
   exit 2
 fi
 
-# Resolve the real file behind the symlink, if any. If INSTALL_PATH is already a
-# regular file, -e above passed and readlink returns the path unchanged.
+# Resolve the real file behind the symlink chain, if any. If INSTALL_PATH is
+# already a regular file, -e above passed and readlink returns the path
+# unchanged.
 real_binary="$(readlink -f "$INSTALL_PATH" 2>/dev/null || echo "$INSTALL_PATH")"
 if [[ ! -f "$real_binary" ]]; then
   echo "error: resolved binary $real_binary is not a regular file" >&2
@@ -93,18 +102,24 @@ log "real binary:   $real_binary"
 log "release sha:   $release_sha"
 log "probe prompt:  $probe_prompt"
 
-# --- capture last-known-good BEFORE the probe --------------------------------
+# --- resolve the rollback target BEFORE the probe ------------------------------
 #
-# Copy the resolved real binary to a stable path. This is refreshed on every
-# passing run, so it tracks the most recent known-good build. We use cp -L
-# (follow symlinks) to guarantee a real file, not a dangling symlink — the
-# build helper's own --backup-existing output is often a symlink to target/,
-# which the next rebuild overwrites and would make useless as a rollback target.
+# The rollback target is the previous-good snapshot directory published by
+# scripts/build_and_link_codex.sh — a complete package layout, so the
+# app-server daemon can serve from it after the flip (a bare binary cannot).
 
-if [[ "$do_rollback" -eq 1 ]]; then
-  log "capturing last-known-good -> $LAST_KNOWN_GOOD"
-  if ! cp -L "$real_binary" "$LAST_KNOWN_GOOD" 2>>"$log_path"; then
-    log "WARNING: failed to capture last-known-good — rollback may not be possible"
+rollback_target=""
+if ((do_rollback)); then
+  if [[ -L "$previous_good" ]]; then
+    candidate="$(basename "$(readlink "$previous_good")")"
+    if [[ -n "$candidate" && -x "${LIB_ROOT}/packages/${candidate}/bin/codex" ]]; then
+      rollback_target="$candidate"
+    fi
+  fi
+  if [[ -n "$rollback_target" ]]; then
+    log "rollback target: packages/${rollback_target}"
+  else
+    log "WARNING: no previous-good snapshot — rollback will not be possible"
   fi
 fi
 
@@ -129,7 +144,7 @@ if [[ "$probe_rc" -ne 0 ]]; then
   log "probe FAILED (exit $probe_rc)"
 elif grep -qF "$PROBE_REPLY_TOKEN" "$probe_output_path"; then
   log "probe PASSED (reply contains '$PROBE_REPLY_TOKEN')"
-  log "outcome: SUCCESS — binary is good, last-known-good refreshed"
+  log "outcome: SUCCESS — snapshot is good and stays selected"
   exit 0
 else
   log "probe FAILED (exit 0 but reply missing '$PROBE_REPLY_TOKEN')"
@@ -143,19 +158,26 @@ sed -n '1,40p' "$probe_output_path" | tee -a "$log_path" >&2
 log "full probe output saved: $probe_output_path"
 
 if [[ "$do_rollback" -eq 1 ]]; then
-  if [[ -f "$LAST_KNOWN_GOOD" ]]; then
-    lkg_sha="$(shasum -a 256 "$LAST_KNOWN_GOOD" | awk '{print $1}')"
-    if ln -sfn "$LAST_KNOWN_GOOD" "$INSTALL_PATH"; then
-      log "ROLLBACK: relinked $INSTALL_PATH -> $LAST_KNOWN_GOOD (sha $lkg_sha)"
+  if [[ -n "$rollback_target" ]]; then
+    if ln -sfn "packages/${rollback_target}" "$current_link"; then
+      log "ROLLBACK: flipped current -> packages/${rollback_target}"
+      # The daemon keeps its own copy under CODEX_HOME; re-pin it to the
+      # rolled-back snapshot. Best-effort: a failure here leaves the CLI rolled
+      # back but the daemon stale, which the hint below covers.
+      if timeout 90 "$INSTALL_PATH" app-server daemon update --from-cli --yes >>"$log_path" 2>&1; then
+        log "daemon re-pinned to the rolled-back snapshot"
+      else
+        log "WARNING: daemon re-pin failed — run: codex app-server daemon update --from-cli --yes"
+      fi
     else
-      log "ROLLBACK FAILED: could not relink $INSTALL_PATH (manual recovery required)"
+      log "ROLLBACK FAILED: could not flip $current_link (manual recovery required)"
     fi
   else
-    log "ROLLBACK IMPOSSIBLE: no last-known-good at $LAST_KNOWN_GOOD"
+    log "ROLLBACK IMPOSSIBLE: no previous-good snapshot under ${LIB_ROOT}/packages"
     log "codex is currently broken — manual intervention required"
   fi
 else
-  log "--no-rollback in effect: leaving freshly-linked (broken) binary in place"
+  log "--no-rollback in effect: leaving freshly-published snapshot selected"
 fi
 
 if [[ "$do_notify" -eq 1 ]]; then
@@ -173,7 +195,7 @@ display dialog "codex smoke test FAILED after daily rebuild.
 Probe: $probe_prompt
 Outcome: exit $probe_rc, reply did not contain '$PROBE_REPLY_TOKEN'.
 
-$([[ "$do_rollback" -eq 1 ]] && echo "Rolled back to last-known-good: $LAST_KNOWN_GOOD" || echo "No rollback (--no-rollback in effect).")
+$([[ "$do_rollback" -eq 1 ]] && echo "Rolled back to previous-good snapshot: ${rollback_target:-none available}" || echo "No rollback (--no-rollback in effect).")
 
 Excerpt: $excerpt
 

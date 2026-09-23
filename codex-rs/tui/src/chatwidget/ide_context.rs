@@ -6,11 +6,24 @@ use super::ChatWidget;
 
 #[derive(Default)]
 pub(super) struct IdeContextState {
+    endpoint: crate::ide_context::IdeContextEndpoint,
     enabled: bool,
     prompt_fetch_warned: bool,
 }
 
 impl IdeContextState {
+    pub(super) fn from_environment() -> Self {
+        let endpoint = crate::ide_context::IdeContextEndpoint::from_environment();
+        Self {
+            enabled: matches!(
+                endpoint,
+                crate::ide_context::IdeContextEndpoint::Explicit(_)
+            ),
+            endpoint,
+            prompt_fetch_warned: false,
+        }
+    }
+
     pub(super) fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -69,7 +82,11 @@ impl ChatWidget {
             return;
         }
 
-        match crate::ide_context::fetch_ide_context(&self.config.cwd, &self.config.codex_home) {
+        match crate::ide_context::fetch_ide_context(
+            &self.config.cwd,
+            &self.config.codex_home,
+            &self.ide_context.endpoint,
+        ) {
             Ok(context) => {
                 self.ide_context.mark_available();
                 self.sync_ide_context_status_indicator();
@@ -95,7 +112,11 @@ impl ChatWidget {
             return;
         }
 
-        match crate::ide_context::fetch_ide_context(&self.config.cwd, &self.config.codex_home) {
+        match crate::ide_context::fetch_ide_context(
+            &self.config.cwd,
+            &self.config.codex_home,
+            &self.ide_context.endpoint,
+        ) {
             Ok(context) => {
                 self.ide_context.mark_available();
                 self.sync_ide_context_status_indicator();

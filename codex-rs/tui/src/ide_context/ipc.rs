@@ -13,6 +13,23 @@ use thiserror::Error;
 
 use super::IdeContext;
 
+/// Process-scoped IDE route. An explicit Unix socket never falls back to discovery.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum IdeContextEndpoint {
+    #[default]
+    Discover,
+    Explicit(PathBuf),
+}
+
+impl IdeContextEndpoint {
+    pub(crate) fn from_environment() -> Self {
+        match std::env::var_os("CODEX_TUI_IDE_CONTEXT_SOCKET") {
+            Some(path) => Self::Explicit(PathBuf::from(path)),
+            None => Self::Discover,
+        }
+    }
+}
+
 // The desktop IPC client gives requests 5 seconds to complete. Match that prompt-time budget here:
 // fetching IDE context includes router discovery and extension event-loop work, so a shorter TUI
 // deadline can incorrectly skip context even though the IDE answers normally.
@@ -142,8 +159,22 @@ type IdeContextStream = super::windows_pipe::WindowsPipeStream;
 pub(crate) fn fetch_ide_context(
     workspace_root: &Path,
     codex_home: &Path,
+    endpoint: &IdeContextEndpoint,
 ) -> Result<IdeContext, IdeContextError> {
     let deadline = Instant::now() + IDE_CONTEXT_REQUEST_TIMEOUT;
+    if let IdeContextEndpoint::Explicit(path) = endpoint {
+        if !path.is_absolute() {
+            return Err(IdeContextError::InvalidResponse(
+                "CODEX_TUI_IDE_CONTEXT_SOCKET must be an absolute Unix socket path".to_string(),
+            ));
+        }
+        return fetch_ide_context_from_unix_socket_paths(
+            path.clone(),
+            Vec::new(),
+            workspace_root,
+            deadline,
+        );
+    }
     let primary_socket_path = primary_ipc_socket_path(codex_home);
     let uid = unsafe { libc::getuid() };
     let legacy_socket_paths = legacy_ipc_socket_paths(&std::env::temp_dir(), uid);
@@ -159,7 +190,13 @@ pub(crate) fn fetch_ide_context(
 pub(crate) fn fetch_ide_context(
     workspace_root: &Path,
     _codex_home: &Path,
+    endpoint: &IdeContextEndpoint,
 ) -> Result<IdeContext, IdeContextError> {
+    if matches!(endpoint, IdeContextEndpoint::Explicit(_)) {
+        return Err(IdeContextError::InvalidResponse(
+            "An explicit Unix IDE context socket is unsupported on Windows".to_string(),
+        ));
+    }
     fetch_ide_context_from_socket(
         default_ipc_socket_path(),
         workspace_root,
@@ -171,6 +208,7 @@ pub(crate) fn fetch_ide_context(
 pub(crate) fn fetch_ide_context(
     _workspace_root: &Path,
     _codex_home: &Path,
+    _endpoint: &IdeContextEndpoint,
 ) -> Result<IdeContext, IdeContextError> {
     Err(IdeContextError::UnsupportedPlatform)
 }
@@ -917,7 +955,7 @@ mod tests {
         }
     }
 
-    fn spawn_ide_context_server(
+    pub(super) fn spawn_ide_context_server(
         listener: std::os::unix::net::UnixListener,
         active_selection_content: &'static str,
     ) -> std::thread::JoinHandle<()> {
@@ -948,7 +986,7 @@ mod tests {
         )
     }
 
-    fn assert_listener_unused(listener: &std::os::unix::net::UnixListener) {
+    pub(super) fn assert_listener_unused(listener: &std::os::unix::net::UnixListener) {
         if let Err(err) = listener.set_nonblocking(true) {
             panic!("set listener nonblocking failed: {err}");
         }
@@ -1273,3 +1311,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "ipc_contract_tests.rs"]
+mod contract_tests;

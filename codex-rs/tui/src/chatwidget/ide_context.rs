@@ -86,6 +86,7 @@ impl ChatWidget {
             &self.config.cwd,
             &self.config.codex_home,
             &self.ide_context.endpoint,
+            self.thread_id,
         ) {
             Ok(context) => {
                 self.ide_context.mark_available();
@@ -116,6 +117,7 @@ impl ChatWidget {
             &self.config.cwd,
             &self.config.codex_home,
             &self.ide_context.endpoint,
+            self.thread_id,
         ) {
             Ok(context) => {
                 self.ide_context.mark_available();
@@ -151,3 +153,7 @@ impl ChatWidget {
             .set_ide_context_active(self.ide_context.is_enabled());
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "ide_context_tests.rs"]
+mod tests;

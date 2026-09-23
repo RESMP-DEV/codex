@@ -23,6 +23,7 @@ fn explicit_route_reads_only_its_endpoint() {
         Path::new("/repo"),
         &home,
         &IdeContextEndpoint::Explicit(path),
+        /*thread_id*/ None,
     )
     .expect("private route");
     server.join().expect("server exit");
@@ -53,7 +54,8 @@ fn unavailable_or_invalid_explicit_route_never_uses_shared_listener() {
             fetch_ide_context(
                 Path::new("/repo"),
                 &home,
-                &IdeContextEndpoint::Explicit(path)
+                &IdeContextEndpoint::Explicit(path),
+                /*thread_id*/ None,
             )
             .is_err()
         );

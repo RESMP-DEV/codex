@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
+use codex_protocol::ThreadId;
+
 #[cfg(any(unix, windows))]
 use serde_json::Value;
 #[cfg(any(unix, windows, test))]
@@ -160,6 +162,7 @@ pub(crate) fn fetch_ide_context(
     workspace_root: &Path,
     codex_home: &Path,
     endpoint: &IdeContextEndpoint,
+    thread_id: Option<ThreadId>,
 ) -> Result<IdeContext, IdeContextError> {
     let deadline = Instant::now() + IDE_CONTEXT_REQUEST_TIMEOUT;
     if let IdeContextEndpoint::Explicit(path) = endpoint {
@@ -172,6 +175,7 @@ pub(crate) fn fetch_ide_context(
             path.clone(),
             Vec::new(),
             workspace_root,
+            thread_id,
             deadline,
         );
     }
@@ -182,6 +186,8 @@ pub(crate) fn fetch_ide_context(
         primary_socket_path,
         legacy_socket_paths,
         workspace_root,
+        // Discovery remains a shared editor route and has no conversation identity.
+        None,
         deadline,
     )
 }
@@ -191,6 +197,7 @@ pub(crate) fn fetch_ide_context(
     workspace_root: &Path,
     _codex_home: &Path,
     endpoint: &IdeContextEndpoint,
+    _thread_id: Option<ThreadId>,
 ) -> Result<IdeContext, IdeContextError> {
     if matches!(endpoint, IdeContextEndpoint::Explicit(_)) {
         return Err(IdeContextError::InvalidResponse(
@@ -209,6 +216,7 @@ pub(crate) fn fetch_ide_context(
     _workspace_root: &Path,
     _codex_home: &Path,
     _endpoint: &IdeContextEndpoint,
+    _thread_id: Option<ThreadId>,
 ) -> Result<IdeContext, IdeContextError> {
     Err(IdeContextError::UnsupportedPlatform)
 }
@@ -246,7 +254,12 @@ fn fetch_ide_context_from_socket(
 ) -> Result<IdeContext, IdeContextError> {
     let deadline = Instant::now() + timeout;
     let mut stream = connect_stream(socket_path, deadline)?;
-    fetch_ide_context_from_stream(&mut stream, workspace_root, deadline)
+    fetch_ide_context_from_stream(
+        &mut stream,
+        workspace_root,
+        /*thread_id*/ None,
+        deadline,
+    )
 }
 
 #[cfg(unix)]
@@ -254,6 +267,7 @@ fn fetch_ide_context_from_unix_socket_paths(
     primary_socket_path: PathBuf,
     legacy_socket_paths: Vec<PathBuf>,
     workspace_root: &Path,
+    thread_id: Option<ThreadId>,
     deadline: Instant,
 ) -> Result<IdeContext, IdeContextError> {
     let mut last_error = std::io::Error::new(
@@ -280,7 +294,7 @@ fn fetch_ide_context_from_unix_socket_paths(
         }
     }
     let mut stream = stream.ok_or(IdeContextError::Connect(last_error))?;
-    fetch_ide_context_from_stream(&mut stream, workspace_root, deadline)
+    fetch_ide_context_from_stream(&mut stream, workspace_root, thread_id, deadline)
 }
 
 #[cfg(unix)]
@@ -705,10 +719,11 @@ fn answer_unsupported_request<T: std::io::Write + ?Sized>(
 fn fetch_ide_context_from_stream(
     stream: &mut IdeContextStream,
     workspace_root: &Path,
+    thread_id: Option<ThreadId>,
     deadline: Instant,
 ) -> Result<IdeContext, IdeContextError> {
     let request_id = uuid::Uuid::new_v4().to_string();
-    write_ide_context_request(stream, &request_id, workspace_root)
+    write_ide_context_request(stream, &request_id, workspace_root, thread_id)
         .map_err(IdeContextError::Send)?;
     let response = read_response_frame(stream, &request_id, deadline)?;
     extract_ide_context(response)
@@ -719,16 +734,27 @@ fn write_ide_context_request<T: std::io::Write + ?Sized>(
     stream: &mut T,
     request_id: &str,
     workspace_root: &Path,
+    thread_id: Option<ThreadId>,
 ) -> std::io::Result<()> {
+    let mut params = json!({
+        "workspaceRoot": workspace_root.to_string_lossy(),
+    });
+    if let Some(thread_id) = thread_id {
+        let thread_id = serde_json::to_value(thread_id).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid IDE context thread id: {err}"),
+            )
+        })?;
+        params["threadId"] = thread_id;
+    }
     let ide_context_request = json!({
         "type": "request",
         "requestId": request_id,
         "sourceClientId": TUI_SOURCE_CLIENT_ID,
         "version": 0,
         "method": "ide-context",
-        "params": {
-            "workspaceRoot": workspace_root.to_string_lossy(),
-        },
+        "params": params,
     });
     write_frame(stream, &ide_context_request)
 }
@@ -919,6 +945,9 @@ mod tests {
     }
 
     #[cfg(unix)]
+    type CapturedIpcRequest = std::sync::Arc<std::sync::Mutex<Option<Value>>>;
+
+    #[cfg(unix)]
     fn write_ide_context_response(
         stream: &mut impl std::io::Write,
         request_id: &str,
@@ -959,6 +988,19 @@ mod tests {
         listener: std::os::unix::net::UnixListener,
         active_selection_content: &'static str,
     ) -> std::thread::JoinHandle<()> {
+        spawn_ide_context_server_capturing_request(
+            listener,
+            active_selection_content,
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        )
+    }
+
+    #[cfg(unix)]
+    pub(super) fn spawn_ide_context_server_capturing_request(
+        listener: std::os::unix::net::UnixListener,
+        active_selection_content: &'static str,
+        captured_request: CapturedIpcRequest,
+    ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let Ok((mut stream, _)) = listener.accept() else {
                 panic!("accept failed");
@@ -970,7 +1012,13 @@ mod tests {
             let Some(request_id) = request.get("requestId").and_then(Value::as_str) else {
                 panic!("ide-context request did not include a request id");
             };
-            write_ide_context_response(&mut stream, request_id, active_selection_content);
+            let request_id = request_id.to_string();
+            let Ok(mut captured) = captured_request.lock() else {
+                panic!("ide-context request capture lock poisoned");
+            };
+            *captured = Some(request);
+            drop(captured);
+            write_ide_context_response(&mut stream, &request_id, active_selection_content);
         })
     }
 
@@ -982,6 +1030,7 @@ mod tests {
             primary_socket_path,
             vec![legacy_socket_path],
             Path::new("/repo"),
+            /*thread_id*/ None,
             test_deadline(),
         )
     }
@@ -1003,6 +1052,124 @@ mod tests {
         assert_eq!(
             primary_ipc_socket_path(codex_home),
             codex_home.join("ipc").join("ipc.sock")
+        );
+    }
+
+    #[test]
+    fn explicit_route_includes_thread_identity_in_private_params() {
+        use std::os::unix::net::UnixListener;
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let socket_path = tempdir.path().join("private.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind private");
+        let request = Arc::new(Mutex::new(None));
+        let server = spawn_ide_context_server_capturing_request(
+            listener,
+            "private-selection",
+            request.clone(),
+        );
+        let thread_id =
+            ThreadId::from_string("019c2d47-4935-7423-a190-05691f566092").expect("thread id");
+
+        fetch_ide_context(
+            Path::new("/repo"),
+            tempdir.path(),
+            &IdeContextEndpoint::Explicit(socket_path),
+            Some(thread_id),
+        )
+        .expect("fetch private IDE context");
+        server.join().expect("server joins");
+
+        let request = request
+            .lock()
+            .expect("ide-context request capture lock poisoned")
+            .clone()
+            .expect("captured private request");
+        assert_eq!(
+            request.get("params").expect("request params"),
+            &json!({
+                "workspaceRoot": "/repo",
+                "threadId": thread_id.to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn explicit_route_omits_thread_identity_when_unavailable() {
+        use std::os::unix::net::UnixListener;
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let socket_path = tempdir.path().join("private.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind private");
+        let request = Arc::new(Mutex::new(None));
+        let server = spawn_ide_context_server_capturing_request(
+            listener,
+            "private-selection",
+            request.clone(),
+        );
+
+        fetch_ide_context(
+            Path::new("/repo"),
+            tempdir.path(),
+            &IdeContextEndpoint::Explicit(socket_path),
+            /*thread_id*/ None,
+        )
+        .expect("fetch private IDE context");
+        server.join().expect("server joins");
+
+        let request = request
+            .lock()
+            .expect("ide-context request capture lock poisoned")
+            .clone()
+            .expect("captured private request");
+        assert_eq!(
+            request.get("params").expect("request params"),
+            &json!({ "workspaceRoot": "/repo" })
+        );
+    }
+
+    #[test]
+    fn discovery_route_wire_payload_stays_legacy() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixListener;
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let ipc_dir = tempdir.path().join("ipc");
+        std::fs::create_dir(&ipc_dir).expect("create ipc directory");
+        std::fs::set_permissions(&ipc_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("secure ipc directory");
+        let socket_path = ipc_dir.join("ipc.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind discovery");
+        let request = Arc::new(Mutex::new(None));
+        let server = spawn_ide_context_server_capturing_request(
+            listener,
+            "discovery-selection",
+            request.clone(),
+        );
+
+        fetch_ide_context(
+            Path::new("/repo"),
+            tempdir.path(),
+            &IdeContextEndpoint::Discover,
+            Some(ThreadId::new()),
+        )
+        .expect("fetch discovery IDE context");
+        server.join().expect("server joins");
+
+        let request = request
+            .lock()
+            .expect("ide-context request capture lock poisoned")
+            .clone()
+            .expect("captured discovery request");
+        assert_eq!(
+            request.get("params").expect("request params"),
+            &json!({ "workspaceRoot": "/repo" })
         );
     }
 
@@ -1102,6 +1269,7 @@ mod tests {
             primary_socket_path,
             legacy_socket_paths,
             Path::new("/repo"),
+            /*thread_id*/ None,
             test_deadline(),
         )
         .expect("fetch IDE context from pre-migration UID-0 legacy socket");
@@ -1129,6 +1297,7 @@ mod tests {
             primary_socket_path,
             vec![legacy_socket_path],
             Path::new("/repo"),
+            /*thread_id*/ None,
             Instant::now(),
         )
         .expect_err("expired primary deadline should fail");

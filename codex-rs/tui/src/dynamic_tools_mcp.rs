@@ -45,6 +45,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::RwLock;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -56,6 +57,13 @@ pub(crate) enum ThreadToolTransport {
     Dynamic,
     Mcp(Arc<DynamicToolMcpServer>),
 }
+
+/// Bridge sessions survive interactive pauses; rmcp's 300s default keep-alive
+/// reaps them mid-session, after which the daemon's turn-end hooks fail their
+/// session deletes and thread tool calls hit a dead bridge until the client
+/// re-initializes. 30 minutes still reaps truly abandoned sessions, and the
+/// bridge dies with the TUI process regardless, so nothing leaks long-term.
+const BRIDGE_SESSION_KEEP_ALIVE: Duration = Duration::from_secs(30 * 60);
 
 impl ThreadToolTransport {
     pub(crate) fn configure(&self, params: &mut ThreadStartParams) {
@@ -148,9 +156,11 @@ impl DynamicToolMcpServer {
             status_updates,
             server_config: server_config.clone(),
         };
+        let mut session_manager = LocalSessionManager::default();
+        session_manager.session_config.keep_alive = Some(BRIDGE_SESSION_KEEP_ALIVE);
         let service = StreamableHttpService::new(
             move || Ok(handler.clone()),
-            Arc::new(LocalSessionManager::default()),
+            Arc::new(session_manager),
             StreamableHttpServerConfig::default(),
         );
         let router =

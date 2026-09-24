@@ -15,7 +15,6 @@ use crate::context::ContextualUserFragment;
 use crate::context::CurrentTimeReminder;
 use crate::context::CurrentTimeUnavailable;
 use crate::context::DeveloperInstructions;
-use crate::context::GuardianContextMode;
 use crate::context::ManagedDeveloperInstructions;
 use crate::context::MultiAgentModeInstructions;
 use crate::context::MultiAgentRoleInstructions;
@@ -30,6 +29,8 @@ use codex_protocol::intersect_effective_permission_profiles;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_thread_store::PersistContext;
 use codex_utils_path_uri::PathUri;
+use futures::StreamExt;
+use futures::stream;
 
 const AGENT_NAMES: &str = include_str!("../../../assets/agent/agent_names.txt");
 
@@ -116,11 +117,7 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
     }
 }
 
-fn retain_forked_developer_message(
-    item: &mut ResponseItem,
-    usage_hint_texts: &[String],
-    context_mode: GuardianContextMode,
-) -> bool {
+fn retain_forked_developer_message(item: &mut ResponseItem, usage_hint_texts: &[String]) -> bool {
     if !matches!(item, ResponseItem::Message { role, .. } if role == "developer") {
         return true;
     }
@@ -129,9 +126,7 @@ fn retain_forked_developer_message(
         return false;
     };
     content.retain(|content_item| {
-        if context_mode == GuardianContextMode::ThreadOwned
-            && content_item.kind().0 == "guardian.approved_action"
-        {
+        if content_item.kind().0 == "guardian.approved_action" {
             return false;
         }
         let ContentItem::InputText { text } = content_item.content() else {
@@ -139,10 +134,8 @@ fn retain_forked_developer_message(
         };
 
         !(MultiAgentRoleInstructions::matches_text(text)
-            || (context_mode == GuardianContextMode::ThreadOwned
-                && text.starts_with(
-                    crate::guardian::AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX,
-                ))
+            || text
+                .starts_with(crate::guardian::AUTO_REVIEW_DENIED_ACTION_APPROVAL_DEVELOPER_PREFIX)
             || MultiAgentModeInstructions::matches_text(text)
             || CurrentTimeReminder::matches_text(text)
             || CurrentTimeUnavailable::matches_text(text)
@@ -187,9 +180,10 @@ impl LocalAgentControl {
         config: &Config,
         root_thread_id: ThreadId,
     ) {
-        self.runtime.registry.register_root_thread(root_thread_id);
+        let registry = &self.runtime.registry;
+        registry.register_root_thread(root_thread_id);
 
-        let Ok(state) = self.upgrade() else {
+        let Ok(state) = self.runtime.upgrade() else {
             return;
         };
         let Some(agent_graph_store) = state.agent_graph_store() else {
@@ -209,23 +203,32 @@ impl LocalAgentControl {
             }
         };
 
-        for thread_id in descendant_ids {
-            if self
-                .runtime
-                .registry
-                .agent_metadata_for_thread(thread_id)
-                .is_some()
-            {
+        // Overlap storage reads, but reserve paths and nicknames in graph order.
+        let mut stored_threads = stream::iter(
+            descendant_ids
+                .into_iter()
+                .filter(|thread_id| registry.agent_metadata_for_thread(*thread_id).is_none())
+                .map(|thread_id| {
+                    let state = &state;
+                    async move {
+                        let stored_thread = state
+                            .read_stored_thread(ReadThreadParams {
+                                thread_id,
+                                include_archived: true,
+                                include_history: false,
+                            })
+                            .await;
+                        (thread_id, stored_thread)
+                    }
+                }),
+        )
+        .buffered(/*n*/ 8);
+
+        while let Some((thread_id, stored_thread)) = stored_threads.next().await {
+            if registry.agent_metadata_for_thread(thread_id).is_some() {
                 continue;
             }
-            let restore_result = async {
-                let stored_thread = state
-                    .read_stored_thread(ReadThreadParams {
-                        thread_id,
-                        include_archived: true,
-                        include_history: false,
-                    })
-                    .await?;
+            let restore_result = stored_thread.and_then(|stored_thread| {
                 let stored_agent_path = stored_thread
                     .agent_path
                     .as_deref()
@@ -234,10 +237,7 @@ impl LocalAgentControl {
                     .map_err(|err| {
                         CodexErr::InvalidRequest(format!("invalid stored agent path: {err}"))
                     })?;
-                let mut reservation = self
-                    .runtime
-                    .registry
-                    .reserve_spawn_slot(/*max_threads*/ None)?;
+                let mut reservation = registry.reserve_spawn_slot(/*max_threads*/ None)?;
                 let mut metadata = self.prepare_agent_metadata(
                     &mut reservation,
                     config,
@@ -251,9 +251,8 @@ impl LocalAgentControl {
                 )?;
                 metadata.agent_id = Some(thread_id);
                 reservation.commit(metadata);
-                Ok::<(), CodexErr>(())
-            }
-            .await;
+                Ok(())
+            });
             if let Err(err) = restore_result {
                 warn!("failed to restore V2 agent metadata for {thread_id}: {err}");
             }
@@ -306,7 +305,7 @@ impl LocalAgentControl {
         thread_id: ThreadId,
         parent: Option<Arc<CodexThread>>,
     ) -> CodexResult<()> {
-        let state = self.upgrade()?;
+        let state = self.runtime.upgrade()?;
         let owner_thread_id = parent.as_ref().map(|parent| parent.session.thread_id);
         if let Some(parent) = &parent {
             let parent_thread_id = parent.session.thread_id;
@@ -625,7 +624,7 @@ impl LocalAgentControl {
         session_source: Option<SessionSource>,
         options: SpawnAgentOptions,
     ) -> CodexResult<(LiveAgent, ThreadConfigSnapshot)> {
-        let state = self.upgrade()?;
+        let state = self.runtime.upgrade()?;
         let multi_agent_version = state
             .effective_multi_agent_version_for_spawn(
                 &InitialHistory::New,
@@ -972,17 +971,15 @@ impl LocalAgentControl {
                 break;
             }
         }
-        let context_mode = GuardianContextMode::from_features(&config.features);
         let mut replaced_parent_developer_instructions = false;
         // Scrub inherited hints and replace only the parent's developer-instruction fragment.
         // Compaction stores response items separately, so sanitize both top-level messages and
         // compacted replacement histories with the same policy.
         let retain_forked_item = |envelope: &mut ResponseItemEnvelope, replaced: &mut bool| {
-            if context_mode == GuardianContextMode::ThreadOwned
-                && multi_agent_version == MultiAgentVersion::V2
-                && matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "user")
+            if multi_agent_version == MultiAgentVersion::V2
+                && matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "user" || role == "assistant")
             {
-                // Persist the scope of every inherited user message, including the suffix
+                // Persist the scope of every inherited conversational message, including the suffix
                 // after a checkpoint. Resume must not recapture it as local authorization.
                 envelope
                     .metadata
@@ -1003,7 +1000,6 @@ impl LocalAgentControl {
             if !retain_forked_developer_message(
                 response_item,
                 &multi_agent_v2_usage_hint_texts_to_filter,
-                context_mode,
             ) {
                 return false;
             }
@@ -1089,8 +1085,7 @@ impl LocalAgentControl {
                     compacted.guardian_history = None;
                     // Only V2 fetches root authorization live. Its local scope starts known-empty;
                     // V1 must remain incomplete when inherited authorization has been stripped.
-                    compacted.retained_context = (context_mode == GuardianContextMode::ThreadOwned
-                        && multi_agent_version == MultiAgentVersion::V2)
+                    compacted.retained_context = (multi_agent_version == MultiAgentVersion::V2)
                         .then(codex_history::RetainedContext::default);
                     if let Some(replacement_history) = compacted.replacement_history.as_mut() {
                         // Matches before this checkpoint cannot survive its replacement history.
@@ -1192,7 +1187,7 @@ impl LocalAgentControl {
             self.resume_single_agent_from_rollout(config.clone(), thread_id, session_source),
         )
         .await?;
-        let state = self.upgrade()?;
+        let state = self.runtime.upgrade()?;
         if config.multi_agent_version_from_features() == MultiAgentVersion::V2
             || resumed_multi_agent_version == MultiAgentVersion::V2
         {
@@ -1262,7 +1257,7 @@ impl LocalAgentControl {
         thread_id: ThreadId,
         session_source: SessionSource,
     ) -> CodexResult<(ThreadId, MultiAgentVersion)> {
-        let state = self.upgrade()?;
+        let state = self.runtime.upgrade()?;
         let stored_thread = state
             .read_stored_thread(ReadThreadParams {
                 thread_id,

@@ -1264,13 +1264,13 @@ fn config_toml_deserializes_model_availability_nux() {
             show_tooltips: true,
             show_server_version_notice: true,
             auto_recap: true,
-            prompt_suggestions: false,
             disable_paste_burst: None,
             vim_mode_default: false,
             question_esc_back: true,
             raw_output_mode: false,
             fullscreen_transcript: true,
             copy_on_select: Default::default(),
+            right_click_paste: Default::default(),
             alternate_screen: AltScreenMode::default(),
             status_line: None,
             status_line_use_colors: true,
@@ -3729,7 +3729,7 @@ async fn implicit_builtin_workspace_profile_preserves_add_dir_metadata_carveouts
     let codex_home = TempDir::new()?;
     let cwd = TempDir::new()?;
     let extra_root = TempDir::new()?;
-    for subpath in [".git", ".agents", ".codex"] {
+    for subpath in [".git", ".agents", ".codex", ".aws"] {
         std::fs::create_dir_all(extra_root.path().join(subpath))?;
     }
     let project_key = cwd.path().to_string_lossy().to_string();
@@ -3762,7 +3762,7 @@ async fn implicit_builtin_workspace_profile_preserves_add_dir_metadata_carveouts
         policy.can_write_local_path_with_cwd(extra_root.as_path(), cwd.path()),
         "expected implicit :workspace to preserve additional writable roots, policy: {policy:?}"
     );
-    for subpath in [".git", ".agents", ".codex"] {
+    for subpath in [".git", ".agents", ".codex", ".aws"] {
         assert!(
             !policy.can_write_local_path_with_cwd(&extra_root.join(subpath), cwd.path()),
             "expected implicit :workspace to preserve legacy metadata carveout for {subpath}, \
@@ -4405,13 +4405,13 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             show_tooltips: true,
             show_server_version_notice: true,
             auto_recap: true,
-            prompt_suggestions: false,
             disable_paste_burst: None,
             vim_mode_default: false,
             question_esc_back: true,
             raw_output_mode: false,
             fullscreen_transcript: true,
             copy_on_select: Default::default(),
+            right_click_paste: Default::default(),
             alternate_screen: AltScreenMode::Auto,
             status_line: None,
             status_line_use_colors: true,
@@ -4951,7 +4951,7 @@ exclude_slash_tmp = true
                             missing_path_behavior: None,
                         })
                 );
-                for subpath in [".git", ".agents", ".codex"] {
+                for subpath in [".git", ".agents", ".codex", ".aws"] {
                     assert!(
                         file_system_policy
                             .entries
@@ -5921,6 +5921,7 @@ url = "https://sample.example/mcp"
                     "Selected Plugin".to_string(),
                 ),
                 /*selection_order*/ 0,
+                codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
                 selected.clone(),
             )],
         )
@@ -12086,6 +12087,7 @@ hide_spawn_agent_metadata = true
 expose_spawn_agent_model_overrides = false
 wait_agent_enabled = false
 disable_direct_message = true
+message_board_in_memory = true
 non_code_mode_only = true
 
 [agents]
@@ -12142,6 +12144,7 @@ max_concurrent_threads_per_session = 9
     assert!(!config.multi_agent_v2.expose_spawn_agent_model_overrides);
     assert!(!config.multi_agent_v2.wait_agent_enabled);
     assert!(config.multi_agent_v2.disable_direct_message);
+    assert!(config.multi_agent_v2.message_board_in_memory);
     assert!(config.multi_agent_v2.non_code_mode_only);
 
     Ok(())

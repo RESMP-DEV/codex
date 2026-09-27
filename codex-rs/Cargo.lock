@@ -1939,6 +1939,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-agent-message-board-client"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "codex-agent-message-board-extension",
+ "codex-http-client",
+ "codex-protocol",
+ "eventsource-stream",
+ "futures",
+ "http 1.4.0",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "codex-agent-message-board-extension"
 version = "0.0.0"
 dependencies = [
@@ -3176,6 +3196,7 @@ dependencies = [
  "codex-shell-command",
  "codex-skills",
  "codex-test-binary-support",
+ "codex-uds",
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
  "codex-utils-home-dir",
@@ -4527,6 +4548,7 @@ name = "codex-skills-extension"
 version = "0.0.0"
 dependencies = [
  "assert_matches",
+ "blake3",
  "codex-analytics",
  "codex-config",
  "codex-exec-server",

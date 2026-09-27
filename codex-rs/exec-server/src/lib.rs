@@ -39,13 +39,15 @@ mod resolved_capability;
 mod rpc;
 mod rpc_server_requests;
 mod rpc_timing;
-mod runtime_paths;
+mod runtime_options;
 mod sandbox_selection;
 mod sandboxed_file_open;
 mod sandboxed_file_system;
 mod server;
 #[cfg(unix)]
 mod shell_snapshot;
+#[cfg(unix)]
+mod shell_snapshot_file;
 mod telemetry;
 mod trace_context;
 mod websocket_pong_watchdog;
@@ -226,7 +228,7 @@ pub use remote::run_remote_environment_forward_until_shutdown;
 pub use remote::run_remote_environment_until_shutdown;
 pub use resolved_capability::ResolvedSelectedCapabilityRoot;
 pub use resolved_capability::SelectedCapabilityRootsStatus;
-pub use runtime_paths::ExecServerRuntimePaths;
+pub use runtime_options::ExecServerRuntimeOptions;
 pub use server::ConcurrentRequestLimit;
 pub use server::DEFAULT_LISTEN_URL;
 pub use server::ExecServerListenUrlParseError;

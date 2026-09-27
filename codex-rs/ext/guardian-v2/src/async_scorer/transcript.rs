@@ -138,7 +138,11 @@ impl TranscriptConfig {
         })?;
         let transcript =
             profile.render_transcript(context.transcript_entries(), /*entry_number_offset*/ 0);
-        context.compose(ContextPresentation::Async, transcript)
+        let mut context = context.compose(ContextPresentation::Async, transcript)?;
+        // Each sample is self-contained: only this request's protected transcript
+        // entries can replace retained originals, never a previous sample's history.
+        context.deduplicate_transcript_instructions();
+        Ok(context)
     }
 }
 
@@ -150,7 +154,14 @@ impl SectionHistory for SnapshotHistory<'_> {
     }
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
-        self.0.review_items()
+        Box::new(self.items_with_sources().map(|(item, _)| item))
+    }
+
+    fn items_with_sources(
+        &self,
+    ) -> Box<dyn Iterator<Item = (&ResponseItem, Option<&codex_history::RetainedSource>)> + Send + '_>
+    {
+        self.0.review_items_with_sources()
     }
 }
 

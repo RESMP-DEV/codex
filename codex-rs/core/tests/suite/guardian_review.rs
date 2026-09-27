@@ -1719,6 +1719,18 @@ async fn guardian_session_is_reused_for_consecutive_tool_reviews_without_prewarm
     }
     let first_guardian_request = guardian_requests[0].body_json();
     let second_guardian_request = guardian_requests[2].body_json();
+    let second_input = guardian_requests[2]
+        .message_input_text_groups("user")
+        .last()
+        .expect("second review input")
+        .concat();
+    assert_eq!(
+        second_input
+            .matches("run the second command that requires Guardian review")
+            .count(),
+        1
+    );
+    assert!(!second_input.contains("run the first command that requires Guardian review"));
     let first_parent_request = requests[0].body_json();
     let second_parent_request = requests[4].body_json();
     let first_parent_turn_id = first_parent_request["client_metadata"]["turn_id"]

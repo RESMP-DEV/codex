@@ -37,7 +37,7 @@ use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
-use crate::ExecServerRuntimePaths;
+use crate::ExecServerRuntimeOptions;
 use crate::FileSystemSandboxContext;
 use crate::fs_helper::CODEX_FS_HELPER_ARG1;
 use crate::fs_helper::FsHelperPayload;
@@ -69,12 +69,12 @@ struct SandboxCwd {
 
 #[derive(Clone, Debug)]
 pub(crate) struct FileSystemSandboxRunner {
-    runtime_paths: ExecServerRuntimePaths,
+    runtime_paths: ExecServerRuntimeOptions,
     helper_env: HashMap<String, String>,
 }
 
 impl FileSystemSandboxRunner {
-    pub(crate) fn new(runtime_paths: ExecServerRuntimePaths) -> Self {
+    pub(crate) fn new(runtime_paths: ExecServerRuntimeOptions) -> Self {
         Self {
             runtime_paths,
             helper_env: helper_env(),
@@ -150,7 +150,8 @@ impl FileSystemSandboxRunner {
         sandbox_context: &FileSystemSandboxContext,
     ) -> Result<SandboxExecRequest, JSONRPCErrorError> {
         let helper = &self.runtime_paths.codex_self_exe;
-        let sandbox_manager = SandboxManager::for_file_system_helpers();
+        let sandbox_manager = SandboxManager::for_file_system_helpers()
+            .with_linux_sandbox_pid_namespace(self.runtime_paths.linux_sandbox_pid_namespace);
         #[cfg(target_os = "macos")]
         let sandbox_manager = sandbox_manager.with_allowed_symlinked_codex_home(
             self.runtime_paths.allowed_symlinked_codex_home.clone(),
@@ -228,7 +229,7 @@ fn native_workspace_root(root: &PathUri) -> Result<AbsolutePathBuf, JSONRPCError
     })
 }
 
-fn helper_read_roots(runtime_paths: &ExecServerRuntimePaths) -> Vec<AbsolutePathBuf> {
+fn helper_read_roots(runtime_paths: &ExecServerRuntimeOptions) -> Vec<AbsolutePathBuf> {
     let mut roots = vec![runtime_paths.codex_self_exe.clone()];
     if let Some(path) = &runtime_paths.codex_linux_sandbox_exe
         && !roots.contains(path)
@@ -580,7 +581,7 @@ mod tests {
     use codex_utils_path_uri::PathUri;
     use pretty_assertions::assert_eq;
 
-    use crate::ExecServerRuntimePaths;
+    use crate::ExecServerRuntimeOptions;
 
     use super::FileSystemSandboxRunner;
     use super::SandboxCwd;
@@ -621,7 +622,7 @@ mod tests {
     fn helper_permissions_preserve_existing_writes() {
         let codex_self_exe = std::env::current_exe().expect("current exe");
         let runtime_paths =
-            ExecServerRuntimePaths::new(codex_self_exe, /*codex_linux_sandbox_exe*/ None)
+            ExecServerRuntimeOptions::new(codex_self_exe, /*codex_linux_sandbox_exe*/ None)
                 .expect("runtime paths");
         let cwd = AbsolutePathBuf::from_absolute_path(std::env::temp_dir().as_path())
             .expect("absolute cwd");
@@ -742,7 +743,7 @@ mod tests {
         let path = path.to_string_lossy().into_owned();
         let codex_self_exe = std::env::current_exe().expect("current exe");
         let runtime_paths =
-            ExecServerRuntimePaths::new(codex_self_exe.clone(), Some(codex_self_exe))
+            ExecServerRuntimeOptions::new(codex_self_exe.clone(), Some(codex_self_exe))
                 .expect("runtime paths");
         let runner = FileSystemSandboxRunner::new(runtime_paths);
         let native_cwd = AbsolutePathBuf::current_dir().expect("cwd");
@@ -798,7 +799,7 @@ mod tests {
     fn sandbox_exec_request_uses_filesystem_root_and_preserves_policy_cwd() {
         let codex_self_exe = std::env::current_exe().expect("current exe");
         let runtime_paths =
-            ExecServerRuntimePaths::new(codex_self_exe.clone(), Some(codex_self_exe))
+            ExecServerRuntimeOptions::new(codex_self_exe.clone(), Some(codex_self_exe))
                 .expect("runtime paths");
         let runner = FileSystemSandboxRunner::new(runtime_paths);
         let selected = tempfile::tempdir().expect("selected directory");
@@ -888,7 +889,7 @@ mod tests {
     fn sandbox_exec_request_binds_windows_relative_globs_to_policy_cwd() {
         let codex_self_exe = std::env::current_exe().expect("current exe");
         let runtime_paths =
-            ExecServerRuntimePaths::new(codex_self_exe, /*codex_linux_sandbox_exe*/ None)
+            ExecServerRuntimeOptions::new(codex_self_exe, /*codex_linux_sandbox_exe*/ None)
                 .expect("runtime paths");
         let runner = FileSystemSandboxRunner::new(runtime_paths);
         let selected = tempfile::tempdir().expect("selected directory");
@@ -978,7 +979,7 @@ mod tests {
     fn helper_permissions_include_only_the_helper_executable() {
         let codex_self_exe = std::env::current_exe().expect("current exe");
         let runtime_paths =
-            ExecServerRuntimePaths::new(codex_self_exe, /*codex_linux_sandbox_exe*/ None)
+            ExecServerRuntimeOptions::new(codex_self_exe, /*codex_linux_sandbox_exe*/ None)
                 .expect("runtime paths");
         let cwd = AbsolutePathBuf::from_absolute_path(std::env::temp_dir().as_path())
             .expect("absolute cwd");
@@ -1011,7 +1012,7 @@ mod tests {
         let codex_self_exe = root.path().join("bin").join("codex");
         let codex_linux_sandbox_exe = root.path().join("aliases").join("codex-linux-sandbox");
         let runtime_paths =
-            ExecServerRuntimePaths::new(codex_self_exe, Some(codex_linux_sandbox_exe))
+            ExecServerRuntimeOptions::new(codex_self_exe, Some(codex_linux_sandbox_exe))
                 .expect("runtime paths");
         let cwd = AbsolutePathBuf::from_absolute_path(std::env::temp_dir().as_path())
             .expect("absolute cwd");

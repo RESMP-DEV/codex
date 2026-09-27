@@ -26,6 +26,7 @@ fn retained_evidence_preserves_order_through_recovery_checkpoint_and_rollback() 
     let before_restriction = context.clone();
     context.record_user_message(
         RetainedUserMessage {
+            phase: None,
             origin: crate::UserInputOrigin::User,
             turn_id: "revocation-turn".to_owned(),
             message_id: Some("revocation".to_owned()),
@@ -132,6 +133,7 @@ fn retained_families_enforce_storage_limits_without_changing_snapshots() {
     for index in 0..=MAX_FAMILY_RECORDS {
         restored.record_user_message(
             RetainedUserMessage {
+                phase: None,
                 origin: crate::UserInputOrigin::User,
                 turn_id: "later-turn".to_owned(),
                 message_id: Some(format!("message-{index}")),
@@ -152,6 +154,7 @@ fn retained_families_enforce_storage_limits_without_changing_snapshots() {
     let recent = restored.clone();
     restored.record_user_message(
         RetainedUserMessage {
+            phase: None,
             origin: crate::UserInputOrigin::User,
             turn_id: "earlier-turn".to_owned(),
             message_id: Some("delayed-message".to_owned()),
@@ -166,6 +169,7 @@ fn retained_families_enforce_storage_limits_without_changing_snapshots() {
     );
     restored.record_user_message(
         RetainedUserMessage {
+            phase: None,
             origin: crate::UserInputOrigin::User,
             turn_id: "oversized-turn".to_owned(),
             message_id: Some("oversized-message".to_owned()),
@@ -204,6 +208,7 @@ fn recovered_excerpts_obey_record_and_family_limits() {
     for index in 0..MAX_FAMILY_RECORDS {
         context.record_user_message(
             RetainedUserMessage {
+                phase: None,
                 origin: crate::UserInputOrigin::User,
                 turn_id: "turn-1".to_owned(),
                 message_id: Some(format!("message-{index}")),
@@ -299,6 +304,7 @@ fn accepted_order_survives_delayed_recording_and_checkpoint_replay() {
     };
     context.record(&event);
     let instruction = RetainedUserMessage {
+        phase: None,
         origin: crate::UserInputOrigin::User,
         turn_id: "turn-1".to_owned(),
         message_id: Some("steer".to_owned()),
@@ -323,6 +329,21 @@ fn accepted_order_survives_delayed_recording_and_checkpoint_replay() {
     let mut resumed = RetainedContext::default();
     resumed.restore(Some(&checkpoint), &[]);
     resumed.record_user_message(instruction, RetainedInputSource::Local(Some(steer_order)));
+    // This suffix has no captured version metadata, so replay creates a fresh revision.
+    // Its original contents and acceptance order still reconstruct identically.
+    let mut expected = context.clone();
+    assert_ne!(
+        resumed.user_messages[0].revision,
+        expected.user_messages[0].revision
+    );
+    expected.user_messages[0].revision = resumed.user_messages[0].revision.clone();
+    assert_eq!(resumed, expected);
+    let source = context
+        .source(RetainedContextEntry::UserMessage(
+            &context.user_messages[0].value,
+        ))
+        .unwrap();
+    assert!(resumed.restore_source_revision(&source));
     assert_eq!(resumed, context);
     assert_eq!(
         resumed
@@ -379,6 +400,7 @@ fn adopted_instructions_preserve_local_order_and_rollback_scope() {
     context.record(&publish_answer());
     for index in 0..2 {
         let message = RetainedUserMessage {
+            phase: None,
             origin: crate::UserInputOrigin::User,
             turn_id: "parent-turn".to_owned(),
             message_id: Some(format!("parent-{index}")),

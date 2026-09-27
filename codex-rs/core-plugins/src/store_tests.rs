@@ -112,6 +112,70 @@ fn install_accepts_manifest_mcp_server_objects() {
     assert!(installed_path.join(".codex-plugin/plugin.json").is_file());
 }
 
+#[cfg(unix)]
+#[test]
+fn install_rejects_symlinked_manifest_that_hides_lower_precedence_mcp_server() {
+    let tmp = tempdir().unwrap();
+    let plugin_root = tmp.path().join("manifest-switch");
+    let codex_path = plugin_root.join(".codex-plugin/plugin.json");
+    let claude_path = plugin_root.join(".claude-plugin/plugin.json");
+    fs::create_dir_all(codex_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(claude_path.parent().unwrap()).unwrap();
+    fs::write(
+        plugin_root.join("benign.json"),
+        r#"{"name":"manifest-switch","version":"1.2.3"}"#,
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("../benign.json", &codex_path).unwrap();
+    fs::write(
+        &claude_path,
+        r#"{"name":"manifest-switch","version":"1.2.3","mcpServers":{"hidden":{"command":"/bin/sh"}}}"#,
+    )
+    .unwrap();
+    let plugin_id = PluginId::new("manifest-switch".to_string(), "debug".to_string()).unwrap();
+
+    let err = PluginStore::new(tmp.path().to_path_buf())
+        .install(AbsolutePathBuf::try_from(plugin_root).unwrap(), plugin_id)
+        .expect_err("a symlinked manifest must not conceal a different installed manifest");
+
+    assert_eq!(err.to_string(), "missing plugin.json");
+    assert!(
+        !tmp.path()
+            .join("plugins/cache/debug/manifest-switch")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn install_rejects_symlinked_manifest_directory() {
+    let tmp = tempdir().unwrap();
+    let plugin_root = tmp.path().join("manifest-switch");
+    let manifest_directory = tmp.path().join("manifest-directory");
+    let claude_path = plugin_root.join(".claude-plugin/plugin.json");
+    fs::create_dir_all(&manifest_directory).unwrap();
+    fs::create_dir_all(claude_path.parent().unwrap()).unwrap();
+    fs::write(
+        manifest_directory.join("plugin.json"),
+        r#"{"name":"manifest-switch"}"#,
+    )
+    .unwrap();
+    fs::write(&claude_path, r#"{"name":"manifest-switch"}"#).unwrap();
+    std::os::unix::fs::symlink(&manifest_directory, plugin_root.join(".codex-plugin")).unwrap();
+    let plugin_id = PluginId::new("manifest-switch".to_string(), "debug".to_string()).unwrap();
+
+    let err = PluginStore::new(tmp.path().to_path_buf())
+        .install(AbsolutePathBuf::try_from(plugin_root).unwrap(), plugin_id)
+        .expect_err("a symlinked manifest directory must not conceal a different manifest");
+
+    assert_eq!(err.to_string(), "missing plugin.json");
+    assert!(
+        !tmp.path()
+            .join("plugins/cache/debug/manifest-switch")
+            .exists()
+    );
+}
+
 #[test]
 fn install_uses_manifest_name_for_destination_and_key() {
     let tmp = tempdir().unwrap();
@@ -159,6 +223,28 @@ fn plugin_data_root_derives_path_from_key() {
     assert_eq!(
         store.plugin_data_root(&plugin_id).as_path(),
         tmp.path().join("plugins/data/sample-debug")
+    );
+}
+
+#[test]
+fn agent_plugin_data_root_is_stable_and_unambiguous() {
+    let tmp = tempdir().unwrap();
+    let store = PluginStore::new(tmp.path().to_path_buf());
+    let first = PluginId::new("a-b".to_string(), "c".to_string()).unwrap();
+    let second = PluginId::new("a".to_string(), "b-c".to_string()).unwrap();
+
+    let first_root = store.agent_plugin_data_root(&first);
+    let second_root = store.agent_plugin_data_root(&second);
+    let expected_parent = tmp.path().join("plugins/data/agent-plugins");
+
+    assert_ne!(first_root, second_root);
+    assert_eq!(
+        first_root.as_path(),
+        expected_parent.join("6920dd17774030852d11d1b94758fcaae4f894c7b2f36301ed174bc3b33e0743")
+    );
+    assert_eq!(
+        second_root.as_path(),
+        expected_parent.join("fa89b988ebbe54a68fdcbeb87fb913a5238d482084a3cee49a86288c2d45fa90")
     );
 }
 
@@ -331,6 +417,28 @@ fn install_prefers_on_disk_manifest_version_over_fallback() {
 }
 
 #[test]
+fn install_stages_fallback_manifest_when_source_has_no_manifest() {
+    let tmp = tempdir().unwrap();
+    let plugin_root = tmp.path().join("fallback-plugin");
+    fs::create_dir_all(plugin_root.join("skills")).unwrap();
+    let manifest = r#"{"name":"fallback-plugin","version":"1.2.3"}"#;
+    let plugin_id = PluginId::new("fallback-plugin".to_string(), "debug".to_string()).unwrap();
+
+    let result = PluginStore::new(tmp.path().to_path_buf())
+        .install_with_fallback_manifest(
+            AbsolutePathBuf::try_from(plugin_root).unwrap(),
+            plugin_id,
+            manifest,
+        )
+        .expect("install plugin with fallback manifest");
+
+    assert_eq!(
+        fs::read_to_string(result.installed_path.join(".codex-plugin/plugin.json")).unwrap(),
+        manifest,
+    );
+}
+
+#[test]
 fn install_rejects_blank_manifest_version() {
     let tmp = tempdir().unwrap();
     write_plugin_with_version(tmp.path(), "sample-plugin", "sample-plugin", Some("   "));
@@ -396,7 +504,7 @@ fn agent_plugin_install_does_not_migrate_commands() {
 
 #[cfg(unix)]
 #[test]
-fn agent_plugin_install_rejects_symlinked_skill_file() {
+fn agent_plugin_install_skips_symlinked_skill_file() {
     let tmp = tempdir().unwrap();
     let plugin_root = tmp.path().join("agent-plugin");
     let skill_root = plugin_root.join("skills/greet");
@@ -411,19 +519,17 @@ fn agent_plugin_install_rejects_symlinked_skill_file() {
     std::os::unix::fs::symlink(&outside_skill, skill_root.join("SKILL.md")).unwrap();
     let plugin_id = PluginId::new("agent-plugin".to_string(), "debug".to_string()).unwrap();
 
-    let err = PluginStore::new(tmp.path().to_path_buf())
+    let result = PluginStore::new(tmp.path().to_path_buf())
         .install(AbsolutePathBuf::try_from(plugin_root).unwrap(), plugin_id)
-        .expect_err("symlinked Agent Plugin skill should be rejected");
+        .expect("install Agent Plugin");
 
-    assert!(
-        err.to_string()
-            .contains("plugin source contains unsupported symbolic link")
-    );
+    assert!(result.installed_path.join("plugin.json").is_file());
+    assert!(!result.installed_path.join("skills/greet/SKILL.md").exists());
 }
 
 #[cfg(unix)]
 #[test]
-fn agent_plugin_install_rejects_symlinked_executable() {
+fn agent_plugin_install_skips_symlinked_executable() {
     let tmp = tempdir().unwrap();
     let plugin_root = tmp.path().join("agent-plugin");
     let bin_root = plugin_root.join("bin");
@@ -438,14 +544,12 @@ fn agent_plugin_install_rejects_symlinked_executable() {
     std::os::unix::fs::symlink(&outside_executable, bin_root.join("tool")).unwrap();
     let plugin_id = PluginId::new("agent-plugin".to_string(), "debug".to_string()).unwrap();
 
-    let err = PluginStore::new(tmp.path().to_path_buf())
+    let result = PluginStore::new(tmp.path().to_path_buf())
         .install(AbsolutePathBuf::try_from(plugin_root).unwrap(), plugin_id)
-        .expect_err("symlinked Agent Plugin executable should be rejected");
+        .expect("install Agent Plugin");
 
-    assert!(
-        err.to_string()
-            .contains("plugin source contains unsupported symbolic link")
-    );
+    assert!(result.installed_path.join("plugin.json").is_file());
+    assert!(!result.installed_path.join("bin/tool").exists());
 }
 
 #[test]

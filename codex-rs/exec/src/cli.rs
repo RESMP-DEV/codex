@@ -2,6 +2,7 @@ use clap::Args;
 use clap::FromArgMatches;
 use clap::Parser;
 use clap::ValueEnum;
+use codex_protocol::protocol::ThreadSource;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::SharedCliOptions;
 use std::path::PathBuf;
@@ -22,6 +23,10 @@ pub struct Cli {
 
     #[clap(flatten)]
     pub shared: ExecSharedCliOptions,
+
+    /// Source classification for newly created or forked threads.
+    #[arg(long = "thread-source", value_name = "SOURCE", global = true)]
+    pub thread_source: Option<ThreadSource>,
 
     /// Allow running Codex outside a Git repository.
     #[arg(long = "skip-git-repo-check", global = true, default_value_t = false)]
@@ -174,6 +179,7 @@ fn mark_exec_global_args(cmd: clap::Command) -> clap::Command {
             arg.global(true)
         })
         .mut_arg("bypass_hook_trust", |arg| arg.global(true))
+        .mut_arg("worktree", |arg| arg.global(true))
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -181,8 +187,32 @@ pub enum Command {
     /// Resume a previous session by id or pick the most recent with --last.
     Resume(ResumeArgs),
 
+    /// Fork a previous session by id into a new session.
+    Fork(ForkArgs),
+
     /// Run a code review against the current repository.
     Review(ReviewArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ForkArgs {
+    /// Conversation/session id (UUID) or thread name to fork.
+    #[arg(value_name = "SESSION_ID")]
+    pub session_id: String,
+
+    /// Optional image(s) to attach to the prompt sent after forking.
+    #[arg(
+        long = "image",
+        short = 'i',
+        value_name = "FILE",
+        value_delimiter = ',',
+        num_args = 1
+    )]
+    pub images: Vec<PathBuf>,
+
+    /// Optional prompt to send after forking. If `-` is used, read from stdin.
+    #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
+    pub prompt: Option<String>,
 }
 
 #[derive(Args, Debug)]

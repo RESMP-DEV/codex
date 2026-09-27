@@ -1,0 +1,9 @@
+# CodeRabbit configuration for the alphaheng port.
+# The fork's default branch is the upstream mirror `main`; all port work
+# targets `alphaheng/main`, so auto-review must cover both base branches.
+reviews:
+  auto_review:
+    enabled: true
+    base_branches:
+      - main
+      - alphaheng/main

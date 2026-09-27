@@ -1,5 +1,6 @@
 use crate::command_migration::migrate_plugin_commands;
 use crate::manifest::PluginManifest;
+use crate::manifest::PluginManifestFormat;
 use crate::manifest::load_plugin_manifest;
 use crate::manifest::parse_plugin_manifest;
 use codex_plugin::PluginId;
@@ -8,9 +9,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_plugins::AgentPluginSchemaStatus;
 use codex_utils_plugins::agent_plugin_schema_status;
 use codex_utils_plugins::find_plugin_manifest_path;
-use semver::Version;
 use serde::Deserialize;
-use serde::Serialize;
 use serde_json::Value as JsonValue;
 use sha2::Digest;
 use sha2::Sha256;
@@ -21,18 +20,15 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
-pub const DEFAULT_PLUGIN_VERSION: &str = "local";
-pub const PLUGINS_CACHE_DIR: &str = "plugins/cache";
+pub use codex_core_plugin_common::installed::DEFAULT_PLUGIN_VERSION;
+pub use codex_core_plugin_common::installed::PLUGINS_CACHE_DIR;
 pub const PLUGINS_DATA_DIR: &str = "plugins/data";
-const REMOTE_PLUGIN_INSTALL_METADATA_FILE: &str = ".codex-remote-plugin-install.json";
-const REMOTE_PLUGIN_INSTALL_METADATA_SCHEMA_VERSION: u8 = 1;
+const AGENT_PLUGINS_DATA_DIR: &str = "agent-plugins";
+use codex_core_plugin_common::installed::REMOTE_PLUGIN_INSTALL_METADATA_FILE;
+use codex_core_plugin_common::installed::REMOTE_PLUGIN_INSTALL_METADATA_SCHEMA_VERSION;
 const DEFAULT_AGENT_PLUGIN_VERSION: &str = "1.0.0";
 
-#[derive(Debug, Deserialize, Serialize)]
-struct RemotePluginInstallMetadata {
-    schema_version: u8,
-    remote_plugin_id: String,
-}
+use codex_core_plugin_common::installed::RemotePluginInstallMetadata;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginInstallResult {
@@ -67,26 +63,9 @@ impl ActivePluginInstallation {
                 ));
             }
         };
-        let metadata: RemotePluginInstallMetadata =
-            serde_json::from_str(&contents).map_err(|err| {
-                PluginStoreError::Invalid(format!(
-                    "failed to parse remote plugin install metadata: {err}"
-                ))
-            })?;
-        if metadata.schema_version != REMOTE_PLUGIN_INSTALL_METADATA_SCHEMA_VERSION {
-            return Err(PluginStoreError::Invalid(format!(
-                "unsupported remote plugin install metadata schema version: {}",
-                metadata.schema_version
-            )));
-        }
-        let remote_plugin_id = metadata.remote_plugin_id.trim();
-        if remote_plugin_id.is_empty() {
-            return Err(PluginStoreError::Invalid(
-                "invalid remote plugin install metadata: remote plugin id must not be blank"
-                    .to_string(),
-            ));
-        }
-        Ok(Some(remote_plugin_id.to_string()))
+        codex_core_plugin_common::installed::parse_remote_plugin_id(&contents)
+            .map(Some)
+            .map_err(PluginStoreError::Invalid)
     }
 }
 
@@ -143,27 +122,31 @@ impl PluginStore {
         ))
     }
 
-    pub fn active_plugin_version(&self, plugin_id: &PluginId) -> Option<String> {
-        let mut discovered_versions = fs::read_dir(self.plugin_base_root(plugin_id).as_path())
-            .ok()?
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                entry.file_type().ok().filter(std::fs::FileType::is_dir)?;
-                entry.file_name().into_string().ok()
-            })
-            .filter(|version| validate_plugin_version_segment(version).is_ok())
-            .collect::<Vec<_>>();
-        discovered_versions.sort_unstable_by(|left, right| compare_plugin_versions(left, right));
-        if discovered_versions.is_empty() {
-            None
-        } else if discovered_versions
-            .iter()
-            .any(|version| version == DEFAULT_PLUGIN_VERSION)
-        {
-            Some(DEFAULT_PLUGIN_VERSION.to_string())
-        } else {
-            discovered_versions.pop()
+    pub(crate) fn agent_plugin_data_root(&self, plugin_id: &PluginId) -> AbsolutePathBuf {
+        let mut digest = Sha256::new();
+        digest.update(plugin_id.marketplace_name.as_bytes());
+        digest.update([0]);
+        digest.update(plugin_id.plugin_name.as_bytes());
+        self.data_root
+            .join(AGENT_PLUGINS_DATA_DIR)
+            .join(hex_prefix(&digest.finalize(), /*count*/ 32))
+    }
+
+    pub(crate) fn mcp_data_root(
+        &self,
+        plugin_id: &PluginId,
+        manifest_format: PluginManifestFormat,
+    ) -> AbsolutePathBuf {
+        match manifest_format {
+            PluginManifestFormat::AgentPlugin => self.agent_plugin_data_root(plugin_id),
+            PluginManifestFormat::Legacy => self.plugin_data_root(plugin_id),
         }
+    }
+
+    pub fn active_plugin_version(&self, plugin_id: &PluginId) -> Option<String> {
+        codex_core_plugin_common::installed::active_plugin_version(
+            &self.plugin_base_root(plugin_id),
+        )
     }
 
     pub fn active_plugin_root(&self, plugin_id: &PluginId) -> Option<AbsolutePathBuf> {
@@ -472,22 +455,7 @@ fn hex_prefix(bytes: &[u8], count: usize) -> String {
 }
 
 pub fn validate_plugin_version_segment(plugin_version: &str) -> Result<(), String> {
-    if plugin_version.is_empty() {
-        return Err("invalid plugin version: must not be empty".to_string());
-    }
-    if matches!(plugin_version, "." | "..") {
-        return Err("invalid plugin version: path traversal is not allowed".to_string());
-    }
-    if !plugin_version
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '+'))
-    {
-        return Err(
-            "invalid plugin version: only ASCII letters, digits, `.`, `+`, `_`, and `-` are allowed"
-                .to_string(),
-        );
-    }
-    Ok(())
+    codex_core_plugin_common::installed::validate_plugin_version_segment(plugin_version)
 }
 
 fn plugin_manifest_for_source(
@@ -609,6 +577,27 @@ fn replace_plugin_root_atomically(
         })?;
     let staged_root = staged_dir.path().join(plugin_dir_name);
     let staged_version_root = staged_root.join(plugin_version);
+    let (source_manifest_relative_path, source_manifest_contents) = match manifest {
+        InstallManifest::OnDisk => {
+            let manifest_path = find_plugin_manifest_path(source)
+                .ok_or_else(|| PluginStoreError::Invalid("missing plugin.json".to_string()))?;
+            let relative_path = manifest_path
+                .strip_prefix(source)
+                .map_err(|_| {
+                    PluginStoreError::Invalid(
+                        "plugin manifest is outside the plugin source".to_string(),
+                    )
+                })?
+                .to_path_buf();
+            let contents = fs::read(&manifest_path)
+                .map_err(|err| PluginStoreError::io("failed to read plugin.json", err))?;
+            (relative_path, contents)
+        }
+        InstallManifest::Fallback(contents) => (
+            PathBuf::from(".codex-plugin/plugin.json"),
+            contents.as_bytes().to_vec(),
+        ),
+    };
     copy_dir_recursive(source, &staged_version_root)?;
     if let InstallManifest::Fallback(contents) = manifest {
         // Inject the generated manifest into Store's existing atomic copy so install does not
@@ -624,6 +613,24 @@ fn replace_plugin_root_atomically(
         })?;
         fs::write(&manifest_path, contents)
             .map_err(|err| PluginStoreError::io("failed to write fallback plugin manifest", err))?;
+    }
+    let staged_manifest_path =
+        find_plugin_manifest_path(&staged_version_root).ok_or_else(|| {
+            PluginStoreError::Invalid(
+                "plugin manifest is missing after installation staging".to_string(),
+            )
+        })?;
+    if staged_manifest_path != staged_version_root.join(&source_manifest_relative_path) {
+        return Err(PluginStoreError::Invalid(
+            "plugin manifest changed during installation staging".to_string(),
+        ));
+    }
+    let staged_manifest_contents = fs::read(&staged_manifest_path)
+        .map_err(|err| PluginStoreError::io("failed to read staged plugin.json", err))?;
+    if staged_manifest_contents != source_manifest_contents {
+        return Err(PluginStoreError::Invalid(
+            "plugin manifest contents changed during installation staging".to_string(),
+        ));
     }
     let is_agent_plugin = fs::read_to_string(staged_version_root.join("plugin.json"))
         .ok()
@@ -719,10 +726,7 @@ fn old_plugin_version_would_stay_active(old_version: &str, new_version: &str) ->
 }
 
 fn compare_plugin_versions(left: &str, right: &str) -> Ordering {
-    match (Version::parse(left), Version::parse(right)) {
-        (Ok(left), Ok(right)) => left.cmp(&right),
-        _ => left.cmp(right),
-    }
+    codex_core_plugin_common::installed::compare_plugin_versions(left, right)
 }
 
 fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), PluginStoreError> {
@@ -745,16 +749,6 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), PluginStoreErr
         } else if file_type.is_file() {
             fs::copy(&source_path, &target_path)
                 .map_err(|err| PluginStoreError::io("failed to copy plugin file", err))?;
-        } else if file_type.is_symlink() {
-            return Err(PluginStoreError::Invalid(format!(
-                "plugin source contains unsupported symbolic link: {}",
-                source_path.display()
-            )));
-        } else {
-            return Err(PluginStoreError::Invalid(format!(
-                "plugin source contains unsupported file type: {}",
-                source_path.display()
-            )));
         }
     }
 

@@ -138,6 +138,8 @@ pub enum MemoriesBackendError {
     InvalidFilename { filename: String, reason: String },
     #[error("ad-hoc note must not be empty")]
     EmptyAdHocNote,
+    #[error("ad-hoc note is not a valid memory_update document: {reason}")]
+    InvalidAdHocNote { reason: String },
     #[error("ad-hoc note '{filename}' already exists")]
     AdHocNoteAlreadyExists { filename: String },
     #[error("path '{path}' {reason}")]
@@ -166,6 +168,12 @@ impl MemoriesBackendError {
     pub fn invalid_filename(filename: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::InvalidFilename {
             filename: filename.into(),
+            reason: reason.into(),
+        }
+    }
+
+    pub fn invalid_ad_hoc_note(reason: impl Into<String>) -> Self {
+        Self::InvalidAdHocNote {
             reason: reason.into(),
         }
     }

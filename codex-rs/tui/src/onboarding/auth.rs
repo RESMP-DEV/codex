@@ -15,6 +15,7 @@ use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::LoginAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
+use codex_login::AuthConfig;
 use codex_login::read_openai_api_key_from_env;
 use codex_protocol::auth::AuthMode;
 use crossterm::event::KeyCode;
@@ -49,6 +50,7 @@ use crate::key_hint::KeyBinding;
 use crate::key_hint::KeyBindingListExt;
 use crate::motion::MotionMode;
 use crate::motion::shimmer_text;
+use crate::onboarding::bedrock::BedrockState;
 use crate::onboarding::keys;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
 use crate::onboarding::onboarding_screen::StepStateProvider;
@@ -87,6 +89,8 @@ pub(crate) enum SignInState {
     ChatGptSuccess,
     ApiKeyEntry(ApiKeyInputState),
     ApiKeyConfigured,
+    Bedrock(BedrockState),
+    BedrockConfigured,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,10 +98,11 @@ pub(crate) enum SignInOption {
     ChatGpt,
     DeviceCode,
     ApiKey,
+    Bedrock,
 }
 
 const API_KEY_DISABLED_MESSAGE: &str = "API key login is disabled.";
-fn onboarding_request_id() -> codex_app_server_protocol::RequestId {
+pub(super) fn onboarding_request_id() -> codex_app_server_protocol::RequestId {
     codex_app_server_protocol::RequestId::String(Uuid::new_v4().to_string())
 }
 
@@ -177,6 +182,9 @@ impl ContinueWithDeviceCodeState {
 
 impl KeyboardHandler for AuthModeWidget {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if self.handle_bedrock_key_event(&key_event) {
+            return;
+        }
         if self.handle_api_key_entry_key_event(&key_event) {
             return;
         }
@@ -201,6 +209,10 @@ impl KeyboardHandler for AuthModeWidget {
             self.select_option_by_index(/*index*/ 2);
             return;
         }
+        if keys::SELECT_FOURTH.is_pressed(key_event) {
+            self.select_option_by_index(/*index*/ 3);
+            return;
+        }
         if keys::CONFIRM.is_pressed(key_event) {
             let sign_in_state = { (*self.sign_in_state.read().unwrap()).clone() };
             match sign_in_state {
@@ -221,7 +233,18 @@ impl KeyboardHandler for AuthModeWidget {
     }
 
     fn handle_paste(&mut self, pasted: String) {
-        let _ = self.handle_api_key_entry_paste(pasted);
+        let sign_in_state = self.sign_in_state.read().unwrap();
+        match &*sign_in_state {
+            SignInState::Bedrock(_) => {
+                drop(sign_in_state);
+                let _ = self.handle_bedrock_paste(&pasted);
+            }
+            SignInState::ApiKeyEntry(_) => {
+                drop(sign_in_state);
+                let _ = self.handle_api_key_entry_paste(pasted);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -234,7 +257,8 @@ pub(crate) struct AuthModeWidget {
     pub sign_in_state: Arc<RwLock<SignInState>>,
     pub login_status: LoginStatus,
     pub app_server_request_handle: AppServerRequestHandle,
-    pub forced_login_method: Option<ForcedLoginMethod>,
+    pub auth_config: AuthConfig,
+    pub bedrock_setup_enabled: bool,
     pub animations_enabled: bool,
     pub animations_suppressed: Cell<bool>,
 }
@@ -285,18 +309,25 @@ impl AuthModeWidget {
         self.error.read().unwrap().clone()
     }
 
-    /// Returns whether the auth flow is currently in API-key entry mode.
-    pub(crate) fn is_api_key_entry_active(&self) -> bool {
-        self.sign_in_state
-            .read()
-            .is_ok_and(|guard| matches!(&*guard, SignInState::ApiKeyEntry(_)))
+    /// Returns whether the auth flow is currently accepting text input.
+    pub(crate) fn is_text_entry_active(&self) -> bool {
+        self.sign_in_state.read().is_ok_and(|guard| match &*guard {
+            SignInState::ApiKeyEntry(_) => true,
+            SignInState::Bedrock(state) => state.is_text_entry_active(),
+            _ => false,
+        })
     }
 
-    /// Returns whether the API-key entry field currently contains any text.
-    pub(crate) fn api_key_entry_has_text(&self) -> bool {
-        self.sign_in_state.read().is_ok_and(
-            |guard| matches!(&*guard, SignInState::ApiKeyEntry(state) if !state.value.is_empty()),
-        )
+    /// Returns whether printable quit shortcuts must be treated as text input.
+    ///
+    /// OpenAI API-key entry keeps its existing empty-field quit behavior, while
+    /// Bedrock fields accept printable input from their first character.
+    pub(crate) fn should_suppress_printable_quit(&self) -> bool {
+        self.sign_in_state.read().is_ok_and(|guard| match &*guard {
+            SignInState::ApiKeyEntry(state) => !state.value.is_empty(),
+            SignInState::Bedrock(state) => state.is_text_entry_active(),
+            _ => false,
+        })
     }
 
     fn confirm_binding(&self) -> KeyBinding {
@@ -308,11 +339,13 @@ impl AuthModeWidget {
     }
 
     fn is_api_login_allowed(&self) -> bool {
-        !matches!(self.forced_login_method, Some(ForcedLoginMethod::Chatgpt))
+        self.auth_config
+            .is_login_method_allowed(ForcedLoginMethod::Api)
     }
 
     fn is_chatgpt_login_allowed(&self) -> bool {
-        !matches!(self.forced_login_method, Some(ForcedLoginMethod::Api))
+        self.auth_config
+            .is_login_method_allowed(ForcedLoginMethod::Chatgpt)
     }
 
     fn displayed_sign_in_options(&self) -> Vec<SignInOption> {
@@ -322,6 +355,9 @@ impl AuthModeWidget {
         }
         if self.is_api_login_allowed() {
             options.push(SignInOption::ApiKey);
+            if self.bedrock_setup_enabled {
+                options.push(SignInOption::Bedrock);
+            }
         }
         options
     }
@@ -334,6 +370,9 @@ impl AuthModeWidget {
         }
         if self.is_api_login_allowed() {
             options.push(SignInOption::ApiKey);
+            if self.bedrock_setup_enabled {
+                options.push(SignInOption::Bedrock);
+            }
         }
         options
     }
@@ -379,6 +418,13 @@ impl AuthModeWidget {
                     self.disallow_api_login();
                 }
             }
+            SignInOption::Bedrock => {
+                if self.bedrock_setup_enabled && self.is_api_login_allowed() {
+                    self.start_bedrock_discovery();
+                } else if !self.is_api_login_allowed() {
+                    self.disallow_api_login();
+                }
+            }
         }
     }
 
@@ -390,17 +436,21 @@ impl AuthModeWidget {
     }
 
     fn render_pick_mode(&self, area: Rect, buf: &mut Buffer) {
-        let mut lines: Vec<Line> = vec![
-            Line::from(vec![
-                "  ".into(),
-                "Sign in with ChatGPT to use Codex as part of your paid plan".into(),
-            ]),
-            Line::from(vec![
-                "  ".into(),
-                "or connect an API key for usage-based billing".into(),
-            ]),
-            "".into(),
-        ];
+        let mut lines: Vec<Line> = if self.bedrock_setup_enabled {
+            vec!["  Choose how you want to use Codex.".into(), "".into()]
+        } else {
+            vec![
+                Line::from(vec![
+                    "  ".into(),
+                    "Sign in with ChatGPT to use Codex as part of your paid plan".into(),
+                ]),
+                Line::from(vec![
+                    "  ".into(),
+                    "or connect an API key for usage-based billing".into(),
+                ]),
+                "".into(),
+            ]
+        };
 
         let create_mode_item = |idx: usize,
                                 selected_mode: SignInOption,
@@ -460,8 +510,20 @@ impl AuthModeWidget {
                     lines.extend(create_mode_item(
                         idx,
                         option,
-                        "Provide your own API key",
+                        if self.bedrock_setup_enabled {
+                            "Use an OpenAI API key"
+                        } else {
+                            "Provide your own API key"
+                        },
                         "Pay for what you use",
+                    ));
+                }
+                SignInOption::Bedrock => {
+                    lines.extend(create_mode_item(
+                        idx,
+                        option,
+                        "Use Amazon Bedrock",
+                        "Connect using your AWS credentials",
                     ));
                 }
             }
@@ -491,7 +553,12 @@ impl AuthModeWidget {
             .render(area, buf);
     }
 
-    fn render_continue_in_browser(&self, area: Rect, buf: &mut Buffer) {
+    fn render_continue_in_browser(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        state: &ContinueInBrowserState,
+    ) {
         let mut spans = vec!["  ".into()];
         if self.animations_enabled && !self.animations_suppressed.get() {
             // Schedule a follow-up frame to keep the shimmer animation going.
@@ -506,10 +573,7 @@ impl AuthModeWidget {
         }
         let mut lines = vec![spans.into(), "".into()];
 
-        let sign_in_state = self.sign_in_state.read().unwrap();
-        let auth_url = if let SignInState::ChatGptContinueInBrowser(state) = &*sign_in_state
-            && !state.auth_url.is_empty()
-        {
+        let auth_url = if !state.auth_url.is_empty() {
             lines.push("  If the link doesn't open automatically, open the following link to authenticate:".into());
             lines.push("".into());
             lines.push(Line::from(vec![
@@ -960,6 +1024,7 @@ impl AuthModeWidget {
                     ApiAuthMode::AgentIdentity => AuthMode::AgentIdentity,
                     ApiAuthMode::PersonalAccessToken => AuthMode::PersonalAccessToken,
                     ApiAuthMode::BedrockApiKey => AuthMode::BedrockApiKey,
+                    ApiAuthMode::BedrockAccessKeys => AuthMode::BedrockAccessKeys,
                 })
             })
             .unwrap_or(LoginStatus::NotAuthenticated);
@@ -974,8 +1039,11 @@ impl StepStateProvider for AuthModeWidget {
             | SignInState::ApiKeyEntry(_)
             | SignInState::ChatGptContinueInBrowser(_)
             | SignInState::ChatGptDeviceCode(_)
-            | SignInState::ChatGptSuccessMessage => StepState::InProgress,
-            SignInState::ChatGptSuccess | SignInState::ApiKeyConfigured => StepState::Complete,
+            | SignInState::ChatGptSuccessMessage
+            | SignInState::Bedrock(_) => StepState::InProgress,
+            SignInState::ChatGptSuccess
+            | SignInState::ApiKeyConfigured
+            | SignInState::BedrockConfigured => StepState::Complete,
         }
     }
 }
@@ -987,8 +1055,8 @@ impl WidgetRef for AuthModeWidget {
             SignInState::PickMode => {
                 self.render_pick_mode(area, buf);
             }
-            SignInState::ChatGptContinueInBrowser(_) => {
-                self.render_continue_in_browser(area, buf);
+            SignInState::ChatGptContinueInBrowser(state) => {
+                self.render_continue_in_browser(area, buf, state);
             }
             SignInState::ChatGptDeviceCode(state) => {
                 headless_chatgpt_login::render_device_code_login(self, area, buf, state);
@@ -1004,6 +1072,14 @@ impl WidgetRef for AuthModeWidget {
             }
             SignInState::ApiKeyConfigured => {
                 self.render_api_key_configured(area, buf);
+            }
+            SignInState::Bedrock(state) => {
+                state.render(area, buf, self.error_message());
+            }
+            SignInState::BedrockConfigured => {
+                Paragraph::new("✓ Amazon Bedrock configured".green())
+                    .wrap(Wrap { trim: false })
+                    .render(area, buf);
             }
         }
     }
@@ -1029,9 +1105,6 @@ mod tests {
     use codex_app_server_client::InProcessClientStartArgs;
     use codex_arg0::Arg0DispatchPaths;
     use codex_cloud_config::cloud_config_bundle_loader_for_storage;
-    use codex_config::types::AuthCredentialsStoreMode;
-    use codex_login::AuthKeyringBackendKind;
-
     use pretty_assertions::assert_eq;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1059,7 +1132,7 @@ mod tests {
             .build()
             .await
             .unwrap();
-        let auth_route_config = config.auth_route_config();
+        let mut auth_config = config.auth_config();
         let client = InProcessAppServerClient::start(InProcessClientStartArgs {
             arg0_paths: Arg0DispatchPaths::default(),
             config: Arc::new(config),
@@ -1067,14 +1140,12 @@ mod tests {
             loader_overrides: Default::default(),
             strict_config: false,
             cloud_config_bundle: cloud_config_bundle_loader_for_storage(
-                codex_home_path.clone(),
+                auth_config.clone(),
                 /*enable_codex_api_key_env*/ false,
-                AuthCredentialsStoreMode::File,
-                AuthKeyringBackendKind::default(),
-                "https://chatgpt.com/backend-api/".to_string(),
-                auth_route_config,
             )
-            .await,
+            .await
+            .expect("test cloud config loader"),
+            embedded_network_policy: Default::default(),
             feedback: codex_feedback::CodexFeedback::new(),
             log_db: None,
             state_db: None,
@@ -1094,6 +1165,7 @@ mod tests {
         })
         .await
         .unwrap();
+        auth_config.forced_login_method = Some(ForcedLoginMethod::Chatgpt);
         let widget = AuthModeWidget {
             request_frame: FrameRequester::test_dummy(),
             highlighted_mode: SignInOption::ChatGpt,
@@ -1101,7 +1173,8 @@ mod tests {
             sign_in_state: Arc::new(RwLock::new(SignInState::PickMode)),
             login_status: LoginStatus::NotAuthenticated,
             app_server_request_handle: AppServerRequestHandle::InProcess(client.request_handle()),
-            forced_login_method: Some(ForcedLoginMethod::Chatgpt),
+            auth_config,
+            bedrock_setup_enabled: false,
             animations_enabled: true,
             animations_suppressed: std::cell::Cell::new(false),
         };
@@ -1122,6 +1195,70 @@ mod tests {
             &*widget.sign_in_state.read().unwrap(),
             SignInState::PickMode
         ));
+    }
+
+    #[tokio::test]
+    async fn bedrock_option_requires_feature_and_api_login_permission() {
+        let (mut widget, _tmp) = widget_forced_chatgpt().await;
+        widget.auth_config.forced_login_method = None;
+        assert_eq!(
+            widget.displayed_sign_in_options(),
+            vec![
+                SignInOption::ChatGpt,
+                SignInOption::DeviceCode,
+                SignInOption::ApiKey,
+            ]
+        );
+
+        widget.bedrock_setup_enabled = true;
+        assert_eq!(
+            widget.displayed_sign_in_options(),
+            vec![
+                SignInOption::ChatGpt,
+                SignInOption::DeviceCode,
+                SignInOption::ApiKey,
+                SignInOption::Bedrock,
+            ]
+        );
+
+        let area = Rect::new(0, 0, 76, 19);
+        let mut buffer = Buffer::empty(area);
+        widget.render_pick_mode(area, &mut buffer);
+        let mut rows = (area.top()..area.bottom())
+            .map(|row| {
+                (area.left()..area.right())
+                    .map(|column| buffer[(column, row)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        while rows.last().is_some_and(String::is_empty) {
+            rows.pop();
+        }
+        insta::assert_snapshot!(rows.join("\n"), @r###"
+          Choose how you want to use Codex.
+
+        > 1. Sign in with ChatGPT
+             Usage included with Plus, Pro, Business, and Enterprise plans
+
+          2. Sign in with Device Code
+             Sign in from another device with a one-time code
+
+          3. Use an OpenAI API key
+             Pay for what you use
+
+          4. Use Amazon Bedrock
+             Connect using your AWS credentials
+
+          Press enter to continue
+        "###);
+
+        widget.auth_config.forced_login_method = Some(ForcedLoginMethod::Chatgpt);
+        assert_eq!(
+            widget.displayed_sign_in_options(),
+            vec![SignInOption::ChatGpt, SignInOption::DeviceCode]
+        );
     }
 
     #[tokio::test]
@@ -1231,7 +1368,7 @@ mod tests {
         let height = 30;
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
-        widget.render_continue_in_browser(area, &mut buf);
+        widget.render_ref(area, &mut buf);
 
         let found = collect_osc8_chars(&buf, area, PRODUCTION_LENGTH_AUTH_URL);
         assert_eq!(
@@ -1246,7 +1383,7 @@ mod tests {
         terminal.set_viewport_area(area);
 
         terminal
-            .draw(|frame| widget.render_continue_in_browser(area, frame.buffer_mut()))
+            .draw(|frame| widget.render_ref(area, frame.buffer_mut()))
             .expect("draw");
 
         let contents = terminal.backend().to_string();
@@ -1359,6 +1496,7 @@ mod tests {
             login_id: Some("login-1".to_string()),
             success: true,
             error: None,
+            onboarding_entrypoint: None,
         });
 
         assert!(matches!(

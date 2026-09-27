@@ -41,7 +41,7 @@ extends = ":read-only"
         vec![
             responses::sse(vec![
                 responses::ev_response_created("response_1"),
-                responses::ev_shell_command_call(
+                responses::ev_exec_command_call(
                     "write_marker",
                     "printf blocked > profile-write-should-fail.txt",
                 ),
@@ -71,8 +71,10 @@ extends = ":read-only"
         .expect("write_marker output should be model-visible");
     let exit_code = tool_output
         .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("Exit code: "))
+        .find_map(|line| {
+            line.strip_prefix("Exit code: ")
+                .or_else(|| line.strip_prefix("Process exited with code "))
+        })
         .and_then(|code| code.trim().parse::<i32>().ok())
         .expect("write_marker output should report an exit code");
     let tool_output_lower = tool_output.to_lowercase();

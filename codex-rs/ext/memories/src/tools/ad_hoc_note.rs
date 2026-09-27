@@ -30,8 +30,10 @@ struct AddAdHocNoteArgs {
         regex(pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-[a-z0-9][a-z0-9-]{0,79}\.md$")
     )]
     filename: String,
-    /// Verbatim Markdown note to append to the ad-hoc memory notes.
-    #[schemars(length(min = 1))]
+    /// XML-wrapped memory mutation document to append to the ad-hoc notes.
+    /// The schema caps characters for early rejection; runtime validation caps
+    /// the trimmed UTF-8 representation to 16 KiB.
+    #[schemars(length(min = 1, max = 16384))]
     note: String,
 }
 
@@ -41,7 +43,7 @@ pub(super) struct AddAdHocNoteTool<B> {
     pub(super) metrics_client: Option<MetricsClient>,
 }
 
-impl<B> ToolExecutor<ToolCall> for AddAdHocNoteTool<B>
+impl<'call, B> ToolExecutor<ToolCall<'call>> for AddAdHocNoteTool<B>
 where
     B: MemoriesBackend,
 {
@@ -52,11 +54,14 @@ where
     fn spec(&self) -> ToolSpec {
         memory_function_tool::<AddAdHocNoteArgs, AddAdHocMemoryNoteResponse>(
             ADD_AD_HOC_NOTE_TOOL_NAME,
-            "Create one append-only ad-hoc memory note after the user explicitly asks Codex to remember, forget, or update something.",
+            "Create one XML-wrapped ad-hoc memory mutation after the user explicitly asks Codex to remember, forget, or update something.",
         )
     }
 
-    fn handle(&self, call: ToolCall) -> codex_extension_api::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, call: ToolCall<'call>) -> codex_extension_api::ToolExecutorFuture<'a>
+    where
+        'call: 'a,
+    {
         Box::pin(self.handle_call(call))
     }
 }
@@ -67,7 +72,7 @@ where
 {
     async fn handle_call(
         &self,
-        call: ToolCall,
+        call: ToolCall<'_>,
     ) -> Result<Box<dyn codex_extension_api::ToolOutput>, codex_extension_api::FunctionCallError>
     {
         let backend = self.backend.clone();

@@ -11,13 +11,12 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use serde_json::Value;
 
 use super::common;
-use crate::engine::CommandShell;
+use crate::engine::ClaudeHooksEngine;
 use crate::engine::ConfiguredHandler;
-use crate::engine::command_runner::CommandRunResult;
+use crate::engine::HandlerRunResult;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
 use crate::output_spill::AdditionalContext;
-use crate::output_spill::HookOutputSpiller;
 use crate::schema::PostToolUseCommandInput;
 use crate::schema::SubagentCommandInputFields;
 
@@ -70,15 +69,12 @@ pub(crate) fn preview(
 }
 
 pub(crate) async fn run(
-    handlers: &[ConfiguredHandler],
-    shell: &CommandShell,
-    output_spiller: &HookOutputSpiller,
+    engine: &ClaudeHooksEngine,
     request: PostToolUseRequest,
 ) -> PostToolUseOutcome {
-    let session_id = request.session_id;
     let matcher_inputs = common::matcher_inputs(&request.tool_name, &request.matcher_aliases);
     let matched = dispatcher::select_handlers_for_matcher_inputs(
-        handlers,
+        &engine.handlers,
         HookEventName::PostToolUse,
         &matcher_inputs,
     );
@@ -105,7 +101,7 @@ pub(crate) async fn run(
     };
 
     let results = dispatcher::execute_handlers(
-        shell,
+        engine,
         matched,
         input_json,
         request.cwd.as_path(),
@@ -119,8 +115,10 @@ pub(crate) async fn run(
             .iter()
             .map(|result| result.data.additional_contexts_for_model.as_slice()),
     );
-    let additional_contexts = output_spiller
-        .maybe_spill_additional_contexts(session_id, additional_contexts)
+    let additional_contexts = engine
+        .command_runtime
+        .output_spiller()
+        .maybe_spill_additional_contexts(additional_contexts)
         .await;
     let should_block = results.iter().any(|result| result.data.should_block);
     let feedback_message = common::join_text_chunks(
@@ -151,6 +149,7 @@ pub(crate) async fn run(
 /// `tool_input`; MCP tools pass their resolved JSON arguments.
 fn command_input_json(request: &PostToolUseRequest) -> Result<String, serde_json::Error> {
     let subagent = SubagentCommandInputFields::from(request.subagent.as_ref());
+    let affected_files = extract_affected_files(&request.tool_name, &request.tool_input);
     serde_json::to_string(&PostToolUseCommandInput {
         session_id: request.session_id.to_string(),
         turn_id: request.turn_id.clone(),
@@ -165,12 +164,104 @@ fn command_input_json(request: &PostToolUseRequest) -> Result<String, serde_json
         tool_input: request.tool_input.clone(),
         tool_response: request.tool_response.clone(),
         tool_use_id: request.tool_use_id.clone(),
+        affected_files,
     })
+}
+
+/// Extract file paths affected by a tool call from its input JSON.
+///
+/// Handles common tool input shapes:
+/// - `{ "file_path": "..." }` or `{ "path": "..." }` — direct file tools
+/// - `{ "patch": "--- a/foo\n+++ b/foo\n..." }` — unified diff tools
+/// - `{ "command": "*** Begin Patch\n*** Update File: foo\n..." }` — `apply_patch`
+fn extract_affected_files(tool_name: &str, tool_input: &Value) -> Option<Vec<String>> {
+    let obj = tool_input.as_object()?;
+    let mut files: Vec<String> = Vec::new();
+
+    // Direct file path fields used by file-writing tools.
+    for key in ["file_path", "path", "filePath"] {
+        if let Some(Value::String(p)) = obj.get(key)
+            && !p.is_empty()
+        {
+            files.push(p.clone());
+        }
+    }
+
+    // Unified diff content — extract paths from --- / +++ headers.
+    for key in ["patch", "diff"] {
+        if let Some(Value::String(text)) = obj.get(key) {
+            let lines = text.lines().collect::<Vec<_>>();
+            for (index, pair) in lines.windows(2).enumerate() {
+                let Some(old_path) = pair[0].strip_prefix("--- ") else {
+                    continue;
+                };
+                let Some(new_path) = pair[1].strip_prefix("+++ ") else {
+                    continue;
+                };
+                let old_path = old_path
+                    .split_once('\t')
+                    .map_or(old_path, |(path, _)| path)
+                    .trim();
+                let new_path = new_path
+                    .split_once('\t')
+                    .map_or(new_path, |(path, _)| path)
+                    .trim();
+                let has_standard_prefix = (old_path == "/dev/null" || old_path.starts_with("a/"))
+                    && (new_path == "/dev/null" || new_path.starts_with("b/"));
+                let has_header_boundary = index == 0
+                    || lines[index - 1].starts_with("diff --git ")
+                    || lines[index - 1].starts_with("+++ b/")
+                    || lines[index - 1].starts_with("+++ /dev/null")
+                    || lines
+                        .get(index + 2)
+                        .is_some_and(|line| line.starts_with("@@"));
+                if !has_standard_prefix || !has_header_boundary {
+                    continue;
+                }
+                for path in [old_path, new_path] {
+                    let path = path
+                        .strip_prefix("a/")
+                        .or_else(|| path.strip_prefix("b/"))
+                        .unwrap_or(path);
+                    if path != "/dev/null" && !path.is_empty() {
+                        files.push(path.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // The native apply_patch tool carries its patch text in `command` and
+    // names files with the markers from the apply-patch grammar. Include both
+    // sides of a move so hook consumers can invalidate the source and target.
+    if tool_name == "apply_patch"
+        && let Some(Value::String(command)) = obj.get("command")
+    {
+        for line in command.lines() {
+            let path = [
+                "*** Add File: ",
+                "*** Delete File: ",
+                "*** Update File: ",
+                "*** Move to: ",
+            ]
+            .into_iter()
+            .find_map(|marker| line.strip_prefix(marker));
+            if let Some(path) = path.map(str::trim)
+                && !path.is_empty()
+            {
+                files.push(path.to_string());
+            }
+        }
+    }
+
+    files.sort();
+    files.dedup();
+    if files.is_empty() { None } else { Some(files) }
 }
 
 fn parse_completed(
     handler: &ConfiguredHandler,
-    run_result: CommandRunResult,
+    run_result: HandlerRunResult,
     turn_id: Option<String>,
 ) -> dispatcher::ParsedHandler<PostToolUseHandlerData> {
     let mut entries = Vec::new();
@@ -199,8 +290,8 @@ fn parse_completed(
                             text: system_message,
                         });
                     }
-                    if parsed.invalid_reason.is_none()
-                        && parsed.invalid_block_reason.is_none()
+                    if (!handler.can_apply_control_effects()
+                        || parsed.invalid_reason.is_none() && parsed.invalid_block_reason.is_none())
                         && let Some(additional_context) = parsed.additional_context
                     {
                         common::append_additional_context(
@@ -210,43 +301,44 @@ fn parse_completed(
                             additional_context,
                         );
                     }
-                    if !parsed.universal.continue_processing {
-                        status = HookRunStatus::Stopped;
-                        let stop_text = parsed
-                            .universal
-                            .stop_reason
-                            .unwrap_or_else(|| "PostToolUse hook stopped execution".to_string());
-                        entries.push(HookOutputEntry {
-                            kind: HookOutputEntryKind::Stop,
-                            text: stop_text.clone(),
-                        });
-                        let model_feedback = parsed
-                            .reason
-                            .as_deref()
-                            .and_then(common::trimmed_non_empty)
-                            .unwrap_or(stop_text);
-                        feedback_messages_for_model.push(model_feedback);
-                    } else if let Some(invalid_reason) = parsed.invalid_reason {
-                        status = HookRunStatus::Failed;
-                        entries.push(HookOutputEntry {
-                            kind: HookOutputEntryKind::Error,
-                            text: invalid_reason,
-                        });
-                    } else if let Some(invalid_block_reason) = parsed.invalid_block_reason {
-                        status = HookRunStatus::Failed;
-                        entries.push(HookOutputEntry {
-                            kind: HookOutputEntryKind::Error,
-                            text: invalid_block_reason,
-                        });
-                    } else if parsed.should_block {
-                        status = HookRunStatus::Blocked;
-                        should_block = true;
-                        if let Some(reason) = parsed.reason {
-                            entries.push(HookOutputEntry {
-                                kind: HookOutputEntryKind::Feedback,
-                                text: reason.clone(),
+                    if handler.can_apply_control_effects() {
+                        if !parsed.universal.continue_processing {
+                            status = HookRunStatus::Stopped;
+                            let stop_text = parsed.universal.stop_reason.unwrap_or_else(|| {
+                                "PostToolUse hook stopped execution".to_string()
                             });
-                            feedback_messages_for_model.push(reason);
+                            entries.push(HookOutputEntry {
+                                kind: HookOutputEntryKind::Stop,
+                                text: stop_text.clone(),
+                            });
+                            let model_feedback = parsed
+                                .reason
+                                .as_deref()
+                                .and_then(common::trimmed_non_empty)
+                                .unwrap_or(stop_text);
+                            feedback_messages_for_model.push(model_feedback);
+                        } else if let Some(invalid_reason) = parsed.invalid_reason {
+                            status = HookRunStatus::Failed;
+                            entries.push(HookOutputEntry {
+                                kind: HookOutputEntryKind::Error,
+                                text: invalid_reason,
+                            });
+                        } else if let Some(invalid_block_reason) = parsed.invalid_block_reason {
+                            status = HookRunStatus::Failed;
+                            entries.push(HookOutputEntry {
+                                kind: HookOutputEntryKind::Error,
+                                text: invalid_block_reason,
+                            });
+                        } else if parsed.should_block {
+                            status = HookRunStatus::Blocked;
+                            should_block = true;
+                            if let Some(reason) = parsed.reason {
+                                entries.push(HookOutputEntry {
+                                    kind: HookOutputEntryKind::Feedback,
+                                    text: reason.clone(),
+                                });
+                                feedback_messages_for_model.push(reason);
+                            }
                         }
                     }
                 } else if output_parser::looks_like_json(&run_result.stdout) {
@@ -257,7 +349,7 @@ fn parse_completed(
                     });
                 }
             }
-            Some(2) => {
+            Some(2) if handler.can_apply_control_effects() => {
                 if let Some(reason) = common::trimmed_non_empty(&run_result.stderr) {
                     status = HookRunStatus::Blocked;
                     should_block = true;
@@ -330,10 +422,11 @@ mod tests {
 
     use super::PostToolUseHandlerData;
     use super::command_input_json;
+    use super::extract_affected_files;
     use super::parse_completed;
     use super::preview;
     use crate::engine::ConfiguredHandler;
-    use crate::engine::command_runner::CommandRunResult;
+    use crate::engine::HandlerRunResult;
     use crate::events::common;
     use crate::output_spill::AdditionalContext;
     use crate::output_spill::AdditionalContextLimit;
@@ -348,6 +441,88 @@ mod tests {
             serde_json::from_str(&input_json).expect("parse command input");
 
         assert_eq!(input["tool_name"], "apply_patch");
+    }
+
+    #[test]
+    fn affected_files_include_direct_and_patch_paths() {
+        let tool_input = json!({
+            "file_path": "src/direct.rs",
+            "path": "src/direct.rs",
+            "patch": "--- a/src/old.rs\n+++ b/src/new.rs\n--- /dev/null\n+++ b/src/created.rs\n",
+        });
+
+        assert_eq!(
+            extract_affected_files("Edit", &tool_input),
+            Some(vec![
+                "src/created.rs".to_string(),
+                "src/direct.rs".to_string(),
+                "src/new.rs".to_string(),
+                "src/old.rs".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn command_input_reports_native_apply_patch_paths() {
+        let mut request = request_for_tool_use("call-apply-patch");
+        request.tool_name = "apply_patch".to_string();
+        request.tool_input = json!({
+            "command": "*** Begin Patch\n*** Add File: src/new.rs\n+new\n*** Update File: src/old.rs\n*** Move to: src/moved.rs\n@@\n-old\n+new\n*** Delete File: src/gone.rs\n*** End Patch"
+        });
+
+        let input_json = command_input_json(&request).expect("serialize command input");
+        let input: serde_json::Value =
+            serde_json::from_str(&input_json).expect("parse command input");
+
+        assert_eq!(
+            input["affected_files"],
+            json!(["src/gone.rs", "src/moved.rs", "src/new.rs", "src/old.rs"])
+        );
+    }
+
+    #[test]
+    fn affected_files_ignore_diff_content_that_looks_like_headers() {
+        let tool_input = json!({
+            "diff": "diff --git a/src/code.rs b/src/code.rs\n--- a/src/code.rs\n+++ b/src/code.rs\n@@ -1,2 +1,2 @@\n--- bogus-old-path\n+++ bogus-new-path\n"
+        });
+
+        assert_eq!(
+            extract_affected_files("Edit", &tool_input),
+            Some(vec!["src/code.rs".to_string()])
+        );
+    }
+
+    #[test]
+    fn affected_files_include_multiple_plain_unified_diff_files() {
+        let tool_input = json!({
+            "diff": "--- a/src/one.rs\n+++ b/src/one.rs\n@@ -1 +1 @@\n-old\n+new\n--- a/src/two.rs\n+++ b/src/two.rs\n@@ -1 +1 @@\n-old2\n+new2\n"
+        });
+
+        assert_eq!(
+            extract_affected_files("Edit", &tool_input),
+            Some(vec!["src/one.rs".to_string(), "src/two.rs".to_string()])
+        );
+    }
+
+    #[test]
+    fn affected_files_ignore_apply_patch_markers_in_other_commands() {
+        let tool_input = json!({
+            "command": "echo '*** Update File: not-really-edited.rs'"
+        });
+
+        assert_eq!(extract_affected_files("Bash", &tool_input), None);
+    }
+
+    #[test]
+    fn command_input_omits_affected_files_when_no_path_is_present() {
+        let mut request = request_for_tool_use("call-shell");
+        request.tool_input = json!({"command": "cargo test"});
+
+        let input_json = command_input_json(&request).expect("serialize command input");
+        let input: serde_json::Value =
+            serde_json::from_str(&input_json).expect("parse command input");
+
+        assert_eq!(input.get("affected_files"), None);
     }
 
     #[test]
@@ -409,13 +584,10 @@ mod tests {
 
     #[test]
     fn unsupported_updated_mcp_tool_output_fails_open() {
+        let stdout = r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedMCPToolOutput":{"ok":true},"additionalContext":"preserved"}}"#;
         let parsed = parse_completed(
             &handler(),
-            run_result(
-                Some(0),
-                r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedMCPToolOutput":{"ok":true}}}"#,
-                "",
-            ),
+            run_result(Some(0), stdout, ""),
             Some("turn-1".to_string()),
         );
 
@@ -434,6 +606,21 @@ mod tests {
                 kind: HookOutputEntryKind::Error,
                 text: "PostToolUse hook returned unsupported updatedMCPToolOutput".to_string(),
             }]
+        );
+
+        let async_handler = handler_with_async(/*async*/ true);
+        let parsed = parse_completed(
+            &async_handler,
+            run_result(Some(0), stdout, ""),
+            Some("turn-1".to_string()),
+        );
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
+        assert_eq!(
+            parsed.completed.run.entries,
+            vec![HookOutputEntry {
+                kind: HookOutputEntryKind::Context,
+                text: "preserved".to_string(),
+            }],
         );
     }
 
@@ -573,22 +760,30 @@ mod tests {
     }
 
     fn handler() -> ConfiguredHandler {
+        handler_with_async(/*async*/ false)
+    }
+
+    fn handler_with_async(r#async: bool) -> ConfiguredHandler {
         ConfiguredHandler {
+            builtin: false,
             event_name: HookEventName::PostToolUse,
             matcher: Some("^Bash$".to_string()),
-            command: "python3 post_tool_use_hook.py".to_string(),
             timeout_sec: 5,
             status_message: Some("running post tool use hook".to_string()),
             additional_context_limit: Default::default(),
-            source_path: test_path_buf("/tmp/hooks.json").abs(),
+            source_path: test_path_buf("/tmp/hooks.json").abs().into(),
             source: codex_protocol::protocol::HookSource::User,
             display_order: 0,
-            env: std::collections::HashMap::new(),
+            kind: crate::engine::ConfiguredHandlerKind::Command {
+                command: "python3 post_tool_use_hook.py".to_string(),
+                r#async,
+                env: std::collections::HashMap::new(),
+            },
         }
     }
 
-    fn run_result(exit_code: Option<i32>, stdout: &str, stderr: &str) -> CommandRunResult {
-        CommandRunResult {
+    fn run_result(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HandlerRunResult {
+        HandlerRunResult {
             started_at: 1_700_000_000,
             completed_at: 1_700_000_001,
             duration_ms: 12,

@@ -192,7 +192,7 @@ impl ChatWidget {
             mcp_startup_pending_next_round: HashMap::new(),
             mcp_startup_pending_next_round_saw_starting: false,
             connectors: ConnectorsState::default(),
-            ide_context: IdeContextState::default(),
+            ide_context: IdeContextState::from_environment(),
             plugins_cache: PluginsCacheState::default(),
             plugins_fetch_state: PluginListFetchState::default(),
             plugin_remote_sections_loading: false,
@@ -283,6 +283,9 @@ impl ChatWidget {
             test_codex_home: None,
         };
 
+        if widget.ide_context.is_enabled() {
+            widget.sync_ide_context_status_indicator();
+        }
         widget.prefetch_rate_limits();
         if let Some(keymap) = runtime_keymap {
             widget.bottom_pane.set_keymap_bindings(&keymap);

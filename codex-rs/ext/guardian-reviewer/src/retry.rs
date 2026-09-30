@@ -101,6 +101,7 @@ fn should_retry_guardian_review(outcome: &GuardianReviewOutcome) -> bool {
             ..
         }) => match error {
             CodexErrorInfo::RateLimitExceeded
+            | CodexErrorInfo::FlexUnavailable
             | CodexErrorInfo::ServerOverloaded
             | CodexErrorInfo::InternalServerError => true,
             CodexErrorInfo::HttpConnectionFailed { http_status_code }
@@ -115,6 +116,7 @@ fn should_retry_guardian_review(outcome: &GuardianReviewOutcome) -> bool {
             | CodexErrorInfo::CyberPolicy
             | CodexErrorInfo::BioPolicy
             | CodexErrorInfo::MisalignmentPolicyViolation
+            | CodexErrorInfo::TooManyDenials
             | CodexErrorInfo::Unauthorized
             | CodexErrorInfo::BadRequest
             | CodexErrorInfo::InvalidPrompt

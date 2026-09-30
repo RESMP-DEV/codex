@@ -179,49 +179,57 @@ impl McpConnectionSet {
 
     /// Returns all tools with model-visible names normalized.
     pub async fn list_all_tools(&self) -> Vec<ToolInfo> {
-        self.list_tools_with_errors().await.0
+        Box::pin(self.list_tools_with_errors(|_| true)).await.0
     }
 
     #[instrument(level = "trace", skip_all, fields(mcp_server_count = self.servers.len()))]
-    pub(crate) async fn list_tools_with_errors(&self) -> (Vec<ToolInfo>, HashMap<String, String>) {
+    pub(crate) async fn list_tools_with_errors(
+        &self,
+        include_server: impl Fn(&str) -> bool,
+    ) -> (Vec<ToolInfo>, HashMap<String, String>) {
         let mut tools = Vec::new();
         let mut errors = HashMap::new();
         let mut available_server_count = 0;
         let mut unavailable_server_count = 0;
-        let server_results = join_all(self.servers.iter().map(|(server_name, view)| async move {
-            view.connection.client.reconnect_failed_startup().await;
-            let has_cached_tools = view.connection.client.has_cached_tools();
-            let startup_complete = view
-                .connection
-                .client
-                .startup_complete
-                .load(Ordering::Acquire);
-            let server_tools = view
-                .listed_tools(&self.tool_plugin_context)
-                .instrument(trace_span!(
-                    "list_tools_for_server",
-                    server_name = %server_name,
-                    has_cached_tools,
-                    startup_complete
-                ))
-                .await;
-            let result = match server_tools {
-                Ok(server_tools) => Ok(server_tools
-                    .into_iter()
-                    .map(|tool| Self::with_server_metadata(tool, &view.metadata))
-                    .collect::<Vec<_>>()),
-                Err(error) => {
-                    trace!(
-                        server_name = %server_name,
-                        has_cached_tools,
-                        startup_complete,
-                        "MCP server tools unavailable while building tool list"
-                    );
-                    Err(error)
-                }
-            };
-            (server_name, result)
-        }))
+        let server_results = join_all(
+            self.servers
+                .iter()
+                .filter(|(name, _)| include_server(name))
+                .map(|(server_name, view)| async move {
+                    view.connection.client.reconnect_failed_startup().await;
+                    let has_cached_tools = view.connection.client.has_cached_tools();
+                    let startup_complete = view
+                        .connection
+                        .client
+                        .startup_complete
+                        .load(Ordering::Acquire);
+                    let server_tools = view
+                        .listed_tools(&self.tool_plugin_context)
+                        .instrument(trace_span!(
+                            "list_tools_for_server",
+                            server_name = %server_name,
+                            has_cached_tools,
+                            startup_complete
+                        ))
+                        .await;
+                    let result = match server_tools {
+                        Ok(server_tools) => Ok(server_tools
+                            .into_iter()
+                            .map(|tool| Self::with_server_metadata(tool, &view.metadata))
+                            .collect::<Vec<_>>()),
+                        Err(error) => {
+                            trace!(
+                                server_name = %server_name,
+                                has_cached_tools,
+                                startup_complete,
+                                "MCP server tools unavailable while building tool list"
+                            );
+                            Err(error)
+                        }
+                    };
+                    (server_name, result)
+                }),
+        )
         .await;
         for (server_name, server_tools) in server_results {
             match server_tools {
@@ -445,6 +453,52 @@ impl McpConnectionSet {
             tools,
             calls,
         )
+    }
+
+    #[instrument(level = "trace", skip_all)]
+    pub(crate) async fn prepare_call_for_tool(
+        self: &Arc<Self>,
+        config: Arc<crate::McpConfig>,
+        advertised_tool: &ToolInfo,
+    ) -> Option<PreparedMcpCall> {
+        let server_name = &advertised_tool.server_name;
+        let view = self.servers.get(server_name)?;
+        if !view.tool_filter.allows(&advertised_tool.tool.name) {
+            return None;
+        }
+        let mut client = view.connection.client().await.ok()?;
+        client.tool_timeout = view.tool_timeout;
+        let snapshot = client.tool_catalog.read(Arc::new).await;
+        let current_tool = snapshot.tools.iter().find(|tool| {
+            tool.server_name == *server_name
+                && tool.tool.name == advertised_tool.tool.name
+                && tool.connector_id == advertised_tool.connector_id
+        })?;
+        let mut tool_info = if server_name == CODEX_APPS_MCP_SERVER_NAME {
+            prepare_codex_apps_tools_for_model(
+                vec![current_tool.clone()],
+                &self.tool_plugin_context,
+            )
+        } else {
+            crate::rmcp_client::prepare_regular_mcp_tools_for_model(
+                vec![current_tool.clone()],
+                &self.tool_plugin_context,
+            )
+        }
+        .pop()?;
+        if !tool_is_model_visible(&tool_info) {
+            return None;
+        }
+        tool_info = Self::with_server_metadata(tool_info, &view.metadata);
+        // Preserve the globally normalized identity advertised to the model, while
+        // taking schema, annotations, and approval metadata from the current catalog.
+        tool_info
+            .callable_namespace
+            .clone_from(&advertised_tool.callable_namespace);
+        tool_info
+            .callable_name
+            .clone_from(&advertised_tool.callable_name);
+        self.prepare_call(&tool_info, Arc::new(client), config, snapshot)
     }
 
     fn prepare_call(

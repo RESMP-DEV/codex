@@ -56,6 +56,7 @@ impl ContextManager {
                 }
                 let text = guardian_truncate_text(&text, GUARDIAN_MAX_ROOT_MESSAGE_TOKENS).0;
                 Some(RetainedUserMessage {
+                    phase: None,
                     origin: codex_history::UserInputOrigin::from_message(item),
                     turn_id: item.turn_id().unwrap_or_default().to_owned(),
                     message_id: item.id().map(|id| id.as_str().to_owned()),
@@ -74,7 +75,7 @@ impl ContextManager {
                 .as_ref()
                 .is_some_and(|metadata| metadata.delivered_assistant_message.is_some())
         }) {
-            self.record_retained_message(
+            let _ = self.record_retained_message(
                 &envelope.item,
                 envelope.metadata.as_ref(),
                 RetainedMessageSource::Checkpoint,
@@ -92,7 +93,7 @@ impl ContextManager {
                     .as_ref()
                     .is_some_and(|metadata| metadata.inherited_user_message)
             }) {
-                self.record_retained_message(
+                let _ = self.record_retained_message(
                     &envelope.item,
                     envelope.metadata.as_ref(),
                     RetainedMessageSource::Checkpoint,
@@ -106,7 +107,7 @@ impl ContextManager {
         item: &ResponseItem,
         metadata: Option<&CodexHarnessMetadata>,
         source: RetainedMessageSource,
-    ) {
+    ) -> Option<codex_history::RetainedSource> {
         if let Some(text) =
             metadata.and_then(|metadata| metadata.delivered_assistant_message.as_ref())
             && let ResponseItem::FunctionCallOutput {
@@ -114,20 +115,19 @@ impl ContextManager {
                 ..
             } = item
         {
-            let Some(call) = self.items.iter().rev().find(|envelope| {
+            let call = self.items.iter().rev().find(|envelope| {
                 matches!(&envelope.item, ResponseItem::FunctionCall { call_id: id, .. } if id == call_id)
-            }) else {
-                return;
-            };
+            })?;
             let source = RetainedInputSource::from(call.metadata.as_ref());
             if source == RetainedInputSource::Inherited && !self.retain_inherited_user_messages {
-                return;
+                return None;
             }
             // The host captured this bounded text before post-tool hooks. The output
             // may be rejected, aborted, or truncated; retain the confirmed text at
             // the original call's position, not at its later completion position.
             Arc::make_mut(&mut self.retained_context).record_assistant_message(
                 RetainedUserMessage {
+                    phase: None,
                     origin: codex_history::UserInputOrigin::User,
                     turn_id: call.item.turn_id().unwrap_or_default().to_owned(),
                     message_id: call.item.id().map(|id| id.as_str().to_owned()),
@@ -136,19 +136,21 @@ impl ContextManager {
                 },
                 source,
             );
-            return;
+            return None;
         }
         let is_assistant =
             matches!(item, ResponseItem::Message { role, .. } if role == "assistant");
         if metadata.is_some_and(|metadata| metadata.compaction_output)
             || (!is_assistant && !crate::context::is_user_authorization_message(item))
         {
-            return;
+            return None;
         }
+        let mut captured = None;
         let inherited = metadata.is_some_and(|metadata| metadata.inherited_user_message);
         if (!inherited || self.retain_inherited_user_messages)
             && let ResponseItem::Message {
                 content,
+                phase,
                 internal_chat_message_metadata_passthrough,
                 ..
             } = item
@@ -165,6 +167,9 @@ impl ContextManager {
                                         && kind.0 != UserGoalUpdate::OMITTED_OBJECTIVE_KIND
                                 })
                         }));
+            complete &= metadata
+                .and_then(|metadata| metadata.retained_source.as_ref())
+                .is_none_or(|source| source.complete);
             let text = content
                 .iter()
                 .filter_map(|content| match content {
@@ -184,6 +189,7 @@ impl ContextManager {
             let (text, truncated) = guardian_truncate_text(&text, GUARDIAN_MAX_ROOT_MESSAGE_TOKENS);
             complete &= !truncated;
             let message = RetainedUserMessage {
+                phase: phase.clone(),
                 origin: codex_history::UserInputOrigin::from_message(item),
                 turn_id: item.turn_id().unwrap_or_default().to_owned(),
                 message_id: item.id().map(|id| id.as_str().to_owned()),
@@ -191,14 +197,15 @@ impl ContextManager {
                 complete,
             };
             let retained = Arc::make_mut(&mut self.retained_context);
-            if is_assistant {
-                retained.record_assistant_message(message, metadata.into());
+            captured = if is_assistant {
+                retained.record_assistant_message(message, metadata.into())
             } else {
-                retained.record_user_message(message, metadata.into());
-            }
+                retained.record_user_message(message, metadata.into())
+            };
         }
         if !is_assistant {
             self.user_message_revision = self.user_message_revision.saturating_add(1);
         }
+        captured
     }
 }

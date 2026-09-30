@@ -31,12 +31,26 @@ impl ChatWidget {
         self.bottom_pane.handle_composer_mouse(event)
     }
 
+    /// Snapshot only the editable paste target, without changing pending submissions.
+    pub(crate) fn right_click_paste_target(&self) -> Option<(String, usize)> {
+        self.bottom_pane.can_paste_on_right_click().then(|| {
+            (
+                self.bottom_pane.composer_text(),
+                self.bottom_pane.composer_cursor(),
+            )
+        })
+    }
+
     pub(crate) fn prepare_composer_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {
         self.bottom_pane.prepare_composer_mouse(event)
     }
 
     pub(crate) fn set_agents_navigation_enabled(&mut self, enabled: bool) {
         self.bottom_pane.set_agents_navigation_enabled(enabled);
+    }
+
+    pub(crate) fn agents_navigation_key_available(&self) -> bool {
+        self.bottom_pane.agents_navigation_key_available()
     }
 
     pub(crate) fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {

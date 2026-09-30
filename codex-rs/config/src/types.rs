@@ -741,6 +741,19 @@ pub enum TuiPetAnchor {
     ScreenBottom,
 }
 
+/// Right-click text paste when the fullscreen TUI has no selection.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RightClickPaste {
+    /// Enable on Windows/WSL/Linux, except recognized terminal-owned paste paths.
+    #[default]
+    Auto,
+    /// Enable on supported local platforms; selection and terminal-owned paste still win.
+    On,
+    /// Leave right-click paste to the terminal.
+    Off,
+}
+
 /// When transcript mouse selections are copied on release.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Default)]
 #[serde(rename_all = "lowercase")]
@@ -822,10 +835,6 @@ pub struct Tui {
     #[serde(default = "default_true")]
     pub auto_recap: bool,
 
-    /// Suggest a next message after successful turns. Defaults to `false`.
-    #[serde(default)]
-    pub prompt_suggestions: bool,
-
     /// When true, disables burst-paste detection for typed input entirely.
     /// All characters are inserted as they are received, and no buffering
     /// or placeholder replacement will occur for fast keypress bursts.
@@ -852,10 +861,17 @@ pub struct Tui {
     pub fullscreen_transcript: bool,
 
     /// Copy selected transcript text when the mouse button is released.
-    /// Defaults to `auto`: enabled in tmux/Zellij and in direct macOS terminals except Ghostty/Kitty.
-    /// On other platforms, direct terminals default off except iTerm2/Terminal.app.
+    /// Defaults to `auto`: enabled except in direct terminals known to forward their native
+    /// copy shortcut (Ghostty 1.2+, Kitty on macOS, Windows Terminal, and VS Code on Windows).
+    /// Unknown terminals, Ghostty without a recognized version, and tmux/Zellij default to copying.
     #[serde(default)]
     pub copy_on_select: CopyOnSelect,
+
+    /// Right-click text paste fallback. Defaults to `auto` (Windows/WSL/Linux).
+    /// `on` also enables macOS; neither mode reads over SSH or in recognized VS Code terminals.
+    /// This controls the fullscreen fallback, not the terminal's own paste binding.
+    #[serde(default)]
+    pub right_click_paste: RightClickPaste,
 
     /// Controls whether the TUI uses the terminal's alternate screen buffer.
     ///

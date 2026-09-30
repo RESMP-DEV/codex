@@ -1587,9 +1587,12 @@ impl FileSystemSandboxPolicy {
             return Vec::new();
         }
         // Include resolved gitdirs in the entries used to carve out broader grants.
-        // Seatbelt grants are independent, and later bubblewrap binds cover earlier mounts.
+        // Seatbelt grants are independent, later bubblewrap binds cover earlier mounts,
+        // and Windows ACLs enforce the read-only carveouts per writable root.
         let include_resolved_gitdirs = match path_resolution {
-            WritableRootPathResolution::Effective => cfg!(target_os = "linux"),
+            WritableRootPathResolution::Effective => {
+                cfg!(any(target_os = "linux", target_os = "windows"))
+            }
             WritableRootPathResolution::PreserveMutableComponents => cfg!(target_os = "macos"),
         };
         let resolved_gitdir_entries: Vec<ResolvedFileSystemEntry> = if include_resolved_gitdirs {

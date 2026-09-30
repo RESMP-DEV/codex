@@ -51,16 +51,21 @@ impl AppServerSession {
         ) else {
             return Ok(None);
         };
-        Ok(crate::config_update::read_effective_config_if_supported(
+        let effective = crate::config_update::read_effective_config_if_supported(
             self.request_handle(),
             std::path::Path::new(&cwd),
         )
-        .await?
-        .map(|config| {
-            config
-                .config
-                .model_provider
-                .unwrap_or_else(|| "openai".to_string())
-        }))
+        .await?;
+        // Prefer the server's own provider resolution; fall back to managed
+        // requirements so history filtering cannot drift from the pinned
+        // provider, and otherwise omit the field so the server resolves it.
+        Ok(effective
+            .and_then(|effective| effective.config.model_provider)
+            .or_else(|| {
+                config
+                    .config_layer_stack
+                    .required_model_provider()
+                    .map(|provider| provider.to_owned())
+            }))
     }
 }

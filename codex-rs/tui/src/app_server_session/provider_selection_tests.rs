@@ -171,3 +171,39 @@ async fn required_provider_overrides_oss_history_selection() -> Result<()> {
     server.shutdown().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn required_provider_pins_history_lookup_without_layer_selection() -> Result<()> {
+    let home = tempfile::tempdir()?;
+    std::fs::write(
+        home.path().join("requirements.toml"),
+        "model_provider = 'corp-provider'",
+    )?;
+    // Defining the provider does not select it: no layer sets `model_provider`.
+    std::fs::write(
+        home.path().join("config.toml"),
+        r#"
+[model_providers.corp-provider]
+name = "Corp provider"
+base_url = "http://127.0.0.1:9/v1"
+wire_api = "responses"
+requires_openai_auth = false
+"#,
+    )?;
+    let config = ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .loader_overrides(
+            codex_config::LoaderOverrides::with_managed_config_path_for_tests(
+                home.path().join("managed_config.toml"),
+            ),
+        )
+        .build()
+        .await?;
+    let mut server = crate::start_embedded_app_server_for_picker(&config).await?;
+    assert_eq!(
+        server.history_model_provider(&config).await?,
+        Some("corp-provider".into())
+    );
+    server.shutdown().await?;
+    Ok(())
+}

@@ -107,16 +107,16 @@ fn parses_config_isolation_flags() {
 #[test]
 fn parses_permission_profile_forms_globally() {
     for flag in ["--permission-profile", "--permissions-profile", "-P"] {
-        let cli = Cli::parse_from(["codex-exec", "resume", "--last", flag, "alphaheng-task"]);
+        let cli = Cli::parse_from(["codex-exec", "resume", "--last", flag, "team-task"]);
 
-        assert_eq!(cli.permission_profile.as_deref(), Some("alphaheng-task"));
+        assert_eq!(cli.permission_profile.as_deref(), Some("team-task"));
     }
 }
 
 #[test]
 fn permission_profile_conflicts_with_other_permission_selectors() {
     for conflicting_args in [vec!["--sandbox", "read-only"], vec!["--approve-for-me"]] {
-        let mut args = vec!["codex-exec", "-P", "alphaheng-task"];
+        let mut args = vec!["codex-exec", "-P", "team-task"];
         args.extend(conflicting_args);
         args.push("summarize");
 
@@ -130,7 +130,7 @@ fn permission_profile_conflicts_with_other_permission_selectors() {
     let error = Cli::try_parse_from([
         "codex-exec",
         "-P",
-        "alphaheng-task",
+        "team-task",
         "--dangerously-bypass-approvals-and-sandbox",
         "summarize",
     ])

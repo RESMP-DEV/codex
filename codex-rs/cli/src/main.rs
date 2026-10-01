@@ -3252,12 +3252,7 @@ mod tests {
         ] {
             let mut args = vec!["codex"];
             args.extend(root_args);
-            args.extend([
-                "exec",
-                "--permission-profile",
-                "alphaheng-task",
-                "summarize",
-            ]);
+            args.extend(["exec", "--permission-profile", "team-task", "summarize"]);
             let cli = MultitoolCli::try_parse_from(args).expect("parse cross-scope flags");
 
             let error =

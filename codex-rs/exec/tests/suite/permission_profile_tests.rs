@@ -29,7 +29,7 @@ async fn exec_permission_profile_enforces_named_read_only_sandbox() -> anyhow::R
         r#"
 approval_policy = "never"
 
-[permissions.alphaheng-test]
+[permissions.team-test]
 extends = ":read-only"
 "#,
     )?;
@@ -60,7 +60,7 @@ extends = ":read-only"
         .cmd_with_server(&server)
         .arg("--skip-git-repo-check")
         .arg("--permission-profile")
-        .arg("alphaheng-test")
+        .arg("team-test")
         .arg("verify selected profile")
         .output()?;
 

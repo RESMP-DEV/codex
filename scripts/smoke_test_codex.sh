@@ -15,15 +15,14 @@
 #   scripts/smoke_test_codex.sh --no-notify     # skip the macOS modal/banner
 #   scripts/smoke_test_codex.sh --probe '...'   # override the probe prompt
 #
-# Design: see docs/superpowers/specs/ (smoke-test design doc) and
-# ~/AlphaHENG/docs/operations/codex_local_package_flow.md.
+# Design: see docs/superpowers/specs/ (smoke-test design doc).
 
 set -euo pipefail
 
 # --- configuration -----------------------------------------------------------
 
 INSTALL_PATH="${CODEX_INSTALL_PATH:-${HOME}/.local/bin/codex}"
-LIB_ROOT="${CODEX_LIB_ROOT:-${HOME}/.local/lib/alphaheng}"
+LIB_ROOT="${CODEX_LIB_ROOT:-${HOME}/.local/lib/resmp/codex}"
 LOG_DIR="${CODEX_SMOKE_LOG_DIR:-${HOME}/.codex/smoke-logs}"
 PROBE_PROMPT_DEFAULT="Reply with exactly: codex-smoke-ok"
 PROBE_REPLY_TOKEN="codex-smoke-ok"
@@ -48,7 +47,7 @@ Options:
 
 Environment:
   CODEX_INSTALL_PATH   Override the codex install path.
-  CODEX_LIB_ROOT       Snapshot root (default: ~/.local/lib/alphaheng); expects
+  CODEX_LIB_ROOT       Snapshot root (default: ~/.local/lib/resmp/codex); expects
                       `current` and `previous-good` symlinks managed by
                       scripts/build_and_link_codex.sh.
   CODEX_SMOKE_LOG_DIR  Directory for per-run logs (default: ~/.codex/smoke-logs).

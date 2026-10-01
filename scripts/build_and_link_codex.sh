@@ -23,7 +23,7 @@ Usage:
 Options:
   --no-build                 Skip cargo release build and only publish/verify.
   --install-path <path>      Install path to update (default: ~/.local/bin/codex).
-  --lib-root <path>          Snapshot root (default: ~/.local/lib/alphaheng).
+  --lib-root <path>          Snapshot root (default: ~/.local/lib/resmp/codex).
   --keep-snapshots <count>   Non-protected snapshots to retain (default: 4).
   -h, --help                 Show this help text.
 
@@ -35,7 +35,7 @@ EOF
 
 do_build=1
 install_path="${HOME}/.local/bin/codex"
-lib_root="${CODEX_LIB_ROOT:-${HOME}/.local/lib/alphaheng}"
+lib_root="${CODEX_LIB_ROOT:-${HOME}/.local/lib/resmp/codex}"
 keep_snapshots="${CODEX_KEEP_SNAPSHOTS:-4}"
 
 while (($# > 0)); do

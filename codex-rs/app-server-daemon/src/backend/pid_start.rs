@@ -1,5 +1,6 @@
 //! Detached process launch and PID publication. Hold the reservation lock until
 //! the record is published, and on Windows until an updater acknowledges startup.
+//! Windows children use a separate working directory to preserve the state directory ACL.
 //! Recover a deleted Unix cwd without changing workspace defaults for usable directories.
 
 use super::PidBackend;
@@ -25,6 +26,21 @@ impl PidBackend {
                 .await
                 .with_context(|| format!("failed to create pid directory {}", parent.display()))?;
         }
+        #[cfg(windows)]
+        let workdir = {
+            let workdir = self
+                .pid_file
+                .parent()
+                .context("daemon pid path has no parent")?
+                .join("workdir");
+            fs::create_dir_all(&workdir).await.with_context(|| {
+                format!(
+                    "failed to create daemon working directory {}",
+                    workdir.display()
+                )
+            })?;
+            workdir
+        };
         let reservation_lock = self.acquire_reservation_lock().await?;
         loop {
             match fs::OpenOptions::new()
@@ -157,6 +173,10 @@ impl PidBackend {
         {
             use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
             use windows_sys::Win32::System::Threading::DETACHED_PROCESS;
+            // A Windows process pins its working directory for its lifetime.
+            // Keep both managed children out of the launching project's directory.
+            // Sandbox setup may broaden the cwd ACL, so do not use the private state directory.
+            command.current_dir(&workdir);
             // Never retry inside the parent's Job Object: that would report a
             // successful launch that dies when the terminal/SSH session closes.
             command.creation_flags(DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB);
@@ -188,10 +208,12 @@ impl PidBackend {
             }
         }
 
+        let started = std::time::Instant::now();
         #[cfg(windows)]
         let child = super::super::windows::spawn_without_inheriting_stdio(&mut command);
         #[cfg(not(windows))]
         let child = command.spawn().map_err(anyhow::Error::from);
+        let child = crate::diagnostics::result("process_spawn", started, child);
         let child = match child {
             Ok(child) => child,
             Err(err) => {
@@ -214,7 +236,9 @@ impl PidBackend {
         let pid = child
             .id()
             .context("spawned app-server process has no pid")?;
-        let record = match async {
+        crate::diagnostics::event("process_spawned", serde_json::json!({ "pid": pid }));
+        let started = std::time::Instant::now();
+        let record = async {
             let process_start_time = read_process_start_time(pid).await?;
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let process_identity = super::identity::read_process_details(pid)
@@ -230,8 +254,8 @@ impl PidBackend {
                 executable_identity: launched_identity,
             })
         }
-        .await
-        {
+        .await;
+        let record = match crate::diagnostics::result("process_identity", started, record) {
             Ok(record) => record,
             Err(err) => {
                 let _ = self.terminate_process(pid);
@@ -246,7 +270,14 @@ impl PidBackend {
         };
         let contents = serde_json::to_vec(&record).context("failed to serialize pid record")?;
         let temp_pid_file = self.pid_file.with_extension("pid.tmp");
-        if let Err(err) = fs::write(&temp_pid_file, &contents).await {
+        let started = std::time::Instant::now();
+        if let Err(err) = crate::diagnostics::result(
+            "pid_write",
+            started,
+            fs::write(&temp_pid_file, &contents)
+                .await
+                .map_err(anyhow::Error::from),
+        ) {
             let _ = self.terminate_process(pid);
             if replacement.is_none() {
                 let _ = fs::remove_file(&self.pid_file).await;
@@ -255,7 +286,14 @@ impl PidBackend {
                 format!("failed to write pid temp file {}", temp_pid_file.display())
             });
         }
-        if let Err(err) = fs::rename(&temp_pid_file, &self.pid_file).await {
+        let started = std::time::Instant::now();
+        if let Err(err) = crate::diagnostics::result(
+            "pid_publish",
+            started,
+            fs::rename(&temp_pid_file, &self.pid_file)
+                .await
+                .map_err(anyhow::Error::from),
+        ) {
             let _ = self.terminate_process(pid);
             let _ = fs::remove_file(&temp_pid_file).await;
             if replacement.is_none() {

@@ -134,7 +134,6 @@ use codex_config::ConfigLayerSource;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::GuardianAssessmentEvent;
-use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::BaseInstructionsProvenance;
@@ -475,12 +474,28 @@ impl AppServerSession {
                     })
             })
             .transpose()?;
-        let thread_start_params = thread_start_params_from_config(
+        let mut thread_start_params = thread_start_params_from_config(
             &config,
             self.thread_params_mode(),
             self.remote_cwd_override(),
             /*session_start_source*/ None,
         );
+        let daybreak_launch_override = config
+            .config_layer_stack
+            .layers_high_to_low()
+            .find(|layer| layer.config.get("daybreak").is_some())
+            .is_some_and(|layer| {
+                matches!(
+                    layer.name,
+                    codex_config::ConfigLayerSource::SessionFlags
+                        | codex_config::ConfigLayerSource::User {
+                            profile: Some(_),
+                            ..
+                        }
+                )
+            });
+        thread_start_params.daybreak_enabled =
+            daybreak_launch_override.then_some(config.daybreak_enabled);
         self.dynamic_tool_mcp = Some(Arc::new(
             DynamicToolMcpServer::start(
                 self.request_handle(),
@@ -772,6 +787,7 @@ impl AppServerSession {
             .model_provider_override
             .clone()
             .or(params.model_provider);
+        params.daybreak_enabled = (config.daybreak_enabled && !config.ephemeral).then_some(true);
         if let Some(selected_profile) = selected_profile {
             params.runtime_workspace_roots = None;
             params.permissions = Some(selected_profile.profile_id.clone());
@@ -1052,6 +1068,9 @@ impl AppServerSession {
         if let Some(permissions) = selected_permissions {
             started.session.permission_profile = permissions;
         }
+        if presentation == ForkPresentation::SideConversation {
+            started.session.daybreak_enabled = false;
+        }
         started.session.fork_parent_title = fork_parent.and_then(|thread| thread.name);
         if self.task_tools_available(thread_id) {
             started.task_tools_available = true;
@@ -1275,8 +1294,7 @@ impl AppServerSession {
                 // method-not-found, experimental-capability-gated, or an unknown
                 // request variant. Treat those as a session-level capability
                 // downgrade so local TUI setting changes stay best-effort instead
-                // of showing an error every time the user changes model, effort,
-                // personality, or mode.
+                // of showing an error every time the user changes model, effort, or mode.
                 self.thread_settings_update_supported = false;
                 Ok(false)
             }
@@ -1323,8 +1341,8 @@ impl AppServerSession {
         summary: Option<codex_protocol::config_types::ReasoningSummary>,
         service_tier: Option<Option<String>>,
         collaboration_mode: Option<codex_protocol::config_types::CollaborationMode>,
-        personality: Option<codex_protocol::config_types::Personality>,
         output_schema: Option<serde_json::Value>,
+        cyber_access_program: Option<codex_app_server_protocol::CyberAccessProgram>,
     ) -> Result<TurnStartResponse> {
         let request_id = self.next_request_id();
         let (sandbox_policy, permissions) =
@@ -1353,11 +1371,11 @@ impl AppServerSession {
                     service_tier_for_turn: None,
                     effort,
                     summary,
-                    personality: personality_opt_out_only(personality),
+                    personality: None,
                     output_schema,
                     collaboration_mode,
                     multi_agent_mode: None,
-                    cyber_access_program: None,
+                    cyber_access_program,
                 },
             })
             .await
@@ -1721,6 +1739,7 @@ pub(crate) async fn start_thread_with_request_handle(
         /*session_start_source*/ None,
     );
     params.model_provider = model_provider_override.or(params.model_provider);
+    params.daybreak_enabled = (config.daybreak_enabled && !config.ephemeral).then_some(true);
     thread_tool_transport.configure(&mut params);
     let (response, _history_support, task_tools_available) =
         request_thread_start_with_history_fallback(&request_handle, request_id, params)
@@ -1755,7 +1774,7 @@ pub(crate) fn status_account_display_from_auth_mode(
     }
 }
 
-fn model_preset_from_api_model(model: ApiModel) -> ModelPreset {
+pub(crate) fn model_preset_from_api_model(model: ApiModel) -> ModelPreset {
     let upgrade = model.upgrade.map(|upgrade_id| {
         let upgrade_info = model.upgrade_info.clone();
         ModelUpgrade {
@@ -1825,11 +1844,6 @@ fn approvals_reviewer_override_from_config(
     Some(config.approvals_reviewer.into())
 }
 
-// Keep the explicit Bridge opt-out while retiring Friendly/Pragmatic selection.
-pub(crate) fn personality_opt_out_only(personality: Option<Personality>) -> Option<Personality> {
-    personality.filter(|personality| *personality == Personality::None)
-}
-
 fn config_request_overrides_from_config(
     config: &Config,
     thread_params_mode: ThreadParamsMode,
@@ -1852,6 +1866,7 @@ fn config_request_overrides_from_config(
                     | "features"
                     | "network"
                     | "permissions"
+                    | "personality"
                     | "sandbox_workspace_write"
                     | "shell_environment_policy"
                     | "suppress_unstable_features_warning"
@@ -1874,10 +1889,6 @@ fn config_request_overrides_from_config(
             .model_reasoning_effort
             .as_ref()
             .map(std::string::ToString::to_string),
-    );
-    insert(
-        "personality",
-        personality_opt_out_only(config.personality).map(|personality| personality.to_string()),
     );
     // Only winning launch choices may replace server defaults or saved thread settings.
     let origins = config.config_layer_stack.origins();
@@ -2264,14 +2275,12 @@ async fn started_thread_from_start_response(
 async fn started_thread_from_resume_response(
     response: ThreadResumeResponse,
     local_settings: &LocalSettings,
-    config: &Config,
     thread_params_mode: ThreadParamsMode,
 ) -> Result<AppServerStartedThread> {
     let blocks_direct_input = thread_blocks_direct_input(&response.thread);
     let session = thread_session_state_from_thread_resume_response(
         &response,
         local_settings,
-        config,
         thread_params_mode,
     )
     .await
@@ -2319,7 +2328,7 @@ async fn thread_session_state_from_thread_start_response(
         config,
         thread_params_mode,
     );
-    thread_session_state_from_thread_response(
+    let mut session = thread_session_state_from_thread_response(
         &response.thread.id,
         crate::windows_sandbox::host_from_environments(response.thread.environments.as_deref()),
         response.thread.forked_from_id.clone(),
@@ -2336,16 +2345,19 @@ async fn thread_session_state_from_thread_start_response(
         response.runtime_workspace_roots.clone(),
         response.instruction_source_path_uris(),
         response.reasoning_effort.clone(),
-        config.personality,
         local_settings,
     )
-    .await
+    .await?;
+    session.daybreak_enabled = response
+        .thread
+        .daybreak_enabled
+        .unwrap_or(response.thread.ephemeral && config.daybreak_enabled);
+    Ok(session)
 }
 
 async fn thread_session_state_from_thread_resume_response(
     response: &ThreadResumeResponse,
     local_settings: &LocalSettings,
-    config: &Config,
     _thread_params_mode: ThreadParamsMode,
 ) -> Result<ThreadSessionState, String> {
     // The server owns restored rules. This legacy projection is for display only;
@@ -2371,11 +2383,11 @@ async fn thread_session_state_from_thread_resume_response(
         response.runtime_workspace_roots.clone(),
         response.instruction_source_path_uris(),
         response.reasoning_effort.clone(),
-        config.personality,
         local_settings,
     )
     .await?;
     session.collaboration_mode = response.collaboration_mode.clone().map(Box::new);
+    session.daybreak_enabled = response.thread.daybreak_enabled.unwrap_or(false);
     Ok(session)
 }
 
@@ -2391,7 +2403,7 @@ async fn thread_session_state_from_thread_fork_response(
         config,
         thread_params_mode,
     );
-    thread_session_state_from_thread_response(
+    let mut session = thread_session_state_from_thread_response(
         &response.thread.id,
         crate::windows_sandbox::host_from_environments(response.thread.environments.as_deref()),
         response.thread.forked_from_id.clone(),
@@ -2408,10 +2420,11 @@ async fn thread_session_state_from_thread_fork_response(
         response.runtime_workspace_roots.clone(),
         response.instruction_source_path_uris(),
         response.reasoning_effort.clone(),
-        config.personality,
         local_settings,
     )
-    .await
+    .await?;
+    session.daybreak_enabled = response.thread.daybreak_enabled.unwrap_or(false);
+    Ok(session)
 }
 
 fn display_permission_profile_from_thread_response(
@@ -2460,7 +2473,6 @@ async fn thread_session_state_from_thread_response(
     runtime_workspace_roots: Vec<AbsolutePathBuf>,
     instruction_source_paths: Vec<PathUri>,
     reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
-    personality: Option<codex_protocol::config_types::Personality>,
     local_settings: &LocalSettings,
 ) -> Result<ThreadSessionState, String> {
     let thread_id = ThreadId::from_string(thread_id)
@@ -2476,6 +2488,7 @@ async fn thread_session_state_from_thread_response(
     );
     let (log_id, entry_count) = codex_message_history::history_metadata(&history_config).await;
     Ok(ThreadSessionState {
+        daybreak_enabled: false,
         windows_sandbox_host,
         thread_id,
         forked_from_id,
@@ -2493,7 +2506,6 @@ async fn thread_session_state_from_thread_response(
         instruction_source_paths,
         reasoning_effort,
         collaboration_mode: None,
-        personality,
         message_history: Some(MessageHistoryMetadata {
             log_id,
             entry_count,
@@ -2546,7 +2558,6 @@ mod tests {
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnStatus;
     use codex_features::Feature;
-    use codex_protocol::config_types::Personality;
     use codex_protocol::config_types::ReasoningSummary;
     use codex_protocol::config_types::ServiceTier;
     use codex_protocol::config_types::Verbosity;
@@ -3396,7 +3407,6 @@ mod tests {
         config.model_reasoning_effort = Some(ReasoningEffort::High);
         config.model_reasoning_summary = Some(ReasoningSummary::Detailed);
         config.model_verbosity = Some(Verbosity::Low);
-        config.personality = Some(Personality::Pragmatic);
         config
             .web_search_mode
             .set(WebSearchMode::Disabled)
@@ -3454,7 +3464,7 @@ mod tests {
         std::fs::write(
             home.path().join("config.toml"),
             format!(
-                "model_reasoning_summary = \"concise\"\nmodel_verbosity = \"low\"\nweb_search = \"disabled\"\n[projects.{}]\ntrust_level = \"trusted\"\n",
+                "model_reasoning_summary = \"concise\"\nmodel_verbosity = \"low\"\nweb_search = \"disabled\"\npersonality = \"none\"\n[projects.{}]\ntrust_level = \"trusted\"\n",
                 toml::Value::String(workspace.to_string_lossy().into_owned()),
             ),
         )?;
@@ -3515,6 +3525,7 @@ mod tests {
                         ("model_reasoning_summary".to_string(), "auto".into()),
                         ("model_verbosity".to_string(), "medium".into()),
                         ("web_search".to_string(), "live".into()),
+                        ("personality".to_string(), "none".into()),
                     ]
                 } else {
                     Vec::new()
@@ -3524,9 +3535,14 @@ mod tests {
             let overrides = config_request_overrides_from_config(&config, ThreadParamsMode::Remote)
                 .expect("config overrides");
             assert_eq!(
-                ["model_reasoning_summary", "model_verbosity", "web_search"]
-                    .map(|key| overrides.get(key).and_then(serde_json::Value::as_str)),
-                expected,
+                (
+                    ["model_reasoning_summary", "model_verbosity", "web_search"]
+                        .map(|key| overrides.get(key).and_then(serde_json::Value::as_str)),
+                    overrides
+                        .get("personality")
+                        .and_then(serde_json::Value::as_str),
+                ),
+                (expected, cli.then_some("none")),
             );
         }
         Ok(())
@@ -3540,7 +3556,6 @@ mod tests {
         config.model_provider_id = "configured-provider".to_string();
         config.model_reasoning_effort = Some(ReasoningEffort::Ultra);
         config.model_reasoning_summary = Some(ReasoningSummary::Detailed);
-        config.personality = Some(Personality::Pragmatic);
 
         let params = thread_resume_params_from_config(
             config,
@@ -3852,66 +3867,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_request_overrides_only_forward_explicit_personality_opt_out() {
-        let temp_dir = tempfile::tempdir().expect("tempdir");
-        let mut config = build_config(&temp_dir).await;
-        config.personality = None;
-
-        let implicit_overrides =
-            config_request_overrides_from_config(&config, ThreadParamsMode::Remote)
-                .expect("config overrides");
-
-        assert!(!implicit_overrides.contains_key("personality"));
-
-        for personality in [Personality::Friendly, Personality::Pragmatic] {
-            config.personality = Some(personality);
-            let ordinary_overrides =
-                config_request_overrides_from_config(&config, ThreadParamsMode::Remote)
-                    .expect("config overrides");
-            assert!(!ordinary_overrides.contains_key("personality"));
-        }
-
-        config.personality = Some(Personality::None);
-        let explicit_overrides =
-            config_request_overrides_from_config(&config, ThreadParamsMode::Remote)
-                .expect("config overrides");
-
-        assert_eq!(
-            explicit_overrides.get("personality"),
-            Some(&serde_json::Value::String("none".to_string()))
-        );
-
-        for mode in [ThreadParamsMode::Embedded, ThreadParamsMode::Remote] {
-            let start = thread_start_params_from_config(
-                &config, mode, /*remote_cwd_override*/ None,
-                /*session_start_source*/ None,
-            );
-            let resume = thread_resume_params_from_config(
-                config.clone(),
-                ThreadId::new(),
-                mode,
-                /*remote_cwd_override*/ None,
-                ResumeModelSettings::OverrideFromCurrentConfig,
-                crate::resume_permissions::ResumePermissions::CURRENT_CONFIG,
-            );
-            let fork = thread_fork_params_from_config(
-                config.clone(),
-                ThreadId::new(),
-                mode,
-                /*remote_cwd_override*/ None,
-            );
-            for overrides in [start.config, resume.config, fork.config] {
-                assert_eq!(
-                    overrides
-                        .as_ref()
-                        .and_then(|overrides| overrides.get("personality")),
-                    Some(&serde_json::Value::String("none".to_string()))
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
     async fn thread_fork_params_forward_instruction_overrides() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let mut config = build_config(&temp_dir).await;
@@ -4172,7 +4127,6 @@ mod tests {
         let started = started_thread_from_resume_response(
             response.clone(),
             &LocalSettings::from(&config),
-            &config,
             ThreadParamsMode::Remote,
         )
         .await
@@ -4227,7 +4181,6 @@ mod tests {
         let started = started_thread_from_resume_response(
             response.clone(),
             &LocalSettings::from(&embedded_config),
-            &embedded_config,
             ThreadParamsMode::Embedded,
         )
         .await
@@ -4239,7 +4192,6 @@ mod tests {
         let started = started_thread_from_resume_response(
             empty_roots_response,
             &LocalSettings::from(&config),
-            &config,
             ThreadParamsMode::Remote,
         )
         .await
@@ -4326,7 +4278,6 @@ mod tests {
             Vec::new(),
             Vec::new(),
             /*reasoning_effort*/ None,
-            config.personality,
             &LocalSettings::from(&config),
         )
         .await
@@ -4363,7 +4314,6 @@ mod tests {
             Vec::new(),
             Vec::new(),
             /*reasoning_effort*/ None,
-            config.personality,
             &LocalSettings::from(&config),
         )
         .await

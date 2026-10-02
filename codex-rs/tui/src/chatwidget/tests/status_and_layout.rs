@@ -5473,9 +5473,9 @@ async fn running_hook_does_not_displace_active_exec_cell() {
 
     assert_chatwidget_snapshot!(
         "hook_runs_while_exec_active_snapshot",
-        format!(
+        strip_racy_status_lines(format!(
             "exec running:\n{exec_running}\nexec and hook running:\n{exec_and_hook_running}\nhistory after exec:\n{history_after_exec}\nhook running after exec:\n{hook_running_after_exec}\nquiet hook completed:\n{quiet_hook_completed}"
-        )
+        ))
     );
 }
 

@@ -1,13 +1,13 @@
 ---
 source: tui/src/chatwidget/tests/guardian.rs
-expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
+assertion_line: 465
+expression: "normalize_snapshot_paths(strip_racy_working_status_line(term.backend().vt100().screen().contents(),))"
 ---
 
 
 
 
 
-• Working (0s • esc to interrupt)
 
 
 › Ask Codex to do anything

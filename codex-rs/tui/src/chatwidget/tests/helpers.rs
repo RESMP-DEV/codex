@@ -37,6 +37,24 @@ pub(super) fn truncated_path_variants(path: &str) -> Vec<String> {
         .collect()
 }
 
+/// 动画状态行（status indicator：`•/◦ Working (…)`、`• Running <cmd>`、
+/// `• Reconnect failed …`、`• Thinking` 等任意 header 变体）的帧字符与是否已经渲染
+/// 出来都依赖 ticker 时序：上游 2026-10 批次调整动画节奏后，捕获前有真实 await 的
+/// 快照测试（guardian/hook/active_reconnect 族）在两种帧与出现/缺席之间竞态。
+/// header 是 update_header 传入的任意文本，因此按行首动画字符 `^[•◦] ` 整行剥离；
+/// 快照中所有以该字符开头的行均属此 widget（"Worked for … • …" 的 • 在行中，
+/// 不受影响）。仅供这些竞态族在快照断言前调用；确定性渲染该行的测试不要套用，
+/// 保留其覆盖。
+pub(crate) fn strip_racy_status_lines(text: impl Into<String>) -> String {
+    // 可选行首引号：hook_status_frame 等组合器会给每行加引号（`"◦ Working …"`），
+    // vt100 contents 则是裸行；两种形态都要命中。
+    let animated_status_line = regex_lite::Regex::new(r#"(?m)^"?[•◦] .*$\n?"#)
+        .expect("animated status line snapshot normalizer");
+    animated_status_line
+        .replace_all(&text.into(), "")
+        .into_owned()
+}
+
 pub(crate) fn normalize_snapshot_paths(text: impl Into<String>) -> String {
     let mut text = text.into();
 

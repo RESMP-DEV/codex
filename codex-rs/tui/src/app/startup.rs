@@ -18,6 +18,7 @@ fn spawn_startup_thread_start(
     app_server: &AppServerSession,
     local_settings: crate::local_settings::LocalSettings,
     config: Config,
+    launch_choices: crate::app_server_session::StartupLaunchChoices,
     app_event_tx: AppEventSender,
     worktree: Option<crate::ManagedTuiWorktree>,
 ) {
@@ -25,7 +26,6 @@ fn spawn_startup_thread_start(
     let thread_params_mode = app_server.thread_params_mode();
     let remote_cwd_override = app_server.remote_cwd_override().map(Path::to_path_buf);
     let thread_tool_transport = app_server.thread_tool_transport();
-    let model_provider_override = app_server.model_provider_override.clone();
     tokio::spawn(async move {
         let result = crate::app_server_session::start_thread_with_request_handle(
             request_handle,
@@ -34,7 +34,7 @@ fn spawn_startup_thread_start(
             thread_params_mode,
             remote_cwd_override,
             thread_tool_transport,
-            model_provider_override,
+            launch_choices,
         )
         .await
         .and_then(|started| {
@@ -331,6 +331,11 @@ impl App {
                 &harness_overrides,
             );
         }
+        let mut launch_choices = crate::app_server_session::StartupLaunchChoices::from_launch(
+            &cli_kv_overrides,
+            &harness_overrides,
+            &loader_overrides,
+        );
         let mut model = startup_model(&config, &bootstrap, startup_defaults.server_defaults_read);
         let available_models = bootstrap.available_models;
         let remote_connection = crate::status::remote_connection::remote_connection_status_value(
@@ -361,6 +366,7 @@ impl App {
                     tui,
                     &mut config,
                     &local_settings,
+                    &mut launch_choices,
                     model.as_str(),
                     &app_event_tx,
                     &available_models,
@@ -380,19 +386,30 @@ impl App {
         if let Some(updated_model) = config.model.clone() {
             model = updated_model;
         }
+        let mut source_overrides = harness_overrides.clone();
+        source_overrides.cwd = None;
+        app_server.worktree_source_config_builder = Some(Box::new(
+            crate::legacy_core::config::ConfigBuilder::default()
+                .codex_home(config.codex_home.to_path_buf())
+                .cli_overrides(cli_kv_overrides.clone())
+                .harness_overrides(source_overrides)
+                .loader_overrides(loader_overrides.clone())
+                .cloud_config_bundle(cloud_config_bundle.clone()),
+        ));
         let dynamic_tool_status_updates = tokio::sync::broadcast::channel(/*capacity*/ 64).0;
-        if matches!(&app_server_target, AppServerTarget::LocalDaemon { .. })
-            && !crate::uses_remote_workspace_or_environment(
-                &app_server_target,
-                environment_manager.as_ref(),
+        if matches!(
+            &app_server_target,
+            AppServerTarget::LocalDaemon { .. } | AppServerTarget::Embedded
+        ) && !crate::uses_remote_workspace_or_environment(
+            &app_server_target,
+            environment_manager.as_ref(),
+        ) && let Err(error) = app_server
+            .start_dynamic_tool_mcp(
+                config.clone(),
+                app_event_tx.clone(),
+                dynamic_tool_status_updates.clone(),
             )
-            && let Err(error) = app_server
-                .start_dynamic_tool_mcp(
-                    config.clone(),
-                    app_event_tx.clone(),
-                    dynamic_tool_status_updates.clone(),
-                )
-                .await
+            .await
         {
             tracing::warn!(%error, "TUI task delegation is unavailable without its MCP server");
         }
@@ -461,6 +478,7 @@ impl App {
                         &app_server,
                         local_settings.clone(),
                         config.clone(),
+                        launch_choices,
                         app_event_tx.clone(),
                         managed_worktree.clone(),
                     );

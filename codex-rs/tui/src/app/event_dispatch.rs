@@ -1267,6 +1267,12 @@ impl App {
                         elicitation_target: None,
                     });
             }
+            AppEvent::AccountEmailLoaded { request_id, email } => {
+                if self.account_email_request_id == Some(request_id) {
+                    self.account_email_request_id = None;
+                    self.chat_widget.on_account_email_loaded(email);
+                }
+            }
             AppEvent::SecuritySetupLoaded { request_id, identity, notice } => {
                 tracing::debug!(current = request_id == self.chat_widget.security_setup_request_id, "handling security setup notice");
                 if request_id == self.chat_widget.security_setup_request_id {
@@ -2804,7 +2810,7 @@ impl App {
                     }
                     Err(error) => {
                         if let Ok(mut state) = self.agents_overview.view_state.lock() {
-                            state.input = name;
+                            state.set_rename_input(&name, &self.keymap);
                             state.rename_target = Some(thread_id);
                         }
                         self.repaint_agents_overview();

@@ -176,6 +176,49 @@ fn manager_attaches_metadata_tags_to_metrics() -> Result<()> {
     Ok(())
 }
 
+// Model identifiers can contain provider separators that metric labels reject.
+// Keep the detailed telemetry model intact while sanitizing the metric label.
+#[test]
+fn manager_sanitizes_model_metadata_tags() -> Result<()> {
+    let (metrics, exporter) = build_metrics_with_defaults(&[])?;
+    let manager = SessionTelemetry::new(
+        ThreadId::new(),
+        "zai,glm-5.3",
+        "zai,glm-5.3",
+        /*account_id*/ None,
+        /*account_email*/ None,
+        Some(TelemetryAuthMode::ApiKey),
+        "test_originator".to_string(),
+        /*log_user_prompts*/ false,
+        "tty".to_string(),
+        SessionSource::Cli,
+    )
+    .with_model("zai,glm-5.3", "zai,glm-5.3")
+    .with_metrics(metrics);
+
+    manager.counter("codex.status_line", /*inc*/ 1, &[]);
+    manager.shutdown_metrics()?;
+
+    let resource_metrics = latest_metrics(&exporter);
+    let metric =
+        find_metric(&resource_metrics, "codex.status_line").expect("status-line counter missing");
+    let attrs = match metric.data() {
+        AggregatedMetrics::U64(data) => match data {
+            MetricData::Sum(sum) => {
+                let points: Vec<_> = sum.data_points().collect();
+                assert_eq!(points.len(), 1);
+                attributes_to_map(points[0].attributes())
+            }
+            _ => panic!("unexpected counter aggregation"),
+        },
+        _ => panic!("unexpected metric type"),
+    };
+
+    assert_eq!(attrs.get("model").map(String::as_str), Some("zai_glm-5.3"));
+
+    Ok(())
+}
+
 // Ensures metadata tagging can be disabled when recording via SessionTelemetry.
 #[test]
 fn manager_allows_disabling_metadata_tags() -> Result<()> {

@@ -118,6 +118,7 @@ pub struct SessionTelemetryMetadata {
 pub struct SessionTelemetry {
     tool_result_log_config: ToolResultLogConfig,
     pub(crate) metadata: SessionTelemetryMetadata,
+    metric_model: String,
     pub(crate) metrics: Option<MetricsClient>,
     pub(crate) metrics_use_metadata_tags: bool,
 }
@@ -136,6 +137,7 @@ impl SessionTelemetry {
     pub fn with_model(mut self, model: &str, slug: &str) -> Self {
         self.metadata.model = model.to_owned();
         self.metadata.slug = slug.to_owned();
+        self.metric_model = sanitize_metric_tag_value(model);
         self
     }
 
@@ -549,7 +551,7 @@ impl SessionTelemetry {
             session_source: self.metadata.session_source.as_str(),
             originator: self.metadata.originator.as_str(),
             service_name: self.metadata.service_name.as_deref(),
-            model: self.metadata.model.as_str(),
+            model: self.metric_model.as_str(),
             app_version: self.metadata.app_version,
         }
         .into_tags()
@@ -601,6 +603,7 @@ impl SessionTelemetry {
                 terminal_type,
             },
             metrics: crate::metrics::global(),
+            metric_model: sanitize_metric_tag_value(model),
             metrics_use_metadata_tags: true,
         }
     }
@@ -1426,4 +1429,32 @@ fn f64_ms_value(value: Option<&serde_json::Value>) -> Option<f64> {
         return None;
     }
     Some(ms.min(u64::MAX as f64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionTelemetry;
+    use codex_protocol::ThreadId;
+    use codex_protocol::protocol::SessionSource;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn raw_model_is_retained_and_metric_model_is_sanitized() {
+        let telemetry = SessionTelemetry::new(
+            ThreadId::new(),
+            "zai,glm-5.3",
+            "zai,glm-5.3",
+            /*account_id*/ None,
+            /*account_email*/ None,
+            /*auth_mode*/ None,
+            "test_originator".to_string(),
+            /*log_user_prompts*/ false,
+            "tty".to_string(),
+            SessionSource::Cli,
+        )
+        .with_model("zai,glm-5.3", "zai,glm-5.3");
+
+        assert_eq!(telemetry.metadata.model, "zai,glm-5.3");
+        assert_eq!(telemetry.metric_model, "zai_glm-5.3");
+    }
 }

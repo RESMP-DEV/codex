@@ -3439,6 +3439,8 @@ dependencies = [
  "pretty_assertions",
  "sentry",
  "serde_json",
+ "tar",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -4470,8 +4472,10 @@ dependencies = [
  "codex-protocol",
  "codex-state",
  "codex-utils-absolute-path",
+ "codex-utils-output-truncation",
  "codex-utils-path",
  "codex-utils-process",
+ "codex-utils-string",
  "memchr",
  "pretty_assertions",
  "regex",
@@ -5088,6 +5092,7 @@ dependencies = [
  "codex-protocol",
  "codex-utils-string",
  "pretty_assertions",
+ "serde_json",
 ]
 
 [[package]]

@@ -135,6 +135,9 @@ impl TranscriptView {
         {
             return true;
         }
+        if self.copy_mode.is_some() {
+            return true;
+        }
         if self.selection.is_some() {
             return crate::text_selection::is_copy_key(key)
                 || code == KeyCode::Esc
@@ -149,7 +152,8 @@ impl TranscriptView {
         }
         self.search.is_active()
             && (code == KeyCode::Esc
-                || (code == KeyCode::Enter && self.is_search_editing())
+                || (code == KeyCode::Enter
+                    && (self.is_search_editing() || modifiers == KeyModifiers::NONE))
                 || (modifiers == KeyModifiers::NONE
                     && matches!(code, KeyCode::PageUp | KeyCode::PageDown))
                 || (modifiers == KeyModifiers::CONTROL
@@ -163,6 +167,9 @@ impl TranscriptView {
     ) -> Option<ViewAction> {
         if key.kind == KeyEventKind::Release {
             return None;
+        }
+        if let Some(action) = self.handle_copy_mode_key(key, cells) {
+            return Some(action);
         }
         if let Some(action) = self.handle_disclosure_key(key, cells) {
             return Some(action);
@@ -336,24 +343,31 @@ impl TranscriptView {
         self.handle_scroll_key(key, cells)
     }
 
-    fn handle_scroll_key(
+    pub(super) fn handle_scroll_key(
         &mut self,
         key: KeyEvent,
         cells: &[Arc<dyn HistoryCell>],
     ) -> Option<ViewAction> {
         let jump = JumpTarget::from_key(key);
         match (key.code, key.modifiers) {
-            (KeyCode::PageUp, KeyModifiers::NONE) => {
-                self.scroll(
-                    cells,
-                    -(self.area.height.saturating_sub(/*rhs*/ 1).max(/*other*/ 1) as isize),
-                );
-            }
-            (KeyCode::PageDown, KeyModifiers::NONE) => {
-                self.scroll(
-                    cells,
-                    self.area.height.saturating_sub(/*rhs*/ 1).max(/*other*/ 1) as isize,
-                );
+            (KeyCode::PageUp | KeyCode::PageDown, KeyModifiers::NONE) => {
+                // Share page-key configuration without taking the pager's typing shortcuts.
+                // Full pages retain the main view's existing one-row overlap.
+                let keymap = &self.disclosure.keymap.pager;
+                let height = self.area.height.max(/*other*/ 1) as isize;
+                let page = (height - 1).max(/*other*/ 1);
+                let half = (height + 1) / 2;
+                let delta = [
+                    (&keymap.scroll_up, -1),
+                    (&keymap.scroll_down, 1),
+                    (&keymap.page_up, -page),
+                    (&keymap.page_down, page),
+                    (&keymap.half_page_up, -half),
+                    (&keymap.half_page_down, half),
+                ]
+                .into_iter()
+                .find_map(|(bindings, delta)| bindings.is_pressed(key).then_some(delta))?;
+                self.scroll(cells, delta);
             }
             (KeyCode::Esc, KeyModifiers::NONE) if self.can_return_to_latest() => {
                 self.jump_to_latest();

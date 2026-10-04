@@ -89,7 +89,6 @@ use codex_tools::ToolExecutor;
 use codex_tools::ToolExposures;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
-use codex_tools::UnifiedExecShellMode;
 use codex_tools::can_request_original_image_detail;
 use codex_tools::collect_code_mode_exec_prompt_tool_definitions;
 use codex_tools::collect_request_plugin_install_entries;
@@ -187,6 +186,15 @@ pub(crate) fn build_tool_router(
     )
 }
 
+/// Use the effective mode because the model can override the thread's configured mode.
+fn code_mode_only_strict_3p_tools(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
+    effective_tool_mode(turn_context, model_info) == ToolMode::CodeModeOnly
+        && turn_context
+            .config
+            .features
+            .enabled(Feature::CodeModeOnlyStrictThirdPartyTools)
+}
+
 fn apply_mcp_tool_exposure_policy(
     turn_context: &TurnContext,
     model_info: &ModelInfo,
@@ -198,6 +206,7 @@ fn apply_mcp_tool_exposure_policy(
     let apps_config = apps_config_from_layer_stack(&turn_context.config.config_layer_stack);
     for tool in mcp.tools() {
         let tool_name = tool.canonical_tool_name();
+        // Disabled, denied, app-only and over-budget MCP tools are absent from this set.
         if !registered_mcp_tools.contains(&tool_name) {
             continue;
         }
@@ -230,6 +239,17 @@ fn apply_mcp_tool_exposure_policy(
         let Some(omitted_exposures) = omitted_exposures_by_tool.get(&tool_name) else {
             continue;
         };
+        if code_mode_only_strict_3p_tools(turn_context, model_info) {
+            // Ignore MCP/app omit_tools_from; eligible tools must stay deferred in exec.
+            // Log conflicts without adding a warning to the model's prompt.
+            if omitted_exposures.intersects(ToolExposures::DEFERRED | ToolExposures::CODE_MODE) {
+                tracing::warn!(
+                    tool_name = %tool_name,
+                    "Ignoring MCP/app omit_tools_from because code_mode_only_strict_3p_tools is enabled"
+                );
+            }
+            continue;
+        }
         let tool_name = tool_name.with_default_namespace();
 
         let mut exposures = ToolExposures::ALL.difference(*omitted_exposures);
@@ -355,6 +375,7 @@ pub(crate) fn finalize_tool_router(
 ) -> CodexResult<ToolRouter> {
     hosted_specs.retain(|spec| registry.tool_policy.allows(&ToolName::plain(spec.name())));
     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
+    enforce_strict_3p_tools(turn_context, model_info, &mut registry);
     let tool_mode = effective_tool_mode(turn_context, model_info);
     let code_mode_enabled = matches!(tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly);
     if code_mode_enabled {
@@ -546,6 +567,31 @@ fn apply_direct_model_only_namespace_overrides(
             });
         if configured && tool.exposure.is_available_in_code_mode() {
             tool.exposure = ToolExposure::DirectModelOnly;
+        }
+    }
+}
+
+/// Run after namespace overrides so eligible third-party tools always remain deferred.
+fn enforce_strict_3p_tools(
+    turn_context: &TurnContext,
+    model_info: &ModelInfo,
+    registry: &mut ToolRegistry,
+) {
+    if !code_mode_only_strict_3p_tools(turn_context, model_info) {
+        return;
+    }
+
+    for tool in registry.entries_mut() {
+        // Remaining Hidden entries failed eligibility or budget checks; keep them hidden.
+        if !tool.runtime.is_third_party_tool() || tool.exposure == ToolExposure::Hidden {
+            continue;
+        }
+        if tool.exposure != ToolExposure::Deferred {
+            tracing::warn!(
+                tool_name = %tool.runtime.tool_name().with_default_namespace(),
+                "Deferring third-party tool because code_mode_only_strict_3p_tools is enabled"
+            );
+            tool.exposure = ToolExposure::Deferred;
         }
     }
 }
@@ -824,7 +870,11 @@ fn register_code_mode_executors(
         }
 
         let tool_name = tool.runtime.tool_name();
-        if is_excluded_from_code_mode(turn_context, &tool_name) {
+        // Deferred third-party tools still need an exec route to be discoverable.
+        if is_excluded_from_code_mode(turn_context, &tool_name)
+            && !(code_mode_only_strict_3p_tools(turn_context, model_info)
+                && tool.runtime.is_third_party_tool())
+        {
             continue;
         }
 
@@ -1030,13 +1080,8 @@ fn standalone_web_search_enabled(turn_context: &TurnContext, model_info: &ModelI
 }
 
 fn tool_environment_mode(environments: &TurnEnvironmentSnapshot) -> ToolEnvironmentMode {
-    ToolEnvironmentMode::from_count(environments.turn_environments().count())
-}
-
-fn any_environment_allows_login_shell(environments: &TurnEnvironmentSnapshot) -> bool {
-    environments
-        .turn_environments()
-        .any(|environment| environment.config().allow_login_shell)
+    // Keep environment selectors stable as selected attachments change readiness.
+    ToolEnvironmentMode::from_count(environments.environments.len())
 }
 
 fn should_include_windows_shell_guidance(environments: &TurnEnvironmentSnapshot) -> bool {
@@ -1063,14 +1108,12 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
     let turn_context = context.turn_context;
     let features = turn_context.config.features.get();
     let environment_mode = tool_environment_mode(context.environments);
-    if !environment_mode.has_environment()
-        || !features.enabled(Feature::ShellTool)
+    if !features.enabled(Feature::ShellTool)
         || matches!(context.model_info.shell_type, ConfigShellToolType::Disabled)
     {
         return;
     }
 
-    let allow_login_shell = any_environment_allows_login_shell(context.environments);
     if context.tool_policy.require_unified_exec && !features.enabled(Feature::UnifiedExec) {
         return;
     }
@@ -1078,14 +1121,9 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
         && context.tool_policy.expose_additional_permissions;
     let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
     let options = ExecCommandHandlerOptions {
-        allow_login_shell,
         allow_tty: features.enabled(Feature::UnifiedExecTty),
         exec_permission_approvals_enabled,
         include_environment_id,
-        include_shell_parameter: unified_exec_should_include_shell_parameter(
-            turn_context,
-            context.environments,
-        ),
         include_windows_shell_guidance: should_include_windows_shell_guidance(context.environments),
     };
     if features.enabled(Feature::UnifiedExec) {
@@ -1097,18 +1135,6 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
         // resumable process or write_stdin authority prohibited by policy.
         registry.add(ExecCommandHandler::one_shot(options));
     }
-}
-
-fn unified_exec_should_include_shell_parameter(
-    turn_context: &TurnContext,
-    environments: &TurnEnvironmentSnapshot,
-) -> bool {
-    !matches!(
-        &turn_context.unified_exec_shell_mode,
-        UnifiedExecShellMode::ZshFork(_)
-    ) || environments
-        .turn_environments()
-        .any(|environment| environment.environment.is_remote())
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -1198,7 +1224,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         registry.add_with_exposure(SendMessageToUserAsyncHandler, ToolExposure::DirectModelOnly);
     }
 
-    if environment_mode.has_environment() && features.enabled(Feature::RequestPermissionsTool) {
+    if features.enabled(Feature::RequestPermissionsTool) {
         registry.add(RequestPermissionsHandler);
     }
 
@@ -1251,7 +1277,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         ));
     }
 
-    if environment_mode.has_environment() && context.model_info.apply_patch_tool_type.is_some() {
+    if context.model_info.apply_patch_tool_type.is_some() {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
         registry.add(ApplyPatchHandler::new(include_environment_id));
     }
@@ -1265,7 +1291,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         registry.add(TestSyncHandler);
     }
 
-    if environment_mode.has_environment() && features.enabled(Feature::ViewImage) {
+    if features.enabled(Feature::ViewImage) {
         let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
         registry.add(ViewImageHandler::new(ViewImageToolOptions {
             can_request_original_image_detail: can_request_original_image_detail(

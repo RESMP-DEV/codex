@@ -465,22 +465,6 @@ class BrowserUseOriginPolicyConfig(BaseModel):
     uploads: AllowDenyRequirement | None = None
 
 
-class BrowserUseRequirements(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    allow_global_persistent_approval: Annotated[
-        bool | None, Field(alias="allowGlobalPersistentApproval")
-    ] = None
-    allow_history_access: Annotated[bool | None, Field(alias="allowHistoryAccess")] = None
-    allow_webmcp: Annotated[bool | None, Field(alias="allowWebmcp")] = None
-    default_origin_policy: Annotated[
-        BrowserUseOriginPolicy | None, Field(alias="defaultOriginPolicy")
-    ] = None
-    disable_auto_review: Annotated[bool | None, Field(alias="disableAutoReview")] = None
-    origins: dict[str, Any] | None = None
-
-
 class ByteRange(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -1300,6 +1284,16 @@ class EnvironmentConnectionNotification(BaseModel):
     )
     environment_id: Annotated[str, Field(alias="environmentId")]
     thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class EnvironmentSkillsParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    required: Annotated[
+        list[str] | None,
+        Field(description="Exact catalog names that must be available from this environment."),
+    ] = None
 
 
 class ExperimentalFeatureEnablementSetParams(BaseModel):
@@ -2756,6 +2750,7 @@ class MergeStrategy(Enum):
 
 class MessagePhase(Enum):
     commentary = "commentary"
+    partial_answer = "partial_answer"
     final_answer = "final_answer"
 
 
@@ -3860,6 +3855,14 @@ class RemoteControlStatusChangedNotification(BaseModel):
     installation_id: Annotated[str, Field(alias="installationId")]
     server_name: Annotated[str, Field(alias="serverName")]
     status: RemoteControlConnectionStatus
+
+
+class RequestHeader(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    name: str
+    value: str
 
 
 class RequestId(RootModel[str | int]):
@@ -6850,6 +6853,30 @@ class BrowserUseConfig(BaseModel):
     origins: dict[str, Any] | None = None
 
 
+class BrowserUseExtensionRequirements(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    request_headers: Annotated[list[RequestHeader] | None, Field(alias="requestHeaders")] = None
+
+
+class BrowserUseRequirements(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    allow_global_persistent_approval: Annotated[
+        bool | None, Field(alias="allowGlobalPersistentApproval")
+    ] = None
+    allow_history_access: Annotated[bool | None, Field(alias="allowHistoryAccess")] = None
+    allow_webmcp: Annotated[bool | None, Field(alias="allowWebmcp")] = None
+    default_origin_policy: Annotated[
+        BrowserUseOriginPolicy | None, Field(alias="defaultOriginPolicy")
+    ] = None
+    disable_auto_review: Annotated[bool | None, Field(alias="disableAutoReview")] = None
+    extension: BrowserUseExtensionRequirements | None = None
+    origins: dict[str, Any] | None = None
+
+
 class CancelLoginAccountResponse(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -8735,6 +8762,13 @@ class MisalignmentErrorDetails(BaseModel):
         Field(
             alias="errorType",
             description="Open-ended classification; clients must accept categories added by Responses.",
+        ),
+    ] = None
+    review_target: Annotated[
+        str | None,
+        Field(
+            alias="reviewTarget",
+            description="Opaque server-issued block target. Presence alone does not enable target-based continuation.",
         ),
     ] = None
     steer: Annotated[

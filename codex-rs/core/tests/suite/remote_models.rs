@@ -85,7 +85,6 @@ async fn disabled_update_plan_preserves_custom_catalog_instructions() -> Result<
         .as_mut()
         .expect("model prompt templates");
     messages.instructions_template = Some(INSTRUCTIONS.to_string());
-    messages.instructions_variables = None;
     let test = test_codex()
         .with_model("gpt-5.5")
         .with_config(move |config| {
@@ -96,7 +95,7 @@ async fn disabled_update_plan_preserves_custom_catalog_instructions() -> Result<
         .await?;
     test.submit_turn("hello").await?;
     let request = response.single_request().body_json();
-    assert_eq!(request["instructions"], INSTRUCTIONS);
+    assert_eq!(response.single_request().instructions_text(), INSTRUCTIONS);
     assert!(!request["tools"].to_string().contains("update_plan"));
     Ok(())
 }
@@ -1586,7 +1585,7 @@ async fn model_catalog_url_supplies_conversation_model_and_instructions() -> Res
     test.submit_turn("hello").await?;
     let request = response.single_request().body_json();
     assert_eq!(request["model"], "gateway-conversation");
-    assert_eq!(request["instructions"], instructions);
+    assert_eq!(response.single_request().instructions_text(), instructions);
     assert_eq!(request["text"].get("verbosity"), None);
     Ok(())
 }

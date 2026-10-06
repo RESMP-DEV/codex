@@ -877,7 +877,10 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         cyber_access_program,
     } = args;
 
-    if config.daybreak_enabled && !matches!(&command, Some(ExecCommand::Review(_))) {
+    if config.features.enabled(Feature::CliDaybreak)
+        && config.daybreak_enabled
+        && !matches!(&command, Some(ExecCommand::Review(_)))
+    {
         anyhow::ensure!(
             !oss || matches!(
                 &command,
@@ -1176,8 +1179,10 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     // is using.
     event_processor.print_config_summary(&config, &prompt_summary, &session_configured);
     if !json_mode
-        && let Some(message) =
-            codex_core::config::system_bwrap_warning(config.permissions.permission_profile())
+        && let Some(message) = codex_core::config::system_bwrap_warning(
+            &config.permissions.effective_permission_profile(),
+            &config.cwd,
+        )
     {
         event_processor.process_warning(message);
     }
@@ -1210,7 +1215,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         } => {
             let cyber_access_program = match cyber_access_program {
                 Some(program) => Some(program),
-                None => {
+                None if config.features.enabled(Feature::CliDaybreak) => {
                     daybreak::program_for_turn(
                         &client,
                         &mut request_ids,
@@ -1220,6 +1225,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     )
                     .await?
                 }
+                None => None,
             };
             let response: TurnStartResponse = send_request_with_response(
                 &client,

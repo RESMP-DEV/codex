@@ -99,6 +99,9 @@ pub use crate::approvals::NetworkPolicyAmendment;
 pub use crate::approvals::NetworkPolicyRuleAction;
 pub use crate::environment::EnvironmentConfig;
 pub use crate::environment::EnvironmentConfigState;
+pub use crate::environment::TurnEnvironmentRequest;
+pub use crate::environment::TurnEnvironmentSelection;
+pub use crate::environment::TurnEnvironmentSelections;
 pub use crate::environment::has_full_access;
 pub use crate::legacy_events::HasLegacyEvent;
 pub use crate::permissions::FileSystemAccessMode;
@@ -146,34 +149,6 @@ pub fn strip_user_message_prefix(text: &str) -> &str {
     match text.find(USER_MESSAGE_BEGIN) {
         Some(idx) => text[idx + USER_MESSAGE_BEGIN.len()..].trim(),
         None => text.trim(),
-    }
-}
-
-// TODO(anp): Replace `TurnEnvironmentSelection` with `PathUri` once path URIs carry environment
-// identifiers.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TurnEnvironmentSelection {
-    pub environment_id: String,
-    pub cwd: PathUri,
-    pub workspace_roots: Vec<PathUri>,
-    pub config: EnvironmentConfigState,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TurnEnvironmentSelections {
-    pub legacy_fallback_cwd: AbsolutePathBuf,
-    pub environments: Vec<TurnEnvironmentSelection>,
-}
-
-impl TurnEnvironmentSelections {
-    pub fn new(
-        legacy_fallback_cwd: AbsolutePathBuf,
-        environments: Vec<TurnEnvironmentSelection>,
-    ) -> Self {
-        Self {
-            legacy_fallback_cwd,
-            environments,
-        }
     }
 }
 
@@ -513,7 +488,7 @@ pub struct ThreadSettingsOverrides {
     pub environments: Option<TurnEnvironmentSelections>,
 
     /// Updated top-level runtime workspace roots for default environments.
-    /// Explicit environment selections own their roots separately.
+    /// Explicit environment requests own their workspace roots separately.
     pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
 
     /// Updated profile-defined workspace roots for status summaries and
@@ -2040,6 +2015,9 @@ pub struct MisalignmentErrorDetails {
     /// Model-visible instruction to submit if the user elects to continue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steer: Option<MisalignmentSteer>,
+    /// Opaque server-issued block target, echoed verbatim only on explicit continuation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_target: Option<String>,
 }
 
 impl fmt::Debug for MisalignmentErrorDetails {
@@ -2052,6 +2030,7 @@ impl fmt::Debug for MisalignmentErrorDetails {
                 &self.detailed_explanation.is_some(),
             )
             .field("has_steer", &self.steer.is_some())
+            .field("has_review_target", &self.review_target.is_some())
             .finish()
     }
 }
@@ -5869,6 +5848,7 @@ mod tests {
             misalignment: Some(MisalignmentErrorDetails {
                 error_type: Some("unauthorized_data_transfer".to_string()),
                 detailed_explanation: Some("Sensitive customer explanation".to_string()),
+                review_target: Some("sensitive-review-target".to_string()),
                 steer: Some(MisalignmentSteer {
                     message: "Sensitive customer steering".to_string(),
                 }),
@@ -5890,6 +5870,7 @@ mod tests {
         let debug = format!("{event:?}");
         assert!(!debug.contains("Sensitive customer explanation"));
         assert!(!debug.contains("Sensitive customer steering"));
+        assert!(!debug.contains("sensitive-review-target"));
     }
 
     #[test]

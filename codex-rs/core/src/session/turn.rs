@@ -1298,6 +1298,7 @@ async fn track_turn_resolved_config_analytics(
                 .get::<codex_extension_api::GuardianV2Enabled>()
                 .is_some(),
             sandbox_network_access: turn_context.network_sandbox_policy().is_enabled(),
+            multi_agent_version: turn_context.multi_agent_version,
             collaboration_mode: turn_context.mode(),
             personality: turn_context.personality(),
             workspace_kind: turn_context.turn_metadata_state.workspace_kind(),
@@ -2750,11 +2751,13 @@ async fn try_run_sampling_request(
                     cancellation_token: cancellation_token.child_token(),
                 };
 
-                // TODO: Allow mailbox preemption after PartialAnswer and keep delivery open
-                // in the completed-item deferral predicates.
                 let preempt_for_mailbox_mail = match &item {
                     ResponseItem::Message { role, phase, .. } => {
-                        role == "assistant" && matches!(phase, Some(MessagePhase::Commentary))
+                        role == "assistant"
+                            && matches!(
+                                phase,
+                                Some(MessagePhase::Commentary | MessagePhase::PartialAnswer)
+                            )
                     }
                     ResponseItem::Reasoning { .. } => true,
                     ResponseItem::AgentMessage { .. } => false,

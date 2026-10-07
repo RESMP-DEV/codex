@@ -3,6 +3,10 @@ mod shared_instructions;
 mod shutdown;
 
 pub use shutdown::AgentTreeShutdown;
+pub use shutdown::AgentTreeShutdownFailure;
+pub use shutdown::AgentTreeShutdownFailureReason;
+pub use shutdown::AgentTreeShutdownReport;
+pub(crate) use shutdown::thread_store_error_kind;
 
 use crate::CodexAppsToolsCache;
 use crate::agent::LocalAgentControl;
@@ -2606,6 +2610,7 @@ struct SnapshotTurnState {
     ends_mid_turn: bool,
     active_turn_id: Option<String>,
     active_turn_started_at: Option<i64>,
+    active_turn_root_id: Option<String>,
     active_turn_start_index: Option<usize>,
 }
 
@@ -2626,6 +2631,7 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
                 ends_mid_turn: false,
                 active_turn_id: None,
                 active_turn_started_at: None,
+                active_turn_root_id: None,
                 active_turn_start_index: None,
             };
         }
@@ -2633,7 +2639,10 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
         return SnapshotTurnState {
             ends_mid_turn: true,
             active_turn_id,
-            active_turn_started_at: active_turn_snapshot.and_then(|turn| turn.started_at),
+            active_turn_started_at: active_turn_snapshot
+                .as_ref()
+                .and_then(|turn| turn.started_at),
+            active_turn_root_id: active_turn_snapshot.and_then(|turn| turn.root_turn_id),
             active_turn_start_index: builder.active_turn_start_index(),
         };
     }
@@ -2646,6 +2655,7 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
             ends_mid_turn: false,
             active_turn_id: None,
             active_turn_started_at: None,
+            active_turn_root_id: None,
             active_turn_start_index: None,
         };
     };
@@ -2662,6 +2672,7 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
         }),
         active_turn_id: None,
         active_turn_started_at: None,
+        active_turn_root_id: None,
         active_turn_start_index: None,
     }
 }
@@ -2689,6 +2700,7 @@ fn fork_history_from_snapshot(
                 append_interrupted_boundary(
                     history,
                     snapshot_state.active_turn_id,
+                    snapshot_state.active_turn_root_id,
                     snapshot_state.active_turn_started_at,
                     interrupted_marker,
                 )
@@ -2705,10 +2717,12 @@ fn fork_history_from_snapshot(
 fn append_interrupted_boundary(
     history: InitialHistory,
     turn_id: Option<String>,
+    root_turn_id: Option<String>,
     started_at: Option<i64>,
     interrupted_marker: InterruptedTurnHistoryMarker,
 ) -> InitialHistory {
     let aborted_event = RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+        root_turn_id,
         turn_id,
         reason: TurnAbortReason::Interrupted,
         error: None,

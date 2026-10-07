@@ -1179,8 +1179,9 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
             )
     }));
 
+    let step_context = StepContext::for_test(Arc::clone(&turn));
     let world_state = session
-        .build_world_state_for_step(&StepContext::for_test(Arc::clone(&turn)))
+        .build_world_state_for_step(&step_context, /*new_window*/ true)
         .await
         .expect("world state should build");
     assert_eq!(
@@ -1502,6 +1503,7 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .send_event(
             child_turn.as_ref(),
             EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id: child_turn.sub_id.clone(),
                 started_at: None,
                 last_agent_message: Some("done".to_string()),
@@ -1939,6 +1941,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         .send_event(
             first_turn.as_ref(),
             EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id: first_turn.sub_id.clone(),
                 started_at: None,
                 last_agent_message: Some("first done".to_string()),
@@ -1981,6 +1984,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         .send_event(
             second_turn.as_ref(),
             EventMsg::TurnComplete(TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id: second_turn.sub_id.clone(),
                 started_at: None,
                 last_agent_message: Some("second done".to_string()),
@@ -2144,6 +2148,7 @@ async fn multi_agent_v2_interrupted_turn_does_not_notify_parent() {
         .send_event(
             aborted_turn.as_ref(),
             EventMsg::TurnAborted(TurnAbortedEvent {
+                root_turn_id: None,
                 turn_id: Some(aborted_turn.sub_id.clone()),
                 started_at: None,
                 reason: TurnAbortReason::Interrupted,

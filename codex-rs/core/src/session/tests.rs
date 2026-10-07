@@ -816,6 +816,7 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
         .expect("expected turn aborted event")
         .expect("channel open");
     let EventMsg::TurnAborted(TurnAbortedEvent {
+        root_turn_id,
         turn_id,
         reason,
         error: _,
@@ -826,6 +827,7 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
     else {
         panic!("expected turn aborted event");
     };
+    assert_eq!(root_turn_id, Some(tc.root_turn_id()));
     assert_eq!(turn_id, Some(tc.sub_id.clone()));
     assert_eq!(reason, TurnAbortReason::Interrupted);
     assert!(started_at.is_some());
@@ -2595,14 +2597,20 @@ async fn item_completion_without_a_start_uses_completion_timestamp() {
 async fn subagent_activity_emits_matching_start_and_completion() {
     let (session, turn_context, rx) = make_session_and_context_with_rx().await;
     let item = codex_protocol::items::SubAgentActivityItem {
+        model: Some("requested-model".to_string()),
+        reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::High),
         id: "activity-1".to_string(),
         kind: codex_protocol::protocol::SubAgentActivityKind::Started,
         agent_thread_id: ThreadId::new(),
         agent_path: AgentPath::root(),
     };
 
-    crate::tools::handlers::multi_agents_v2::emit_sub_agent_activity(&session, &turn_context, item)
-        .await;
+    crate::tools::handlers::multi_agents_v2::emit_sub_agent_activity(
+        &session,
+        &turn_context,
+        item.clone(),
+    )
+    .await;
 
     let EventMsg::ItemStarted(started) = rx.recv().await.expect("started item event").msg else {
         panic!("expected started item event");
@@ -2611,6 +2619,14 @@ async fn subagent_activity_emits_matching_start_and_completion() {
     else {
         panic!("expected completed item event");
     };
+    let TurnItem::SubAgentActivity(started_item) = started.item else {
+        panic!("expected started sub-agent activity");
+    };
+    let TurnItem::SubAgentActivity(completed_item) = completed.item else {
+        panic!("expected completed sub-agent activity");
+    };
+    assert_eq!(started_item, item);
+    assert_eq!(completed_item, item);
     assert_eq!(completed.started_at_ms, Some(started.started_at_ms));
 }
 
@@ -4014,7 +4030,7 @@ async fn start_new_context_window_persists_checkpoint_state() {
         .expect("a fresh cancellation token cannot be cancelled");
     let world_state = Arc::new(
         session
-            .build_world_state_for_step(&step_context)
+            .build_world_state_for_step(&step_context, /*new_window*/ true)
             .await
             .expect("world state should build"),
     );
@@ -4310,26 +4326,20 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         disabled_plugin_ids: None,
         #[allow(deprecated)]
         cwd: turn_context.cwd.clone(),
-        workspace_roots: None,
-        current_date: turn_context.current_date.clone(),
-        timezone: turn_context.timezone.clone(),
         approval_policy: turn_context.approval_policy(),
         approvals_reviewer: None,
         sandbox_policy: turn_context.sandbox_policy(),
         permission_profile: None,
         active_permission_profile: None,
-        network: None,
         file_system_sandbox_policy: None,
         model: previous_model.to_string(),
         comp_hash: None,
-        personality: turn_context.personality(),
         collaboration_mode: Some(turn_context.collaboration_mode()),
         multi_agent_version: None,
-        multi_agent_mode: None,
         realtime_active: Some(turn_context.realtime_active),
         cyber_access_program: None,
         effort: turn_context.reasoning_effort().cloned(),
-        summary: codex_protocol::config_types::ReasoningSummary::Auto,
+        summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
     };
     let turn_id = previous_context_item
         .turn_id
@@ -4338,6 +4348,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
     let rollout_items = vec![
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
+                turn_attribution: None,
                 turn_id: turn_id.clone(),
                 root_turn_id: None,
                 trace_id: None,
@@ -4359,6 +4370,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         RolloutItem::TurnContext(previous_context_item.clone()),
         RolloutItem::EventMsg(EventMsg::TurnComplete(
             codex_protocol::protocol::TurnCompleteEvent {
+                root_turn_id: None,
                 turn_id,
                 last_agent_message: None,
                 error: None,
@@ -6134,6 +6146,18 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
     let (mut session, turn_context) = make_session_and_context().await;
     let rollout_path = attach_thread_persistence(&mut session).await;
     let turn_context = Arc::new(turn_context);
+    turn_context
+        .turn_metadata_state
+        .set_turn_trigger("automation".to_string());
+    turn_context
+        .turn_metadata_state
+        .set_parent_turn_id("parent-turn".to_string());
+    turn_context
+        .turn_metadata_state
+        .set_root_turn_id("root-turn".to_string());
+    turn_context.turn_metadata_state.set_initiating_agent_path(
+        codex_protocol::AgentPath::try_from("/root/requester").expect("requester path"),
+    );
     let turn_context_baseline = turn_context.to_turn_context_item();
     let world_state = Arc::new(build_world_state_from_turn_context(&session, &turn_context).await);
     let previous_turn_settings = PreviousTurnSettings {
@@ -6146,11 +6170,19 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
         .set_previous_turn_settings(Some(previous_turn_settings.clone()))
         .await;
 
-    session.state.lock().await.last_started_turn_id = Some("checkpoint-turn".into());
     session.multi_agent_version = std::sync::OnceLock::from(MultiAgentVersion::V2);
     let expected = CompactionResumeMetadata {
         multi_agent_version: Some(MultiAgentVersion::V2),
-        last_started_turn_id: Some("checkpoint-turn".into()),
+        last_started_turn_id: Some(turn_context.sub_id.clone()),
+        turn_attribution: Some(codex_history::TurnAttribution {
+            turn_id: turn_context.sub_id.clone(),
+            turn_trigger: Some("automation".to_string()),
+            parent_turn_id: Some("parent-turn".to_string()),
+            initiating_agent_path: Some(
+                codex_protocol::AgentPath::try_from("/root/requester").expect("requester path"),
+            ),
+            root_turn_id: turn_context_baseline.root_turn_id.clone(),
+        }),
         previous_turn_settings: Some(previous_turn_settings),
     };
     let expected_settings = codex_protocol::protocol::ThreadSettingsAppliedEvent {
@@ -6158,6 +6190,21 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
         thread_settings: session.thread_settings_snapshot().await,
     };
 
+    session
+        .record_started_turn(&turn_context.sub_id, Some(turn_context.attribution()))
+        .await;
+    let compact_context = session.new_default_turn().await;
+    session
+        .record_started_turn(&compact_context.sub_id, /*attribution*/ None)
+        .await;
+    assert_eq!(
+        session.state.lock().await.turn_attribution,
+        expected.turn_attribution
+    );
+
+    session
+        .record_started_turn(&turn_context.sub_id, Some(turn_context.attribution()))
+        .await;
     let input_goal_ids =
         crate::context::UserGoalUpdate::message_ids(session.clone_history().await.raw_items());
     // The goal edit is accepted after the compaction input was captured.
@@ -6217,6 +6264,59 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
     );
     assert_eq!(saved_turn_context, &turn_context_baseline);
     assert_eq!(saved_settings, &expected_settings);
+    for same_turn_input in [false, true] {
+        let mut rollback_items = vec![RolloutItem::Compacted(compacted.clone())];
+        if same_turn_input {
+            rollback_items.push(RolloutItem::ResponseItem(
+                user_message("steered work").into(),
+            ));
+        }
+        rollback_items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+            codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
+        )));
+        let rolled_back = session
+            .reconstruct_history_from_rollout(&turn_context, &rollback_items)
+            .await;
+        assert_eq!(rolled_back.turn_attribution, None);
+    }
+
+    // Settings invalidate continuation eligibility; standalone compaction replaces its ID.
+    // Neither changes the regular work whose attribution the checkpoint preserves.
+    for last_started_turn_id in [None, Some("compact-turn".to_string())] {
+        let mut checkpoint = compacted.clone();
+        checkpoint
+            .resume_metadata
+            .as_mut()
+            .expect("resume metadata")
+            .last_started_turn_id = last_started_turn_id.clone();
+        let mut items = vec![RolloutItem::Compacted(checkpoint)];
+        if let Some(turn_id) = last_started_turn_id {
+            items.push(RolloutItem::EventMsg(EventMsg::TurnComplete(
+                TurnCompleteEvent {
+                    root_turn_id: None,
+                    turn_id,
+                    last_agent_message: None,
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
+                    time_to_first_token_ms: None,
+                },
+            )));
+        }
+        let reconstructed = session
+            .reconstruct_history_from_rollout(&turn_context, &items)
+            .await;
+        assert_eq!(reconstructed.turn_attribution, expected.turn_attribution);
+        assert_eq!(reconstructed.reference_context_item, None);
+        items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+            codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
+        )));
+        let rolled_back = session
+            .reconstruct_history_from_rollout(&turn_context, &items)
+            .await;
+        assert_eq!(rolled_back.turn_attribution, None);
+    }
 }
 
 #[tokio::test]
@@ -6656,7 +6756,7 @@ async fn build_initial_context(
 ) -> Vec<ResponseItem> {
     let step_context = StepContext::for_test(Arc::clone(turn_context));
     let world_state = session
-        .build_world_state_for_step(&step_context)
+        .build_world_state_for_step(&step_context, /*new_window*/ true)
         .await
         .expect("world state should build");
     let (updates, _) = session
@@ -6671,7 +6771,7 @@ pub(crate) async fn build_world_state_from_turn_context(
 ) -> WorldState {
     let step_context = StepContext::for_test(Arc::clone(turn_context));
     session
-        .build_world_state_for_step(&step_context)
+        .build_world_state_for_step(&step_context, /*new_window*/ false)
         .await
         .expect("world state should build")
 }
@@ -7758,6 +7858,7 @@ async fn request_permissions_tool_resolves_legacy_paths_against_selected_environ
         user_home_dir: Some(PathUri::from_abs_path(&environment_home)),
         ..TurnEnvironment::new(
             TurnEnvironmentSelection {
+                selected_capability_roots: Default::default(),
                 environment_id: "remote".to_string(),
                 cwd: PathUri::from_abs_path(&environment_cwd),
                 workspace_roots: Vec::new(),
@@ -8437,6 +8538,7 @@ async fn primary_environment_uses_first_turn_environment() {
         .environments
         .push(TurnEnvironmentState::Ready(TurnEnvironment::new(
             TurnEnvironmentSelection {
+                selected_capability_roots: Default::default(),
                 environment_id: "second".to_string(),
                 cwd: second_cwd_uri.clone(),
                 workspace_roots: Vec::new(),
@@ -9479,7 +9581,7 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
     let rematerialized_old = session
         .mcp_runtime_for_step(
             &turn_context,
-            /*selected_capability_roots*/ &[],
+            &[],
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
         )
@@ -9925,10 +10027,11 @@ async fn mcp_refresh_detects_shared_auth_manager_changes() {
 #[tokio::test]
 async fn capability_roots_require_turn_environment_selection() {
     let (mut session, turn_context) = make_session_and_context().await;
-    let environment = turn_context
+    let mut environment = turn_context
         .initial_environments
         .primary()
-        .expect("ready local environment");
+        .expect("ready local environment")
+        .clone();
     let root = codex_protocol::capabilities::SelectedCapabilityRoot {
         id: "selected-root".to_string(),
         location: codex_protocol::capabilities::CapabilityRootLocation::Environment {
@@ -9937,6 +10040,13 @@ async fn capability_roots_require_turn_environment_selection() {
         },
     };
     session.services.selected_capability_roots = vec![root.clone()];
+    environment.selection = TurnEnvironmentSelection::new(
+        environment.selection.into_request(),
+        std::slice::from_ref(&root),
+    );
+    let selected_environments = TurnEnvironmentSnapshot {
+        environments: vec![TurnEnvironmentState::Ready(environment)],
+    };
 
     let unselected_roots = session
         .resolve_selected_capability_roots_for_step(&TurnEnvironmentSnapshot::default())
@@ -9944,7 +10054,7 @@ async fn capability_roots_require_turn_environment_selection() {
     assert!(unselected_roots.is_empty());
 
     let selected_roots = session
-        .resolve_selected_capability_roots_for_step(&turn_context.initial_environments)
+        .resolve_selected_capability_roots_for_step(&selected_environments)
         .await;
     assert_eq!(
         selected_roots
@@ -9985,6 +10095,7 @@ async fn conflicting_ready_environment_root_ids_keep_first_location() {
         environment_config.selected_capability_roots = vec![selected_root.clone()];
         turn_environments.push(TurnEnvironment::new(
             TurnEnvironmentSelection {
+                selected_capability_roots: Default::default(),
                 environment_id: environment_id.clone(),
                 cwd: local_environment.cwd().clone(),
                 workspace_roots: local_environment.workspace_roots().to_vec(),
@@ -10275,6 +10386,7 @@ async fn record_context_updates_emits_environment_item_for_cwd_changes() {
     current_context.initial_environments.environments[0] =
         TurnEnvironmentState::Ready(TurnEnvironment::new(
             TurnEnvironmentSelection {
+                selected_capability_roots: Default::default(),
                 environment_id: environment.selection.environment_id,
                 cwd: PathUri::from_abs_path(&cwd),
                 workspace_roots: Vec::new(),
@@ -10336,6 +10448,7 @@ async fn record_context_updates_use_environment_permission_profile_and_workspace
     current_context.initial_environments.environments[0] =
         TurnEnvironmentState::Ready(TurnEnvironment::new(
             TurnEnvironmentSelection {
+                selected_capability_roots: Default::default(),
                 environment_id: environment.selection.environment_id,
                 cwd,
                 workspace_roots: vec![PathUri::from_abs_path(&workspace_root)],
@@ -10413,6 +10526,7 @@ async fn record_context_updates_omits_environment_item_when_disabled() {
     current_context.initial_environments.environments[0] =
         TurnEnvironmentState::Ready(TurnEnvironment::new(
             TurnEnvironmentSelection {
+                selected_capability_roots: Default::default(),
                 environment_id: environment.selection.environment_id,
                 cwd: PathUri::from_abs_path(&test_path_buf("/new-repo").abs()),
                 workspace_roots: Vec::new(),
@@ -10980,6 +11094,7 @@ async fn turn_context_item_stores_local_cwd() {
     turn_context.initial_environments.environments[0] =
         TurnEnvironmentState::Ready(TurnEnvironment::new(
             TurnEnvironmentSelection {
+                selected_capability_roots: Default::default(),
                 environment_id: "remote".to_string(),
                 cwd,
                 workspace_roots: Vec::new(),
@@ -11269,6 +11384,7 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
             Vec::new(),
             |config| {
                 config.features.enable(Feature::TokenBudget).unwrap();
+                config.features.enable(Feature::IncrementalTools).unwrap();
             },
         )
         .await;
@@ -11286,6 +11402,7 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
     update_turn_settings_for_test(Arc::get_mut(&mut turn_context).unwrap(), |settings| {
         let model_info = Arc::make_mut(&mut settings.model_info);
         model_info.slug = "model-a".to_string();
+        model_info.use_responses_lite = true;
         model_info.context_window = None;
         model_info.max_context_window = None;
         let messages = model_info.model_messages.as_mut().unwrap();
@@ -11299,12 +11416,23 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
             realtime_active: None,
         }))
         .await;
+    session
+        .replace_history(
+            vec![user_message("Existing legacy window")],
+            Some(turn_context.to_turn_context_item()),
+        )
+        .await;
     let step_a = session
         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
         .await
         .unwrap();
-    let world_a = Arc::new(session.build_world_state_for_step(&step_a).await.unwrap());
-    let (initial_a, _) = crate::compact::build_compaction_replacement_history(
+    let world_a = Arc::new(
+        session
+            .build_world_state_for_step(&step_a, /*new_window*/ true)
+            .await
+            .unwrap(),
+    );
+    let (initial_a, expected_snapshot) = crate::compact::build_compaction_replacement_history(
         &session,
         &step_a,
         &world_a,
@@ -11334,7 +11462,10 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
         .await
         .unwrap();
-    let world_b = session.build_world_state_for_step(&step_b).await.unwrap();
+    let world_b = session
+        .build_world_state_for_step(&step_b, /*new_window*/ true)
+        .await
+        .unwrap();
     let initial_b = session
         .build_initial_context_with_world_state(&step_b, &world_b)
         .await
@@ -11350,7 +11481,7 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
     .await;
 
     assert_eq!(restored_a, initial_a);
-    assert_eq!(restored_snapshot, world_a.render_full().0);
+    assert_eq!(restored_snapshot, expected_snapshot);
     let initial_a = initial_a
         .into_iter()
         .map(|item| item.item)
@@ -11944,7 +12075,12 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
         Arc::clone(&primary),
         Arc::clone(&fallback),
         &mut client_session,
-        Arc::new(session.build_world_state_for_step(&fallback).await.unwrap()),
+        Arc::new(
+            session
+                .build_world_state_for_step(&fallback, /*new_window*/ true)
+                .await
+                .unwrap(),
+        ),
         CompactionReason::ModelDownshift,
         CompactionPhase::PreTurn,
     )

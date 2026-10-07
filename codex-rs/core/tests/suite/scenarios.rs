@@ -91,6 +91,8 @@ const ONE_PIXEL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ
 
 #[path = "scenarios_incremental_tools.rs"]
 mod incremental_tools;
+#[path = "scenarios_incremental_tools_resume.rs"]
+mod incremental_tools_resume;
 
 #[path = "scenarios_code_mode_settled_helpers_tests.rs"]
 mod code_mode_settled_helpers;
@@ -266,6 +268,20 @@ fn configure_scenario_catalog(config: &mut Config) {
     .expect("fixture config layers");
     config.model_catalog = Some(bundled_models_response().expect("bundled model catalog"));
     config.cloud_skill_enabled = false;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn realtime_attachment_replacement_preserves_handoff_context() -> Result<()> {
+    let requests = super::realtime_attachment::attachment_replacement_scenario().await?;
+    insta::assert_snapshot!(
+        "realtime_attachment_replacement",
+        context_snapshot::format_request_history_snapshot(
+            "A replacement fences an older pending connection and stale stops; only the selected call starts a Codex handoff.",
+            &requests,
+            &ContextSnapshotOptions::default().rewrite_known_segments(),
+        )
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -536,7 +552,7 @@ async fn astra_switches_environments_for_the_rest_of_the_active_turn() -> Result
         .submit(Op::TurnSettings {
             turn_id: request.turn_id.clone(),
             update: TurnSettingsUpdate {
-                environments: Some(vec![other.clone()]),
+                environments: Some(vec![other.clone().into_request()]),
                 ..Default::default()
             },
             reply,
@@ -861,7 +877,7 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context() ->
         .submit(Op::TurnSettings {
             turn_id,
             update: TurnSettingsUpdate {
-                environments: Some(vec![next_environment]),
+                environments: Some(vec![next_environment.into_request()]),
                 ..Default::default()
             },
             reply,

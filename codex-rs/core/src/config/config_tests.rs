@@ -1913,6 +1913,7 @@ async fn network_proxy_feature_matrix_preserves_sandbox_network_semantics() -> s
                 }),
                 windows: Some(WindowsToml {
                     sandbox: Some(WindowsSandboxModeToml::Elevated),
+                    ..Default::default()
                 }),
                 features,
                 ..Default::default()
@@ -3682,6 +3683,7 @@ async fn implicit_builtin_workspace_profile_preserves_sandbox_workspace_write_se
             }),
             windows: Some(WindowsToml {
                 sandbox: Some(WindowsSandboxModeToml::Elevated),
+                ..Default::default()
             }),
             ..Default::default()
         },
@@ -3746,6 +3748,7 @@ async fn implicit_builtin_workspace_profile_preserves_add_dir_metadata_carveouts
             )])),
             windows: Some(WindowsToml {
                 sandbox: Some(WindowsSandboxModeToml::Elevated),
+                ..Default::default()
             }),
             ..Default::default()
         },
@@ -8418,10 +8421,17 @@ experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
     );
 }
 
+#[test_case::test_case("", codex_protocol::TranscriptFormat::Line; "default_line")]
+#[test_case::test_case("[guardianv2]\ntranscript_mode = 'line'", codex_protocol::TranscriptFormat::Line; "explicit_line")]
+#[test_case::test_case("[guardianv2]\ntranscript_mode = 'json'", codex_protocol::TranscriptFormat::Json; "explicit_json")]
 #[tokio::test]
-async fn load_config_uses_auto_review_guardian_policy_config_and_template() -> std::io::Result<()> {
+async fn load_config_uses_auto_review_guardian_policy_config_and_template(
+    features: &str,
+    expected_mode: codex_protocol::TranscriptFormat,
+) -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
+        features: Some(toml::from_str(features).unwrap()),
         auto_review: Some(AutoReviewToml {
             circuit_break_action: None,
             policy: Some("  Use the user-configured guardian policy.  ".to_string()),
@@ -8447,11 +8457,13 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template() -> s
 
     assert_eq!(
         (
+            config.guardian_transcript_mode,
             config.guardian_policy_config.as_deref(),
             config.guardian_extra_policy.as_deref(),
             config.guardian_policy_template.as_deref(),
         ),
         (
+            expected_mode,
             Some("Use the user-configured guardian policy."),
             Some("Use the user-configured additional policy."),
             Some("Configured template: {{ tenant_policy_config }}"),
@@ -11109,6 +11121,12 @@ async fn local_mxc_preference_preserves_configured_backend() -> anyhow::Result<(
     use codex_sandboxing::SandboxType::WindowsRestrictedToken as RestrictedToken;
 
     let codex_home = TempDir::new()?;
+    let permission_selection = EffectivePermissionSelection {
+        profiles: None,
+        selected_profile_id: None,
+        persisted_profile_id_was_provided: false,
+        requirements_force_profile_selection: false,
+    };
     for (prefer, resolved_preference, binding, allow_mxc, mode, expected) in [
         (true, true, true, true, "unelevated", WindowsMxc),
         (true, false, true, true, "unelevated", RestrictedToken),
@@ -11141,16 +11159,11 @@ async fn local_mxc_preference_preserves_configured_backend() -> anyhow::Result<(
                     .config_layer_stack
                     .requirements()
                     .windows_sandbox_mode,
-                &EffectivePermissionSelection {
-                    profiles: None,
-                    selected_profile_id: None,
-                    persisted_profile_id_was_provided: false,
-                    requirements_force_profile_selection: false,
-                },
+                &permission_selection,
                 /*profiles_are_active*/ false,
                 /*permission_profile*/ None,
                 /*network_requirements*/ None,
-                cfg.features.as_ref(),
+                &cfg,
                 /*enable_network_proxy*/ true,
             )?,
             binding && allow_mxc,
@@ -11176,6 +11189,36 @@ async fn local_mxc_preference_preserves_configured_backend() -> anyhow::Result<(
             ),
             "prefer={prefer}, resolved={resolved_preference}, binding={binding}, mode={mode}"
         );
+    }
+    for sandbox in ["unelevated", "mxc"] {
+        let cfg: ConfigToml = toml::from_str(&format!(
+            "[windows]\nsandbox = {sandbox:?}\nallow_mxc = false\n[features]\nprefer_mxc = true\n"
+        ))?;
+        assert!(!config_allows_mxc(
+            &ConfigRequirements::default().windows_sandbox_mode,
+            &permission_selection,
+            /*profiles_are_active*/ false,
+            /*permission_profile*/ None,
+            /*network_requirements*/ None,
+            &cfg,
+            /*enable_network_proxy*/ false,
+        )?);
+        let result = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.abs(),
+        )
+        .await;
+        if sandbox == "mxc" {
+            assert_eq!(
+                result
+                    .expect_err("explicit MXC must respect the opt-out")
+                    .to_string(),
+                "windows.sandbox = \"mxc\" is not allowed when windows.allow_mxc = false",
+            );
+        } else {
+            assert!(!result?.prefer_mxc);
+        }
     }
     Ok(())
 }

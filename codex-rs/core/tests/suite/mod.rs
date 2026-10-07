@@ -129,6 +129,8 @@ mod managed_threads;
 mod mcp_auth_elicitation;
 mod mcp_auth_refresh;
 mod mcp_ema_config;
+#[path = "mcp_executor_context_tests.rs"]
+mod mcp_executor_context;
 mod mcp_extension_protocol;
 mod mcp_optional_startup_grace;
 mod mcp_refresh_cleanup;
@@ -166,6 +168,7 @@ mod prompt_cache_key;
 mod prompt_caching;
 mod prompt_debug_tests;
 mod quota_exceeded;
+mod realtime_attachment;
 mod realtime_conversation;
 mod realtime_initial_items;
 mod realtime_misalignment;
@@ -241,6 +244,7 @@ mod unstable_features_warning;
 mod user_notification;
 mod user_shell_cmd;
 mod view_image;
+mod wake_reservation;
 mod web_search;
 #[path = "web_search_system_proxy_tests.rs"]
 mod web_search_system_proxy;

@@ -12,6 +12,7 @@ use crate::agents_md_manager::SessionInstructions;
 use crate::codex_thread::CodexThread;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::PermissionProfileSnapshot;
+use crate::context::BaseInstructionsFragment;
 use crate::context::ContextualUserFragment;
 use crate::context::CurrentTimeReminder;
 use crate::context::CurrentTimeUnavailable;
@@ -95,10 +96,10 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
                 ),
                 _ => false,
             },
-            ResponseItem::FunctionCallOutput { call_id: None, .. }
-            | ResponseItem::ConfigurationUpdate { .. } => true,
             ResponseItem::AdditionalTools { .. }
-            | ResponseItem::AgentMessage { .. }
+            | ResponseItem::FunctionCallOutput { call_id: None, .. }
+            | ResponseItem::ConfigurationUpdate { .. } => true,
+            ResponseItem::AgentMessage { .. }
             | ResponseItem::Reasoning { .. }
             | ResponseItem::LocalShellCall { .. }
             | ResponseItem::FunctionCall { .. }
@@ -141,7 +142,7 @@ fn retain_forked_developer_message(item: &mut ResponseItem, usage_hint_texts: &[
     content.retain(|content_item| {
         // Persisted role hints can predate the current bundled wording and lack markers.
         if matches!(
-            content_item.kind().0.as_str(),
+            content_item.kind().as_str(),
             "guardian.approved_action" | "multi_agent.role_instructions" | "multi_agent.usage_hint"
         ) {
             return false;
@@ -900,6 +901,25 @@ impl LocalAgentControl {
         }
         let durability_wait = durability_wait_started_at.elapsed();
 
+        // Capture startup settings before the child can publish metadata for a later turn.
+        let spawn_config = if multi_agent_version == MultiAgentVersion::V2 {
+            let mut config = new_thread.thread.config_snapshot().await;
+            let model_info = new_thread
+                .thread
+                .thread_extension_data()
+                .get::<codex_protocol::openai_models::ModelInfo>()
+                .ok_or_else(|| {
+                    CodexErr::Fatal("spawned thread is missing model metadata".to_string())
+                })?;
+            config.reasoning_effort = config
+                .reasoning_effort
+                .or_else(|| model_info.default_reasoning_level.clone())
+                .map(|effort| model_info.resolve_reasoning_effort(effort));
+            Some(config)
+        } else {
+            None
+        };
+
         let start_options = TurnStartOptions {
             parent_turn_id: options.parent_turn_id,
             turn_trigger: options.turn_trigger,
@@ -956,7 +976,10 @@ impl LocalAgentControl {
             metadata: agent_metadata,
             status: self.get_status(new_thread.thread_id).await,
         };
-        let config = new_thread.thread.config_snapshot().await;
+        let config = match spawn_config {
+            Some(config) => config,
+            None => new_thread.thread.config_snapshot().await,
+        };
         let session_telemetry = new_thread
             .thread
             .session_telemetry()
@@ -1119,6 +1142,11 @@ impl LocalAgentControl {
                 metadata.user_input_order = None;
             }
             let response_item = &mut envelope.item;
+            // Tool declarations and their comparison baseline must survive or be rebuilt together.
+            // Apply this to both standalone items and compaction replacement histories.
+            if matches!(response_item, ResponseItem::AdditionalTools { .. }) {
+                return preserve_context_baselines;
+            }
             if matches!(response_item, ResponseItem::AgentMessage { .. }) {
                 return false;
             }
@@ -1134,6 +1162,9 @@ impl LocalAgentControl {
                     return false;
                 };
                 content.retain_mut(|content_item| {
+                    if content_item.kind().as_str() == BaseInstructionsFragment::KIND {
+                        return preserve_context_baselines;
+                    }
                     let ContentItem::InputText { text } = content_item.content_mut() else {
                         return true;
                     };
@@ -1201,6 +1232,7 @@ impl LocalAgentControl {
                     compacted.latest_token_usage_record = None;
                     if let Some(resume_metadata) = &mut compacted.resume_metadata {
                         resume_metadata.multi_agent_version = Some(multi_agent_version);
+                        resume_metadata.turn_attribution = None;
                         if !preserve_context_baselines {
                             resume_metadata.previous_turn_settings = None;
                         }

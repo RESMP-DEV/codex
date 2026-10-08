@@ -109,6 +109,9 @@ mod mailbox_preemption;
 #[path = "scenarios_partial_answers.rs"]
 mod partial_answers;
 
+#[path = "scenarios_guardian_sender_context.rs"]
+mod guardian_sender_context;
+
 #[path = "scenarios_guardian_extra_policy.rs"]
 mod guardian_extra_policy;
 
@@ -1836,6 +1839,18 @@ async fn subagent_waits_for_its_inherited_environment_configuration() -> Result<
             "subagent_inherits_pending_environment"
         };
     insta::assert_snapshot!(snapshot_name, snapshot);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prediction_fork_inherits_parent_context() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let requests = super::reasoning_effort_override::prediction_fork_requests().await?;
+    insta::assert_snapshot!(context_snapshot::format_request_history_snapshot(
+        "A parent pins high request effort, then selects low. Its ephemeral prediction fork inherits the context and baseline, then selects medium on its first turn. Continuing the parent at medium produces the same request.",
+        &requests,
+        &ContextSnapshotOptions::default().include_request_settings(),
+    ));
     Ok(())
 }
 

@@ -99,6 +99,7 @@ use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
+use codex_protocol::sandbox::SandboxOverride;
 use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
 use codex_protocol::turn_input::TurnInputMode;
 use codex_protocol::turn_input::TurnInputRequest;
@@ -10065,8 +10066,8 @@ async fn capability_roots_require_turn_environment_selection() {
     );
 }
 
-#[tokio::test]
 #[tracing_test::traced_test]
+#[tokio::test]
 async fn conflicting_ready_environment_root_ids_keep_first_location() {
     let (session, turn_context) = make_session_and_context().await;
     let selected_root =
@@ -10177,6 +10178,7 @@ async fn capability_discovery_uses_environment_permission_profile() {
     environment_config.windows_sandbox_level = WindowsSandboxLevel::Elevated;
     environment_config.use_legacy_landlock = true;
     let expected_sandbox = FileSystemSandboxContext {
+        sandbox_override: SandboxOverride::NoOverride,
         permissions: environment.permission_profile().clone(),
         cwd: environment.cwd().clone(),
         workspace_roots: environment.workspace_roots().to_vec(),

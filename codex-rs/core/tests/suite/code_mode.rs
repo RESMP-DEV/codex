@@ -1653,11 +1653,10 @@ await new Promise(() => {});
                     .iter()
                     .all(|item| item["call_id"] != "call-1")
             );
-            assert!(
-                final_request.function_call_output("call-2")
-                    ["internal_chat_message_metadata_passthrough"]
-                    .get("tool_calls_complete")
-                    .is_none()
+            assert_eq!(
+                final_request.function_call_output("call-2")["internal_chat_message_metadata_passthrough"]
+                    ["tool_calls_complete"],
+                true
             );
         }
     }
@@ -3597,7 +3596,7 @@ async fn code_mode_complete_call_survives_unrelated_truncation() -> Result<()> {
                 .get("_codex_executed_tool_call_truncated")
                 .is_some()))
     );
-    assert!(overflow.get("tool_calls_complete").is_none());
+    assert_eq!(overflow["tool_calls_complete"], true);
 
     let complete =
         &request.custom_tool_call_output("call-2")["internal_chat_message_metadata_passthrough"];
@@ -3611,12 +3610,15 @@ async fn code_mode_complete_call_survives_unrelated_truncation() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[test_case(false, None; "control")]
-#[test_case(true, None; "ranked_search")]
-#[test_case(true, Some(30_000); "ranked_search_expanded_schema")]
+#[test_case(false, None, false; "control")]
+#[test_case(true, None, false; "ranked_search")]
+#[test_case(true, Some(30_000), false; "ranked_search_expanded_schema")]
+#[test_case(false, None, true; "tool_description_first")]
+#[test_case(true, None, true; "ranked_search_tool_description_first")]
 async fn code_mode_only_searches_and_calls_deferred_app_tools(
     ranked_search: bool,
     schema_max_bytes: Option<usize>,
+    tool_description_first: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -3675,6 +3677,7 @@ if (!tool) {
     hasDeclaration: tool.description.includes("mcp__codex_apps__calendar_timezone_option_99(args:"),
     hasSchemaDescription: tool.description.includes("schema_budget_marker"),
     hasNamespacePrefix: tool.description.startsWith("Calendar search context.\n\n"),
+    descriptionPrefix: tool.description.split("\n\nexec tool declaration:")[0],
     matchesCatalog: tool.description === ALL_TOOLS.find(({ name }) => name === tool.name)?.description,
     isError: Boolean(result.isError),
     text: result.content?.[0]?.text ?? "",
@@ -3735,6 +3738,13 @@ if (!tool) {
                 .enable(Feature::CodeModeOnly)
                 .expect("test config should allow feature update");
             config.code_mode.tool_input_schema_max_bytes = schema_max_bytes;
+            config
+                .features
+                .set_enabled(
+                    Feature::CodeModeToolDescriptionFirst,
+                    tool_description_first,
+                )
+                .expect("test config should allow description order update");
             if ranked_search {
                 config
                     .features
@@ -3822,6 +3832,11 @@ if (!tool) {
             "hasDeclaration": true,
             "hasSchemaDescription": schema_max_bytes.is_some(),
             "hasNamespacePrefix": true,
+            "descriptionPrefix": if tool_description_first {
+                "Calendar search context.\n\nRead timezone option 99.\n\nPlan events and manage your calendar."
+            } else {
+                "Calendar search context.\n\nPlan events and manage your calendar.\n\nRead timezone option 99."
+            },
             "matchesCatalog": true,
             "isError": false,
             "text": "called calendar_timezone_option_99 for  at  with ",
@@ -5999,7 +6014,6 @@ async fn code_mode_interrupt_terminates_active_cells_and_nested_tools() -> Resul
         .with_extensions(Arc::new(extensions.build()))
         .with_config(|config| {
             let _ = config.features.enable(Feature::CodeMode);
-            let _ = config.features.enable(Feature::CodeModeInterrupt);
             let _ = config.features.enable(Feature::ExecutedToolCallMetadata);
         });
     let test = builder.build_with_auto_env(&server).await?;
@@ -9149,7 +9163,7 @@ text(JSON.stringify({
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_oversized_websocket_yield_keeps_later_wait_incomplete() -> Result<()> {
+async fn code_mode_argument_truncation_preserves_later_wait_completeness() -> Result<()> {
     skip_if_no_network!(Ok(()));
     const LIMIT: usize = 15 * 1024 * 1024;
     const PROMPT: &str = "Record a call, yield, then stop";
@@ -9294,7 +9308,7 @@ await new Promise(() => {});
     let terminal = find_output(&terminal_request, "wait-a");
     assert_eq!(
         terminal["internal_chat_message_metadata_passthrough"].get("tool_calls_complete"),
-        None
+        Some(&Value::Bool(true))
     );
 
     // Compare ordinary outputs against the live session history. No actual

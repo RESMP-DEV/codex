@@ -137,6 +137,8 @@ pub enum Feature {
     CodeModePrewarm,
     /// Terminate active code mode cells when their turn is interrupted.
     CodeModeInterrupt,
+    /// Put each tool's description before its namespace description in Code Mode.
+    CodeModeToolDescriptionFirst,
     /// Restrict model-visible tools to code mode entrypoints (`exec`, `wait`).
     CodeModeOnly,
     /// Keep eligible MCP/app and dynamic tools deferred in exec, only in Code Mode Only.
@@ -1152,6 +1154,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::CodeModeInterrupt,
         key: "code_mode_interrupt",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::CodeModeToolDescriptionFirst,
+        key: "code_mode_tool_description_first",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1159,7 +1167,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::InstantInterrupt,
         key: "instant_interrupt",
         stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::CodeModeOnly,

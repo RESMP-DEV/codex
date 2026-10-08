@@ -36,6 +36,7 @@ use std::ops::ControlFlow;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
+const THREAD_LIST_MAX_EXCLUDED_IDS: usize = 100;
 const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.";
 const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
 
@@ -84,6 +85,7 @@ struct ThreadListFilters {
     search_term: Option<String>,
     use_state_db_only: bool,
     relation_filter: Option<StoreThreadRelationFilter>,
+    excluded_thread_ids: HashSet<ThreadId>,
 }
 
 // Persisted inputs that can change while loading configuration without the metadata permit.
@@ -2528,6 +2530,7 @@ impl ThreadRequestProcessor {
         let ThreadListParams {
             cursor,
             limit,
+            excluded_thread_ids,
             sort_key,
             sort_direction,
             model_providers,
@@ -2542,6 +2545,19 @@ impl ThreadRequestProcessor {
             parent_thread_id,
             ancestor_thread_id,
         } = params;
+        let excluded_thread_ids = excluded_thread_ids.unwrap_or_default();
+        if excluded_thread_ids.len() > THREAD_LIST_MAX_EXCLUDED_IDS {
+            return Err(invalid_params(format!(
+                "excludedThreadIds accepts at most {THREAD_LIST_MAX_EXCLUDED_IDS} entries"
+            )));
+        }
+        let excluded_thread_ids = excluded_thread_ids
+            .iter()
+            .map(|id| {
+                ThreadId::from_string(id)
+                    .map_err(|err| invalid_params(format!("invalid excluded thread id: {err}")))
+            })
+            .collect::<Result<HashSet<_>, _>>()?;
         if originators
             .as_ref()
             .is_some_and(|values| !values.is_empty())
@@ -2620,6 +2636,7 @@ impl ThreadRequestProcessor {
                     search_term,
                     use_state_db_only,
                     relation_filter,
+                    excluded_thread_ids,
                 },
             )
             .await?;
@@ -4873,8 +4890,34 @@ impl ThreadRequestProcessor {
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> Result<(), JSONRPCErrorError> {
+        let has_config_overrides = params.model.is_some()
+            || params.model_provider.is_some()
+            || params.service_tier.is_some()
+            || params.cwd.is_some()
+            || params.runtime_workspace_roots.is_some()
+            || params.approval_policy.is_some()
+            || params.approvals_reviewer.is_some()
+            || params.sandbox.is_some()
+            || params.permissions.is_some()
+            || params.base_instructions.is_some()
+            || params.developer_instructions.is_some()
+            || params
+                .config
+                .as_ref()
+                .is_some_and(|config| !config.is_empty());
+        if params.experimental_prediction_mode && has_config_overrides {
+            return Err(invalid_request(
+                "`experimentalPredictionMode` cannot be combined with configuration overrides",
+            ));
+        }
+        if params.experimental_prediction_mode && !params.ephemeral {
+            return Err(invalid_request(
+                "`experimentalPredictionMode` requires `ephemeral: true`",
+            ));
+        }
         let ThreadForkParams {
             thread_id,
+            experimental_prediction_mode,
             last_turn_id,
             before_turn_id,
             path,
@@ -4901,6 +4944,13 @@ impl ThreadRequestProcessor {
                 "`permissions` cannot be combined with `sandbox`",
             ));
         }
+        if experimental_prediction_mode
+            && (path.is_some() || last_turn_id.is_some() || before_turn_id.is_some())
+        {
+            return Err(invalid_request(
+                "`experimentalPredictionMode` requires a thread id without a path or turn cutoff",
+            ));
+        }
         let source_thread = self
             .read_stored_thread_for_resume(
                 &thread_id,
@@ -4908,6 +4958,31 @@ impl ThreadRequestProcessor {
                 /*include_history*/ false,
             )
             .await?;
+        let inherited_fork = if experimental_prediction_mode {
+            // Keep inherited state and its preparation off the fork handler's stack.
+            let (mut options, settings) = Box::pin(async {
+                self.thread_manager
+                    .fork_options_from_parent(source_thread.thread_id)
+                    .await
+                    .map(|(options, settings)| (Box::new(options), Box::new(settings)))
+            })
+            .await
+            .map_err(|err| match err.details() {
+                CodexErrorDetails::ThreadNotFound(_) => {
+                    invalid_request("`experimentalPredictionMode` requires a loaded parent")
+                }
+                _ => internal_error(format!("failed to inherit parent state: {err}")),
+            })?;
+            options.config.ephemeral = ephemeral;
+            options
+                .config
+                .features
+                .enable(Feature::ReasoningEffortOverride)
+                .map_err(|err| invalid_request(err.to_string()))?;
+            Some((options, settings))
+        } else {
+            None
+        };
         let paginated_source = matches!(source_thread.history_mode, ThreadHistoryMode::Paginated);
         if last_turn_id.is_some() && before_turn_id.is_some() {
             return Err(invalid_request(
@@ -4994,7 +5069,7 @@ impl ThreadRequestProcessor {
 
         // Persist Windows sandbox mode.
         let mut cli_overrides = cli_overrides.unwrap_or_default();
-        if cfg!(windows) {
+        if cfg!(windows) && !experimental_prediction_mode {
             let mode = self.config.permissions.windows_sandbox_mode.or_else(|| {
                 match WindowsSandboxLevel::from_config(&self.config) {
                     WindowsSandboxLevel::Elevated => Some(WindowsSandboxModeToml::Elevated),
@@ -5105,15 +5180,24 @@ impl ThreadRequestProcessor {
                     .map(|profile| profile.id);
             }
         }
-        // Derive a Config using the same logic as new conversation, honoring overrides if provided.
-        let config = self
-            .config_manager
-            .load_for_cwd(request_overrides, typesafe_overrides, history_cwd)
-            .await
-            .map_err(|err| config_load_error(&err))?;
-        let goals_enabled = config.features.enabled(Feature::Goals);
+        let (inherited_options, inherited_settings) = inherited_fork.unzip();
+        let options = if let Some(options) = inherited_options {
+            *options
+        } else {
+            // Derive a Config using the same logic as new conversation, honoring overrides if provided.
+            let config = self
+                .config_manager
+                .load_for_cwd(request_overrides, typesafe_overrides, history_cwd)
+                .await
+                .map_err(|err| config_load_error(&err))?;
+            StartThreadOptions {
+                client_mcp_extensions,
+                ..StartThreadOptions::new(config)
+            }
+        };
+        let goals_enabled = options.config.features.enabled(Feature::Goals);
 
-        let fallback_model_provider = config.model_provider_id.clone();
+        let fallback_model_provider = options.config.model_provider_id.clone();
         let parent_trace = self.request_trace_context(&request_id).await;
         let thread_source = thread_source.map(Into::into);
 
@@ -5169,7 +5253,7 @@ impl ThreadRequestProcessor {
             .then(|| restored_token_usage_turn_id(&history_items, ephemeral_turns.as_slice()));
         let token_usage_history_items = paginated_source.then(|| Arc::clone(&history_items));
         let inherited_project_id = source_thread.project_id.clone();
-        let reserved_thread_id = if config.ephemeral {
+        let reserved_thread_id = if options.config.ephemeral {
             None
         } else {
             stage_pending_thread_metadata(
@@ -5188,9 +5272,8 @@ impl ThreadRequestProcessor {
         let fork_options = StartThreadOptions {
             thread_source,
             parent_trace,
-            client_mcp_extensions,
             reserved_thread_id,
-            ..StartThreadOptions::new(config)
+            ..options
         };
         let new_thread = if let Some(prepared_fork) = prepared_fork {
             self.thread_manager
@@ -5229,6 +5312,13 @@ impl ThreadRequestProcessor {
                 });
             }
         };
+
+        if let Some(settings) = inherited_settings {
+            // Construct the restore future off the fork handler's stack
+            Box::pin(async { Box::pin(forked_thread.restore_thread_settings(*settings)).await })
+                .await
+                .map_err(|err| invalid_request(err.to_string()))?;
+        }
 
         Self::set_app_server_client_info(
             forked_thread.as_ref(),
@@ -5378,9 +5468,9 @@ impl ThreadRequestProcessor {
         let response = ThreadForkResponse {
             thread: thread.clone(),
             disabled_plugin_ids: config_snapshot.disabled_plugin_ids,
-            model: session_configured.model,
+            model: config_snapshot.model.clone(),
             model_provider: session_configured.model_provider_id,
-            service_tier: session_configured.service_tier,
+            service_tier: config_snapshot.service_tier.clone(),
             cwd: session_configured.cwd,
             runtime_workspace_roots: config_snapshot.workspace_roots,
             instruction_sources,
@@ -5388,7 +5478,7 @@ impl ThreadRequestProcessor {
             approvals_reviewer: session_configured.approvals_reviewer.into(),
             sandbox,
             active_permission_profile,
-            reasoning_effort: session_configured.reasoning_effort,
+            reasoning_effort: config_snapshot.reasoning_effort.clone(),
             multi_agent_mode: MultiAgentMode::ExplicitRequestOnly,
         };
 
@@ -5483,9 +5573,10 @@ impl ThreadRequestProcessor {
             search_term,
             use_state_db_only,
             relation_filter,
+            excluded_thread_ids,
         } = filters;
         let mut cursor_obj = cursor;
-        let mut last_cursor = cursor_obj.clone();
+        let mut seen_cursors: HashSet<String> = cursor_obj.iter().cloned().collect();
         let mut remaining = requested_page_size;
         let mut items = Vec::with_capacity(requested_page_size);
         let mut next_cursor: Option<String> = None;
@@ -5542,9 +5633,10 @@ impl ThreadRequestProcessor {
                     it.agent_nickname.clone(),
                     it.agent_role.clone(),
                 );
-                if source_kind_filter
-                    .as_ref()
-                    .is_none_or(|filter| source_kind_matches(&source, filter))
+                if !excluded_thread_ids.contains(&it.thread_id)
+                    && source_kind_filter
+                        .as_ref()
+                        .is_none_or(|filter| source_kind_matches(&source, filter))
                     && cwd_filters.as_ref().is_none_or(|expected_cwds| {
                         expected_cwds.iter().any(|expected_cwd| {
                             path_utils::paths_match_after_normalization(&it.cwd, expected_cwd)
@@ -5561,20 +5653,16 @@ impl ThreadRequestProcessor {
             remaining = requested_page_size.saturating_sub(items.len());
 
             next_cursor = page.next_cursor;
-            if remaining == 0 {
-                break;
-            }
-
             let Some(cursor_val) = next_cursor.clone() else {
                 break;
             };
-            // Break if our pagination would reuse the same cursor again; this avoids
-            // an infinite loop when filtering drops everything on the page.
-            if last_cursor.as_ref() == Some(&cursor_val) {
-                next_cursor = None;
+            // Check full pages too: returning a repeated cursor would loop on the next request.
+            if !seen_cursors.insert(cursor_val.clone()) {
+                return Err(internal_error("thread listing returned a repeated cursor"));
+            }
+            if remaining == 0 {
                 break;
             }
-            last_cursor = Some(cursor_val.clone());
             cursor_obj = Some(cursor_val);
         }
 

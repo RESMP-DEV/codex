@@ -544,6 +544,15 @@ impl From<ThreadTurnsListResponse> for TurnsPage {
 pub struct ThreadForkParams {
     pub thread_id: String,
 
+    /// Start from the loaded parent's effective config, tools, environments, and
+    /// persisted history to maximize prompt-cache reuse. Requires a loaded,
+    /// persisted parent and `ephemeral: true`. Enables `features.reasoning_effort_override`
+    /// on the fork. Cannot be combined with configuration overrides, `path`, `lastTurnId`,
+    /// or `beforeTurnId`.
+    #[experimental("thread/fork.experimentalPredictionMode")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub experimental_prediction_mode: bool,
+
     /// Optional last turn id to fork through, inclusive.
     ///
     /// When specified, turns after `last_turn_id` are omitted from the fork.
@@ -1398,6 +1407,11 @@ pub struct ThreadListParams {
     /// Optional page size; defaults to a reasonable server-side value.
     #[ts(optional = nullable)]
     pub limit: Option<u32>,
+    /// Thread IDs to exclude before applying the result limit. Up to 100
+    /// entries; invalid IDs or a larger list are rejected, never truncated.
+    /// Send the same exclusions on each page. Omitted, null, or empty means no exclusions.
+    #[ts(optional = nullable)]
+    pub excluded_thread_ids: Option<Vec<String>>,
     /// Optional sort key; defaults to created_at.
     #[ts(optional = nullable)]
     pub sort_key: Option<ThreadSortKey>,

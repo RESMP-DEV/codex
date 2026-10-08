@@ -80,6 +80,7 @@ mod cyber_exec_policy;
 mod daybreak_access;
 mod deprecation_notice;
 mod direct_tool_metadata;
+mod dynamic_tool_cancellation;
 mod exec;
 mod exec_policy;
 #[cfg(not(target_os = "windows"))]
@@ -222,6 +223,7 @@ mod token_usage_rollout;
 mod tool_harness;
 mod tool_lifecycle;
 mod tool_parallelism;
+mod tool_registration_metrics;
 mod tools;
 mod truncation;
 #[path = "turn_error_details_tests.rs"]
@@ -250,8 +252,6 @@ mod web_search;
 mod web_search_system_proxy;
 mod websocket_fallback;
 mod window_headers;
-#[cfg(target_os = "windows")]
-mod windows_sandbox;
 mod workspace_roots;
 mod worktree_trust;
 

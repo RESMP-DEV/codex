@@ -1937,6 +1937,8 @@ server_notification_definitions! {
     Error => "error" (v2::ErrorNotification),
     ThreadStarted => "thread/started" (v2::ThreadStartedNotification),
     ThreadStatusChanged => "thread/status/changed" (v2::ThreadStatusChangedNotification),
+    #[experimental("thread/readState/changed")]
+    ThreadReadStateChanged => "thread/readState/changed" (v2::ThreadReadStateChangedNotification),
     ThreadArchived => "thread/archived" (v2::ThreadArchivedNotification),
     ThreadDeleted => "thread/deleted" (v2::ThreadDeletedNotification),
     ThreadUnarchived => "thread/unarchived" (v2::ThreadUnarchivedNotification),
@@ -2590,6 +2592,7 @@ mod tests {
             params: v2::EnvironmentAddParams {
                 skills: None,
                 auth_bearer_token: None,
+                websocket_request_id: None,
                 environment_id: "remote-a".to_string(),
                 exec_server_url: "ws://127.0.0.1:8765".to_string(),
                 connect_timeout_ms: None,
@@ -3845,6 +3848,7 @@ mod tests {
             params: v2::EnvironmentAddParams {
                 skills: None,
                 auth_bearer_token: Some("private-executor-token".into()),
+                websocket_request_id: Some("caller-sample-id".to_string()),
                 environment_id: "remote-a".to_string(),
                 exec_server_url: "ws://127.0.0.1:8765".to_string(),
                 connect_timeout_ms: Some(300_000),
@@ -3860,6 +3864,7 @@ mod tests {
                     "execServerUrl": "ws://127.0.0.1:8765",
                     "connectTimeoutMs": 300000,
                     "authBearerToken": "private-executor-token",
+                    "websocketRequestId": "caller-sample-id",
                     "skills": null
                 }
             }),
@@ -4387,6 +4392,7 @@ mod tests {
             params: v2::EnvironmentAddParams {
                 skills: None,
                 auth_bearer_token: None,
+                websocket_request_id: None,
                 environment_id: "remote-a".to_string(),
                 exec_server_url: "ws://127.0.0.1:8765".to_string(),
                 connect_timeout_ms: None,

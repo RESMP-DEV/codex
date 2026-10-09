@@ -1693,7 +1693,6 @@ impl ThreadRequestProcessor {
                 .map(codex_app_server_protocol::ApprovalsReviewer::to_core),
             sandbox_mode: sandbox.map(SandboxMode::to_core),
             codex_linux_sandbox_exe: self.arg0_paths.codex_linux_sandbox_exe.clone(),
-            main_execve_wrapper_exe: self.arg0_paths.main_execve_wrapper_exe.clone(),
             base_instructions,
             developer_instructions,
             personality,
@@ -2219,6 +2218,53 @@ impl ThreadRequestProcessor {
             thread_state.lock().await.take_shutdown_drain_waiter();
             return Err(err);
         }
+        // The listener is drained: even an interrupted turn is durable now. Inspect only the
+        // suffix being reverted and remember the revision, not a collection of turn IDs.
+        let receipt_to_retire = async {
+            let Some(db) = self.state_db.as_ref() else {
+                return anyhow::Ok(None);
+            };
+            let Some(state) = db
+                .thread_read_states(&[thread_id])
+                .await?
+                .remove(&thread_id)
+            else {
+                return Ok(None);
+            };
+            let Some(turn_id) = state.first_unread_turn.as_ref().filter(|id| !id.is_empty()) else {
+                return Ok(None);
+            };
+            let mut cursor = None;
+            loop {
+                let page = self
+                    .thread_store
+                    .list_turns(codex_thread_store::ListTurnsParams {
+                        thread_id,
+                        include_archived: false,
+                        cursor: cursor.clone(),
+                        page_size: THREAD_TURNS_MAX_LIMIT,
+                        sort_direction: codex_thread_store::SortDirection::Desc,
+                        items_view: codex_thread_store::StoredTurnItemsView::NotLoaded,
+                    })
+                    .await?;
+                for turn in page.turns {
+                    if turn.turn_id == *turn_id {
+                        return Ok(Some(state.revision));
+                    }
+                    if turn.turn_id == before_turn_id {
+                        return Ok(None);
+                    }
+                }
+                let Some(next) = page.next_cursor else {
+                    return Ok(None);
+                };
+                if cursor.as_ref() == Some(&next) {
+                    anyhow::bail!("thread/revert turn cursor did not advance");
+                }
+                cursor = Some(next);
+            }
+        }
+        .await;
         if self
             .thread_manager
             .remove_thread(&thread_id)
@@ -2244,6 +2290,39 @@ impl ThreadRequestProcessor {
             })
             .await
             .map_err(|err| thread_store_mutation_error("revert", err));
+        // Receipt lookup or update errors cannot prevent reload or misreport a committed revert.
+        // A concurrent mark wins over this cleanup, even while the thread was being truncated.
+        if revert_result.is_ok()
+            && let Some(db) = self.state_db.as_ref()
+        {
+            let retirement = match receipt_to_retire {
+                Ok(Some(revision)) => db
+                    .update_thread_read_state(
+                        thread_id,
+                        &revision,
+                        codex_state::ReadStateOperation::Read,
+                    )
+                    .await
+                    .map(|update| matches!(update, codex_state::ReadStateUpdate::Applied(_))),
+                Ok(None) => Ok(false),
+                Err(err) => Err(err),
+            };
+            match retirement {
+                Ok(true) => {
+                    super::thread_read_state::notify(
+                        db,
+                        &self.thread_state_manager,
+                        &self.outgoing,
+                        thread_id,
+                    )
+                    .await;
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!("reverted history but could not update unread position: {err}")
+                }
+            }
+        }
         let response = self
             .reload_paginated_thread(
                 request_id,
@@ -2663,8 +2742,10 @@ impl ThreadRequestProcessor {
             |thread| thread,
         )
         .await;
+        let read_states = super::thread_read_state::snapshots(self.state_db.as_ref(), &data).await;
         Ok(ThreadListResponse {
             data,
+            read_states,
             next_cursor,
             backwards_cursor,
         })
@@ -2855,7 +2936,13 @@ impl ThreadRequestProcessor {
             .read_thread_view(thread_uuid, include_turns)
             .await
             .map_err(thread_read_view_error)?;
-        Ok(ThreadReadResponse { thread })
+        let read_state = super::thread_read_state::snapshots(
+            self.state_db.as_ref(),
+            std::slice::from_ref(&thread),
+        )
+        .await
+        .and_then(|mut states| states.remove(&thread.id));
+        Ok(ThreadReadResponse { thread, read_state })
     }
 
     /// Builds the API view for `thread/read` from persisted metadata plus optional live state.

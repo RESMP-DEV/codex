@@ -196,7 +196,6 @@ fn manager_sanitizes_model_metadata_tags() -> Result<()> {
         "tty".to_string(),
         SessionSource::Cli,
     )
-    .with_model("zai,glm-5.3", "zai,glm-5.3")
     .with_metrics(metrics);
 
     manager.counter("codex.status_line", /*inc*/ 1, &[]);

@@ -1461,29 +1461,5 @@ fn f64_ms_value(value: Option<&serde_json::Value>) -> Option<f64> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::SessionTelemetry;
-    use codex_protocol::ThreadId;
-    use codex_protocol::protocol::SessionSource;
-    use pretty_assertions::assert_eq;
-
-    #[test]
-    fn raw_model_is_retained_and_metric_model_is_sanitized() {
-        let telemetry = SessionTelemetry::new(
-            ThreadId::new(),
-            "zai,glm-5.3",
-            "zai,glm-5.3",
-            /*account_id*/ None,
-            /*account_email*/ None,
-            /*auth_mode*/ None,
-            "test_originator".to_string(),
-            /*log_user_prompts*/ false,
-            "tty".to_string(),
-            SessionSource::Cli,
-        )
-        .with_model("zai,glm-5.3", "zai,glm-5.3");
-
-        assert_eq!(telemetry.metadata.model, "zai,glm-5.3");
-        assert_eq!(telemetry.metric_model, "zai_glm-5.3");
-    }
-}
+#[path = "session_telemetry_tests.rs"]
+mod tests;

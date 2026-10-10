@@ -196,6 +196,8 @@ fn rollout_response_item(item: ResponseItem) -> RolloutItem {
 
 fn user_message(text: &str) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
@@ -208,9 +210,13 @@ fn user_message(text: &str) -> ResponseItem {
 
 fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
     ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::OutputText {
+            annotations: None,
+            logprobs: None,
             text: text.to_string(),
         }],
         phase,
@@ -237,6 +243,8 @@ fn register_session_root_skips_threads_with_explicit_parent() {
 
 fn spawn_agent_call(call_id: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
+        status: None,
+        encrypted_content: None,
         id: None,
         name: "spawn_agent".to_string(),
         namespace: None,
@@ -354,7 +362,7 @@ fn has_subagent_notification<'a>(
             return false;
         }
         content.iter().any(|content_item| match content_item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                 SubagentNotification::matches_text(text)
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
@@ -372,7 +380,7 @@ fn history_contains_text<'a>(
             return false;
         };
         content.iter().any(|content_item| match content_item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
                 text.contains(needle)
             }
             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
@@ -415,7 +423,7 @@ fn history_contains_assistant_inter_agent_communication<'a>(
             return false;
         }
         content.iter().any(|content_item| match content_item {
-            ContentItem::OutputText { text } => {
+            ContentItem::OutputText { text, .. } => {
                 serde_json::from_str::<InterAgentCommunication>(text)
                     .ok()
                     .as_ref()
@@ -2307,6 +2315,8 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix(
         .session
         .persist_rollout_items(&[
             rollout_response_item(ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
@@ -2816,6 +2826,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             turn_context.as_ref(), turn_context.model_info(),
             &[
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2825,6 +2837,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![ContentItem::InputText {
@@ -2834,6 +2848,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                     internal_chat_message_metadata_passthrough: None,
                 },
                 ResponseItem::Message {
+                    status: None,
+                    encrypted_content: None,
                     id: None,
                     role: "developer".to_string(),
                     content: vec![
@@ -2987,6 +3003,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .cloned()
         .expect("parent final answer should be recorded");
     let mut expected_developer_message = ResponseItem::Message {
+        status: None,
+        encrypted_content: None,
         id: None,
         role: "developer".to_string(),
         content: vec![
@@ -3188,12 +3206,16 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
         role: "developer".to_string(),
         tools: vec![serde_json::json!({"type": "function", "name": "compacted_tool"})],
     };
-    let tools_update = ContextualUserFragment::into(IncrementalToolsHint);
+    let tools_update = ContextualUserFragment::into(IncrementalToolsHint(
+        codex_prompts::ResolvedIncrementalToolMessages::default().tool_update_hint,
+    ));
     let replacement_history = vec![
         tools_update.clone(),
         tool_declarations.clone(),
         ContextualUserFragment::into(crate::context::GuardianApprovedAction::new("parent-private-release".to_owned())),
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -3205,6 +3227,8 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
         ContextualUserFragment::into(catalog_role("Catalog parent root guidance.")),
         parent_task.to_model_input_item(),
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
@@ -3219,6 +3243,8 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
             ),
         },
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "developer".to_string(),
             content: vec![
@@ -3449,6 +3475,8 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
     let parent_spawn_call_id = "spawn-call-compacted-stale-instructions".to_string();
     let replacement_history = vec![
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -3458,6 +3486,8 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
@@ -3481,6 +3511,8 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
         .session
         .persist_rollout_items(&[
             rollout_response_item(ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
@@ -3634,6 +3666,8 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             None => "spawn-call-legacy-compact-without-parent",
         };
         let parent_user_message = ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
@@ -3681,6 +3715,8 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
         ];
         if let Some(instructions) = parent_developer_instructions {
             rollout_items.push(rollout_response_item(ResponseItem::Message {
+                status: None,
+                encrypted_content: None,
                 id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
@@ -3691,6 +3727,8 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             }));
         }
         rollout_items.push(rollout_response_item(ResponseItem::Message {
+            status: None,
+            encrypted_content: None,
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
@@ -3700,7 +3738,9 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
             internal_chat_message_metadata_passthrough: None,
         }));
         rollout_items.push(rollout_response_item(ContextualUserFragment::into(
-            IncrementalToolsHint,
+            IncrementalToolsHint(
+                codex_prompts::ResolvedIncrementalToolMessages::default().tool_update_hint,
+            ),
         )));
         rollout_items.push(rollout_response_item(ResponseItem::AdditionalTools {
             id: None,

@@ -191,6 +191,7 @@ impl App {
                 self.chat_widget.restore_user_message_to_composer(message);
             }
             if let Some(owner) = self.background_voice.as_mut() {
+                owner.record_realtime_disconnect_failure();
                 owner.reset_realtime_conversation();
             }
             self.retire_background_voice();
@@ -228,6 +229,11 @@ impl App {
                 .chat_widget
                 .selected_index_for_active_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
                 .is_some()
+                || (self.current_displayed_thread_id().is_none()
+                    && self
+                        .chat_widget
+                        .selected_index_for_present_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
+                        .is_some())
             {
                 if let Ok(mut state) = self.agents_overview.view_state.lock() {
                     state.connection_notice = Some("Reconnecting — agent list is stale");

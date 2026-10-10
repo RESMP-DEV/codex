@@ -357,6 +357,7 @@ mod realtime_settings;
 mod realtime_split_flap;
 pub(crate) use realtime::MAX_REPLAY_TRANSCRIPT_CELLS;
 pub(crate) use realtime::MAX_TRANSCRIPT_BYTES;
+pub(crate) use realtime::RealtimeFailureCause;
 pub(crate) use realtime::RealtimeTranscriptRecord;
 pub(crate) use realtime::is_private_realtime_agent_item;
 pub(crate) use realtime::realtime_delegation_display_text;
@@ -1182,16 +1183,16 @@ impl ChatWidget {
         }
         self.refresh_status_line_if_workspace_headline_due();
         self.refresh_thread_usage_if_settlement_due();
-        self.refresh_iterm_session_status();
+        self.refresh_terminal_program_status();
     }
 
-    pub(crate) fn refresh_iterm_session_status(&self) {
-        let status = self.desired_iterm_session_status();
-        if let Err(err) = crate::iterm_session_status::set_iterm_session_status(
+    pub(crate) fn refresh_terminal_program_status(&self) {
+        let status = self.desired_program_status();
+        if let Err(err) = crate::terminal_program_status::set_terminal_program_status(
             status,
             self.iterm_session_detail(status),
         ) {
-            tracing::debug!(error = %err, "failed to set iTerm2 session status");
+            tracing::debug!(error = %err, "failed to set terminal program status");
         }
     }
 

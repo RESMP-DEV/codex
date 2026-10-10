@@ -133,6 +133,8 @@ pub enum Feature {
     CodeModeBufferedExec,
     /// Run JavaScript code mode in the standalone host process.
     CodeModeHost,
+    /// Use gRPC over stdio for the process-owned code-mode host.
+    CodeModeHostGrpc,
     /// Establish the code-mode host connection during session startup.
     CodeModePrewarm,
     /// Terminate active code mode cells when their turn is interrupted.
@@ -225,6 +227,8 @@ pub enum Feature {
     ModelCatalogInContext,
     /// Inherit client-defined dynamic tools in fresh V2 subagents.
     MultiAgentV2DynamicTools,
+    /// Use each subagent model's default context window and auto-compaction threshold.
+    SubagentDefaultContextLimits,
     /// Keep sampling through reasoning and commentary boundaries when agent mail arrives.
     /// Pending mail is delivered at the next normal input boundary instead.
     DeferMailboxPreemption,
@@ -340,6 +344,8 @@ pub enum Feature {
     ItemIds,
     /// Request sequential cutoff reasoning summary delivery.
     ConcurrentReasoningSummaries,
+    /// Request encrypted sampled output for token-preserving replay.
+    OutputTokenReplay,
     /// Allow prompting and installing missing MCP dependencies.
     SkillMcpDependencyInstall,
     /// Run cheap skill-search methods in shadow mode and emit experiment metrics.
@@ -1161,6 +1167,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::CodeModeHostGrpc,
+        key: "code_mode_host_grpc",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::CodeModePrewarm,
         key: "code_mode_prewarm",
         stage: Stage::UnderDevelopment,
@@ -1465,6 +1477,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
+        id: Feature::SubagentDefaultContextLimits,
+        key: "subagent_default_context_limits",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::DeferMailboxPreemption,
         key: "defer_mailbox_preemption",
         stage: Stage::UnderDevelopment,
@@ -1731,6 +1749,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ConcurrentReasoningSummaries,
         key: "concurrent_reasoning_summaries",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::OutputTokenReplay,
+        key: "output_token_replay",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

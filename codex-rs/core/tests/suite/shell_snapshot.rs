@@ -299,13 +299,17 @@ async fn run_tool_turn_on_harness(
         _ => None,
     })
     .await;
-    let end = wait_for_event_match(&codex, |ev| match ev {
-        EventMsg::ExecCommandEnd(ev) if ev.call_id == call_id => Some(ev.clone()),
-        _ => None,
-    })
-    .await;
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
-    Ok(end)
+    let mut end = None;
+    let mut turn_completed = false;
+    // The tool can return before its background watcher emits command-end.
+    while end.is_none() || !turn_completed {
+        match wait_for_event(&codex, |_| true).await {
+            EventMsg::ExecCommandEnd(ev) if ev.call_id == call_id => end = Some(ev),
+            EventMsg::TurnComplete(_) => turn_completed = true,
+            _ => {}
+        }
+    }
+    Ok(end.expect("command-end should have arrived before completing the wait"))
 }
 
 fn normalize_newlines(text: &str) -> String {
@@ -378,6 +382,64 @@ async fn run_no_shell_turn(harness: &TestCodexHarness) -> Result<()> {
     })
     .await;
     response.single_request();
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_snapshot_v2_returns_before_inherited_output_closes() -> Result<()> {
+    use std::io::Write;
+
+    skip_if_remote!(Ok(()), "tests the local executor's inherited output pipes");
+    let profile_home = tempfile::tempdir()?;
+    let gate_path = profile_home.path().join("output-gate");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&gate_path)
+        .status()?;
+    anyhow::ensure!(status.success(), "failed to create output gate");
+    let mut gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&gate_path)?;
+    let harness = TestCodexHarness::with_auto_env_builder(shell_snapshot_v2_prewarm_builder(
+        profile_home.path(),
+    ))
+    .await?;
+
+    // The foreground shell exits, but its descendant retains stdout until we release the FIFO.
+    // Wait for the public command-end and turn-complete notifications, not polled process state.
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_tool_turn_on_harness(
+            &harness,
+            "run a command whose descendant retains stdout",
+            "inherited-output",
+            "exec_command",
+            json!({
+                "cmd": "(read -r release < \"$HOME/output-gate\") & printf 'foreground output'; exit 7",
+                "yield_time_ms": 30_000,
+                "tty": false,
+            }),
+        ),
+    )
+    .await;
+
+    // Release the descendant even when completion timed out on the broken path.
+    gate.write_all(b"release\n")?;
+    harness.test().codex.shutdown_and_wait().await?;
+    let end =
+        result.expect("tool response should complete before the inherited pipe is released")?;
+    assert_eq!(
+        (end.exit_code, end.aggregated_output),
+        (7, "foreground output".to_string()),
+    );
+    let output = harness.function_call_stdout("inherited-output").await;
+    assert!(output.contains("Process exited with code 7"), "{output}");
+    assert!(
+        !output.contains("Process running with session ID"),
+        "{output}"
+    );
+    assert!(output.ends_with("foreground output"), "{output}");
     Ok(())
 }
 

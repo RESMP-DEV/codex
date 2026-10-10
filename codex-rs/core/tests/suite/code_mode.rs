@@ -77,6 +77,8 @@ use core_test_support::apps_test_server::DIRECT_CALENDAR_APP_ONLY_TOOL;
 use core_test_support::apps_test_server::recorded_apps_tool_calls;
 use core_test_support::apps_test_server::search_capable_apps_builder;
 use core_test_support::assert_regex_match;
+#[cfg(unix)]
+use core_test_support::code_mode_host::CodeModeHostRecorder;
 use core_test_support::responses;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ResponsesRequest;
@@ -3958,23 +3960,34 @@ text(JSON.stringify({{
 }
 
 #[cfg_attr(windows, ignore = "no exec_command on Windows")]
+#[test_case(false; "legacy_stdio")]
+#[test_case(true; "grpc_stdio")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_only_can_call_nested_tools() -> Result<()> {
+async fn code_mode_only_can_call_nested_tools(grpc_stdio: bool) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
+    #[cfg(unix)]
+    let recorder = CodeModeHostRecorder::new()?;
     let server = responses::start_mock_server().await;
+    let command = match core_test_support::test_target_os() {
+        core_test_support::TestTargetOs::Windows => {
+            "[Console]::Write('code_mode_only_nested_tool_marker')"
+        }
+        core_test_support::TestTargetOs::Linux | core_test_support::TestTargetOs::MacOs => {
+            "printf code_mode_only_nested_tool_marker"
+        }
+    };
+    let source = format!(
+        r#"
+const output = await tools.exec_command({{ cmd: {command:?} }});
+text(output.output);
+"#,
+    );
     responses::mount_sse_once(
         &server,
         sse(vec![
             ev_response_created("resp-1"),
-            ev_custom_tool_call(
-                "call-1",
-                "exec",
-                r#"
-const output = await tools.exec_command({ cmd: "printf code_mode_only_nested_tool_marker" });
-text(output.output);
-"#,
-            ),
+            ev_custom_tool_call("call-1", "exec", &source),
             ev_completed("resp-1"),
         ]),
     )
@@ -3988,10 +4001,17 @@ text(output.output);
     )
     .await;
 
-    let mut builder = test_codex().with_config(|config| {
+    let mut builder = test_codex().with_config(move |config| {
         let _ = config.features.enable(Feature::CodeModeOnly);
+        if grpc_stdio {
+            let _ = config.features.enable(Feature::CodeModeHostGrpc);
+        }
     });
-    let test = builder.build(&server).await?;
+    #[cfg(unix)]
+    {
+        builder = builder.with_code_mode_host_program(recorder.program());
+    }
+    let test = builder.build_with_auto_env(&server).await?;
     test.submit_turn("use exec to run nested tool in code mode only")
         .await?;
 
@@ -4003,6 +4023,16 @@ text(output.output);
         "code_mode_only nested tool call failed unexpectedly: {output}"
     );
     assert_eq!(output, "code_mode_only_nested_tool_marker");
+    #[cfg(unix)]
+    assert_eq!(
+        recorder.invocations()?,
+        vec![if grpc_stdio {
+            "--listen grpc+stdio://".to_string()
+        } else {
+            String::new()
+        }],
+        "the feature flag must select the expected host transport"
+    );
     assert!(
         request
             .custom_tool_call_output("call-1")
@@ -9075,14 +9105,18 @@ structuredContent=null"
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn code_mode_can_store_and_load_values_across_turns() -> Result<()> {
+async fn code_mode_can_store_and_load_values_across_turns_after_rejection() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    let mut builder = test_codex().with_config(move |config| {
-        let _ = config.features.enable(Feature::CodeMode);
-    });
-    let test = builder.build(&server).await?;
+    let mut builder = test_codex()
+        .with_code_mode_host_program(codex_utils_cargo_bin::cargo_bin("codex-code-mode-host")?)
+        .with_config(|config| {
+            let _ = config.features.enable(Feature::CodeMode);
+            let _ = config.features.enable(Feature::CodeModeHost);
+            config.code_mode.disable_in_process_fallback = true;
+        });
+    let test = builder.build_with_auto_env(&server).await?;
 
     responses::mount_sse_once(
         &server,
@@ -9120,6 +9154,43 @@ text("stored");
         "exec store call failed unexpectedly: {first_output}"
     );
     assert_eq!(first_output, "stored");
+
+    let rejection = responses::mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-rejected"),
+                ev_custom_tool_call(
+                    "call-rejected",
+                    "exec",
+                    r#"
+// Each RawValue resets the parser's depth counter; the decoded arrays reach depth 400.
+let encoded = "0";
+for (let i = 0; i < 5; i++) {
+    encoded = JSON.stringify({
+        "$serde_json::private::RawValue": "[".repeat(80) + encoded + "]".repeat(80),
+    });
+}
+store("nb", JSON.parse(encoded));
+"#,
+                ),
+                ev_completed("resp-rejected"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-rejected", "rejected"),
+                ev_completed("resp-rejected-complete"),
+            ]),
+        ],
+    )
+    .await;
+    test.submit_turn("attempt to overwrite the stored value with a private Serde marker")
+        .await?;
+    let (rejected_output, _) =
+        custom_tool_output_body_and_success(&rejection.requests()[1], "call-rejected");
+    assert_eq!(
+        rejected_output,
+        "Script error:\nfailed to serialize JavaScript value: reserved JSON object key",
+    );
 
     responses::mount_sse_once(
         &server,

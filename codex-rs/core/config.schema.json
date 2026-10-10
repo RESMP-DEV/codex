@@ -803,6 +803,9 @@
             "code_mode_host": {
               "$ref": "#/definitions/FeatureToml_for_CodeModeHostConfigToml"
             },
+            "code_mode_host_grpc": {
+              "type": "boolean"
+            },
             "code_mode_interrupt": {
               "type": "boolean"
             },
@@ -1049,6 +1052,9 @@
             "omit_app_server_notification_media": {
               "type": "boolean"
             },
+            "output_token_replay": {
+              "type": "boolean"
+            },
             "personality": {
               "type": "boolean"
             },
@@ -1176,6 +1182,9 @@
               "type": "boolean"
             },
             "step_model_switching": {
+              "type": "boolean"
+            },
+            "subagent_default_context_limits": {
               "type": "boolean"
             },
             "system_proxy_fallback": {
@@ -7097,6 +7106,9 @@
         "code_mode_host": {
           "$ref": "#/definitions/FeatureToml_for_CodeModeHostConfigToml"
         },
+        "code_mode_host_grpc": {
+          "type": "boolean"
+        },
         "code_mode_interrupt": {
           "type": "boolean"
         },
@@ -7343,6 +7355,9 @@
         "omit_app_server_notification_media": {
           "type": "boolean"
         },
+        "output_token_replay": {
+          "type": "boolean"
+        },
         "personality": {
           "type": "boolean"
         },
@@ -7470,6 +7485,9 @@
           "type": "boolean"
         },
         "step_model_switching": {
+          "type": "boolean"
+        },
+        "subagent_default_context_limits": {
           "type": "boolean"
         },
         "system_proxy_fallback": {

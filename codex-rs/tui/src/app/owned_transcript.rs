@@ -48,6 +48,8 @@ impl App {
         view.copy_on_select = self
             .local_settings
             .copy_on_select(&codex_terminal_detection::terminal_info());
+        view.copy_on_select_clear_selection =
+            self.local_settings.tui.copy_on_select_clear_selection;
         view.set_keymap_bindings(&self.keymap);
         view.set_presentation(view.is_detailed(), chat_widget.history_render_mode());
         let active_key = chat_widget.active_cell_transcript_key();
@@ -441,7 +443,32 @@ impl App {
                 return Ok(false);
             }
         }
-        if matches!(event, TuiEvent::Key(key) if key.kind != KeyEventKind::Release) {
+        // Raw pastes can arrive as thousands of Char/Enter/Tab events. Honor the composer's
+        // paste batching instead of rendering the entire screen before each buffered key.
+        // Keys owned by the transcript and non-text keys still need fresh geometry immediately.
+        if let TuiEvent::Key(key) = event
+            && key.kind != KeyEventKind::Release
+            && (!self.chat_widget.is_in_paste_burst()
+                || self.transcript_view.is_search_editing()
+                || self.transcript_view.is_activity_focused()
+                || self.transcript_view.owns_interaction_key(*key)
+                || self.backtrack.overlay_preview_active
+                || self.keymap.app.focus_activity.is_pressed(*key)
+                || self.keymap.app.find_transcript.is_pressed(*key)
+                || match key.code {
+                    KeyCode::Char(_) => {
+                        crate::key_hint::has_ctrl_or_alt(key.modifiers)
+                            || key.modifiers.intersects(
+                                KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META,
+                            )
+                    }
+                    KeyCode::Enter => {
+                        !matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+                    }
+                    KeyCode::Tab => key.modifiers != KeyModifiers::NONE,
+                    _ => true,
+                })
+        {
             let size = tui.prepare_draw_size()?;
             self.render_owned_transcript(tui, size)?;
         }

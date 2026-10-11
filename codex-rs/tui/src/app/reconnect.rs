@@ -240,10 +240,15 @@ impl App {
                 }
                 ReconnectPresentation::Overview
             } else {
-                self.chat_widget.handle_restricted_key(
-                    KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),
-                    RestrictedInputMode::Disconnected,
-                );
+                if !self
+                    .chat_widget
+                    .active_view_accepts_input_when_disconnected()
+                {
+                    self.chat_widget.handle_restricted_key(
+                        KeyEvent::new(KeyCode::Null, KeyModifiers::NONE),
+                        RestrictedInputMode::Disconnected,
+                    );
+                }
                 ReconnectPresentation::Conversation
             };
             self.chat_widget.pause_for_disconnect();
@@ -264,6 +269,12 @@ impl App {
         connected: Reconnected,
         client_version: &str,
     ) -> Result<()> {
+        // Keep input paused while the disconnected view is replaced so its keys cannot reach the
+        // restored composer. The final drain below drops anything typed during the handoff.
+        let discard_replaced_view_input = self.chat_widget.cancel_active_disconnected_view();
+        if discard_replaced_view_input {
+            tui.pause_events();
+        }
         let Reconnected {
             mut session,
             bootstrap,
@@ -285,6 +296,8 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         self.app_event_tx = AppEventSender::new(tx);
         *app_event_rx = rx;
+        // The old timer targets the discarded channel, so a new preview can be scheduled.
+        self.config_notification_test_pending = None;
         {
             let mut state = self
                 .agents_overview
@@ -442,9 +455,16 @@ impl App {
             self.active_thread_id = Some(id);
             self.active_thread_rx = Some(receiver);
             self.recap.seed_from_turns(&snapshot.turns, Instant::now());
-            self.render_thread_snapshot(
+            if let Err(err) = self.render_thread_snapshot(
                 tui, app_server, id, snapshot, /*resume_restored_queue*/ false,
-            )?;
+            ) {
+                if discard_replaced_view_input
+                    && let Err(drain_err) = tui.discard_pending_input_before_interactive_screen()
+                {
+                    tracing::warn!(%drain_err, "failed to discard input after reconnecting");
+                }
+                return Err(err);
+            }
             self.config = self.chat_widget.config_ref().clone();
             self.refresh_pending_thread_approvals().await;
             if self.thread_unavailable(id) && !self.chat_widget.is_external_writer_view() {
@@ -481,6 +501,10 @@ impl App {
             let view = self.agents_overview_view(threads, selected);
             self.chat_widget.show_bottom_pane_view(Box::new(view));
             self.refresh_agents_overview_threads(app_server);
+            // The Overview survived request cleanup, but terminal typeahead may have survived too.
+            if self.startup_protected_input_boundary {
+                self.render_startup_frame(tui, app_event_rx)?;
+            }
         }
         #[cfg(any(target_os = "windows", test))]
         if interrupted_windows_setup {
@@ -540,6 +564,11 @@ impl App {
             if self.reconnect.presentation != ReconnectPresentation::Overview {
                 self.chat_widget.add_server_version_warning(notice);
             }
+        }
+        if discard_replaced_view_input
+            && let Err(err) = tui.discard_pending_input_before_interactive_screen()
+        {
+            tracing::warn!(%err, "failed to discard input after reconnecting");
         }
         Ok(())
     }

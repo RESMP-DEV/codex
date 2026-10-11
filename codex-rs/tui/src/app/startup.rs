@@ -174,8 +174,21 @@ impl App {
         self.chat_widget.pre_draw_tick();
         self.render_chat_widget_frame(tui, tui.terminal.last_known_screen_size)?;
         if self.chat_widget.has_active_modal() && self.startup_protected_input_boundary {
-            tui.discard_pending_input_before_interactive_screen()?;
-            self.startup_pending_protected_request = false;
+            self.discard_startup_modal_input(tui)?;
+        }
+        Ok(())
+    }
+
+    /// Keep a visible modal closed to input if the terminal has not settled yet. The next input
+    /// event retries the drain instead of acting on the modal; server events can continue meanwhile.
+    pub(super) fn discard_startup_modal_input(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        match tui.discard_pending_input_before_interactive_screen() {
+            Ok(()) => self.startup_pending_protected_request = false,
+            Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
+                self.startup_pending_protected_request = true;
+                tracing::warn!(%err, "keeping startup modal input quarantined");
+            }
+            Err(err) => return Err(err.into()),
         }
         Ok(())
     }
@@ -867,6 +880,8 @@ See the Codex keymap documentation for supported actions and examples."
             agents_overview::AgentsOverviewState::new(local_settings.tui.agents_overview_grouping);
         let mut app = Self {
             feature_write_lock: Arc::default(),
+            config_notification_test_generation: 0,
+            config_notification_test_pending: None,
             model_catalog,
             session_telemetry: session_telemetry.clone(),
             app_event_tx,
@@ -889,6 +904,7 @@ See the Codex keymap documentation for supported actions and examples."
             enhanced_keys_supported,
             keymap: runtime_keymap,
             key_chord_matcher: KeyChordMatcher::default(),
+            routed_key_activation: None,
             transcript_cells: Vec::new(),
             native_history: Default::default(),
             turn_tips: Default::default(),
@@ -980,6 +996,16 @@ See the Codex keymap documentation for supported actions and examples."
             #[cfg(test)]
             _test_codex_home: None,
         };
+        if tui.is_owned_screen()
+            && app.right_click_paste_environment.wsl
+            && app.right_click_paste_environment.allows(
+                app.local_settings.tui.right_click_paste,
+                app.local_settings.transcript_mode,
+            )
+        {
+            // Prewarm WSL interop off the UI thread, without accessing clipboard contents.
+            let _ = tui.clipboard.warm_text_reader(tui.frame_requester());
+        }
         app.remember_launch_permissions();
         if !tui.is_terminal_focused() {
             app.recap.note_focus_lost(Instant::now());

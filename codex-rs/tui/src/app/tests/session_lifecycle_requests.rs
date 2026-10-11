@@ -1,6 +1,7 @@
 use super::*;
 use crate::app_event::TranscriptExportDestination;
 use crate::bottom_pane::BottomPaneView;
+use crate::test_support::boxed_future;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_parented_rollout_with_source;
 use app_test_support::create_fake_rollout;
@@ -38,10 +39,25 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::Error as WebSocketError;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::error::ProtocolError;
 
 pub(super) type RecordedRequests = Arc<Mutex<Vec<JSONRPCRequest>>>;
 pub(super) type RecordingAppServer = (AppServerSession, RecordedRequests, JoinHandle<Result<()>>);
+
+fn is_recording_client_disconnect(error: &WebSocketError) -> bool {
+    match error {
+        WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => true,
+        WebSocketError::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+        ),
+        _ => false,
+    }
+}
 
 #[tokio::test]
 async fn daybreak_command_persists_and_confirms_each_selection() -> Result<()> {
@@ -494,20 +510,19 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                     if let codex_app_server_client::InProcessServerEvent::ServerNotification(notification) = event
                         && matches!(*notification, ServerNotification::ThreadSettingsUpdated(_))
                     {
-                        websocket.send(Message::Text(serde_json::to_string(&notification)?.into())).await?;
+                        let result = websocket.send(Message::Text(serde_json::to_string(&notification)?.into())).await;
+                        if result.as_ref().is_err_and(is_recording_client_disconnect) {
+                            break;
+                        }
+                        result?;
                     }
                     continue;
                 }
             };
             let Some(frame) = frame else { break };
-            // The client can close with an unread settings notification during shutdown.
-            match &frame {
-                Err(tokio_tungstenite::tungstenite::Error::Protocol(
-                    tokio_tungstenite::tungstenite::error::ProtocolError::ResetWithoutClosingHandshake,
-                )) => break,
-                Err(tokio_tungstenite::tungstenite::Error::Io(error))
-                    if matches!(error.kind(), std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset) => break,
-                _ => {}
+            // The client can close with requests or notifications pending during shutdown.
+            if frame.as_ref().is_err_and(is_recording_client_disconnect) {
+                break;
             }
             let Message::Text(text) = frame? else {
                 continue;
@@ -515,7 +530,7 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
             let message = serde_json::from_str::<JSONRPCMessage>(&text)?;
             match message {
                 JSONRPCMessage::Request(request) if request.method == "initialize" => {
-                    websocket
+                    let result = websocket
                         .send(Message::Text(
                             serde_json::to_string(&JSONRPCMessage::Response(JSONRPCResponse {
                                 id: request.id,
@@ -526,7 +541,11 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                             }))?
                             .into(),
                         ))
-                        .await?;
+                        .await;
+                    if result.as_ref().is_err_and(is_recording_client_disconnect) {
+                        break;
+                    }
+                    result?;
                 }
                 JSONRPCMessage::Request(request) => {
                     request_sink
@@ -802,9 +821,13 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                             }
                         }
                     };
-                    websocket
+                    let result = websocket
                         .send(Message::Text(serde_json::to_string(&response)?.into()))
-                        .await?;
+                        .await;
+                    if result.as_ref().is_err_and(is_recording_client_disconnect) {
+                        break;
+                    }
+                    result?;
                 }
                 JSONRPCMessage::Notification(notification)
                     if notification.method == "initialized" => {}
@@ -1338,6 +1361,12 @@ async fn archive_current_thread_returns_shared_servers_to_agents() -> Result<()>
 
 #[tokio::test]
 async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths() -> Result<()> {
+    boxed_future!(local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths_scenario())
+        .await
+}
+
+async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths_scenario()
+-> Result<()> {
     let (mut app, events, _ops) = Box::pin(make_test_app_with_channels()).await;
     // Invalid optional worktree settings must preserve both daemon start paths.
     app.config.features.enable(Feature::Worktrees)?;
@@ -1822,8 +1851,8 @@ async fn embedded_server_rejects_unowned_dynamic_tool_calls() -> Result<()> {
 
 #[tokio::test]
 async fn dynamic_tool_requests_ignore_other_namespaces_and_dispatch_tui_namespace() -> Result<()> {
-    check_dynamic_tool_requests(/*rollout_enabled*/ true).await?;
-    check_dynamic_tool_requests(/*rollout_enabled*/ false).await
+    boxed_future!(check_dynamic_tool_requests(/*rollout_enabled*/ true)).await?;
+    boxed_future!(check_dynamic_tool_requests(/*rollout_enabled*/ false)).await
 }
 
 async fn check_dynamic_tool_requests(rollout_enabled: bool) -> Result<()> {

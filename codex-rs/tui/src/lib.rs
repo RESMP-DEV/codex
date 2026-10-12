@@ -1158,6 +1158,7 @@ async fn run_ratatui_app(
     embedded_network_policy: codex_app_server_client::EmbeddedNetworkPolicy,
     managed_worktree: Option<ManagedTuiWorktree>,
     daemon_startup_warning: Option<String>,
+    managed_daemon: bool,
     launch_telemetry: daemon_telemetry::Launch<impl FnOnce(&AppServerTarget, bool)>,
     startup_draft: startup_draft::StartupDraft,
 ) -> color_eyre::Result<AppExitInfo> {
@@ -2110,6 +2111,7 @@ async fn run_ratatui_app(
         startup_bootstrap,
         startup_hooks_browser,
         daemon_startup_warning,
+        managed_daemon,
         startup_draft,
         managed_worktree,
         daemon_cli_executable,

@@ -257,6 +257,7 @@ pub(crate) enum CancellationEvent {
 use crate::bottom_pane::prompt_args::parse_slash_name;
 pub(crate) use chat_composer::ChatComposer;
 pub(crate) use chat_composer::ChatComposerConfig;
+pub(crate) use chat_composer::ClipboardPasteTarget;
 pub(crate) use chat_composer::ComposerDraftSnapshot;
 pub(crate) use chat_composer::InputResult;
 pub(crate) use chat_composer::QueuedInputAction;
@@ -1197,6 +1198,7 @@ impl BottomPane {
         self.composer.current_text()
     }
 
+    #[cfg(test)]
     pub(crate) fn composer_cursor(&self) -> usize {
         self.composer.current_cursor()
     }
@@ -1875,8 +1877,14 @@ impl BottomPane {
         self.composer.copy_selection(event, copy)
     }
 
-    pub(crate) fn can_paste_on_right_click(&self) -> bool {
-        self.no_modal_or_popup_active() && self.composer.can_paste_on_right_click()
+    pub(crate) fn clipboard_paste_target(
+        &self,
+        shortcut: Option<KeyCode>,
+    ) -> Option<ClipboardPasteTarget> {
+        if self.has_active_view() || (shortcut.is_none() && !self.no_modal_or_popup_active()) {
+            return None;
+        }
+        self.composer.clipboard_paste_target(shortcut)
     }
 
     pub(crate) fn prepare_composer_mouse(&mut self, event: crossterm::event::MouseEvent) -> bool {
@@ -2190,6 +2198,11 @@ impl BottomPane {
             flushed |= questions.flush_paste_burst_if_due();
         }
         flushed
+    }
+
+    /// Commit accepted typing before snapshotting the target of an asynchronous paste.
+    pub(crate) fn prepare_composer_clipboard_paste(&mut self) {
+        self.composer.flush_pending_paste_burst();
     }
 
     pub(crate) fn is_in_paste_burst(&self) -> bool {
@@ -3052,14 +3065,26 @@ mod tests {
         ] {
             let mut pane = test_pane(tx.clone());
             match source {
-                "warning open" => pane.show_warnings(Vec::new(), Default::default()),
+                "warning open" => pane.show_warnings(
+                    Vec::new(),
+                    Default::default(),
+                    /*daemon_restart_hint_at*/ None,
+                ),
                 "warning navigation" => {
-                    pane.show_warnings(Vec::new(), Default::default());
+                    pane.show_warnings(
+                        Vec::new(),
+                        Default::default(),
+                        /*daemon_restart_hint_at*/ None,
+                    );
                     pane.last_composer_activity_at = None;
                     pane.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
                 }
                 "warning paste" => {
-                    pane.show_warnings(Vec::new(), Default::default());
+                    pane.show_warnings(
+                        Vec::new(),
+                        Default::default(),
+                        /*daemon_restart_hint_at*/ None,
+                    );
                     pane.last_composer_activity_at = None;
                     pane.handle_paste("query".into());
                 }

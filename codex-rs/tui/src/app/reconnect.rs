@@ -338,11 +338,19 @@ impl App {
                 && app_server.app_server_platform_os() == Some("windows");
         self.chat_widget.windows_sandbox_host = WindowsSandboxHost::Unknown;
         self.chat_widget.requires_openai_auth = bootstrap.requires_openai_auth;
+        let managed_daemon = self
+            .chat_widget
+            .remote_connection
+            .as_ref()
+            .is_some_and(|connection| connection.is_managed_daemon);
         self.chat_widget.remote_connection =
             crate::status::remote_connection::remote_connection_status_value(
                 &self.app_server_target,
                 app_server.server_version(),
             );
+        if let Some(connection) = &mut self.chat_widget.remote_connection {
+            connection.is_managed_daemon = connection.is_local_daemon && managed_daemon;
+        }
         self.workspace_command_runner = Some(Arc::new(AppServerWorkspaceCommandRunner::new(
             app_server.request_handle(),
         )));

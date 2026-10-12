@@ -138,6 +138,10 @@ impl App {
             return Ok(AppRunControl::Continue);
         }
 
+        if matches!(event, AppEvent::OpenDaemonMenu | AppEvent::OpenWarnings) {
+            self.verify_managed_daemon().await;
+        }
+
         // Keep the picker check and model update in one event without recursively polling this
         // large dispatcher on the TUI thread's stack.
         let (event, sparkle_model) = match event {
@@ -155,6 +159,16 @@ impl App {
         };
         match event {
             AppEvent::OpenDaemonMenu => self.open_daemon_menu(),
+            AppEvent::ConfirmDaemonRestart => self.confirm_daemon_restart(),
+            AppEvent::RunDaemonRestart => {
+                if self.chat_widget.remote_connection.as_ref().is_some_and(|connection| connection.is_managed_daemon)
+                    && self.daemon_restart.is_none()
+                {
+                    self.daemon_restart = Some(tokio::spawn(codex_app_server_daemon::run(
+                        codex_app_server_daemon::LifecycleCommand::Restart,
+                    )));
+                }
+            }
             AppEvent::ConfirmDaemonUpdate(source) => self.confirm_daemon_update(source),
             AppEvent::RunDaemonUpdate(source) => {
                 self.pending_update_action = Some(UpdateAction::Daemon(source));

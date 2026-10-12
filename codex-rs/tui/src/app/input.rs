@@ -685,6 +685,7 @@ impl App {
         key_event: KeyEvent,
     ) -> bool {
         if self.keymap.app.open_warnings.is_pressed(key_event) {
+            self.verify_managed_daemon().await;
             self.chat_widget.open_warnings(&self.transcript_cells);
             return true;
         }

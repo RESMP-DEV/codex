@@ -304,6 +304,9 @@ pub struct StartThreadOptions {
     pub reserved_thread_id: Option<ThreadId>,
     /// Initial thread-owned plugin selection; omission restores persisted settings.
     pub disabled_plugin_ids: Option<Vec<String>>,
+    /// Unnamed permissions recovered from an owned rollout snapshot on resume.
+    /// The session applies these only if current managed requirements allow them.
+    pub persisted_permission_profile: Option<codex_protocol::models::PermissionProfile>,
 }
 
 impl StartThreadOptions {
@@ -328,6 +331,7 @@ impl StartThreadOptions {
             client_mcp_extensions: ClientMcpExtensions::default(),
             reserved_thread_id: None,
             disabled_plugin_ids: None,
+            persisted_permission_profile: None,
         }
     }
 }
@@ -2100,6 +2104,7 @@ impl ThreadManagerState {
             client_mcp_extensions,
             mut reserved_thread_id,
             disabled_plugin_ids,
+            persisted_permission_profile,
         } = options;
         let inherited_environments = captured_environments.or(inherited_environments);
         let session_source = session_source.unwrap_or_else(|| self.session_source.clone());
@@ -2320,6 +2325,7 @@ impl ThreadManagerState {
             conversation_history: initial_history,
             history_initialization,
             disabled_plugin_ids,
+            persisted_permission_profile,
             requested_history_mode: history_mode,
             fork_persistence,
             // Keep only the manager registration internal. The session and its saved

@@ -84,9 +84,15 @@ async fn pending_primary_paste_survives_release_but_not_other_input() {
         (MouseEventKind::ScrollDown, false),
     ] {
         app.pending_right_click_paste = Some(PendingPaste {
-            thread: None,
-            draft: (String::new(), 0),
+            target: (
+                None,
+                crate::bottom_pane::ClipboardPasteTarget::Draft(
+                    String::new(),
+                    crate::bottom_pane::TextArea::new().edit_target(),
+                ),
+            ),
             source: PasteSource::Primary,
+            shortcut: None,
             _request: Arc::new(()),
         });
         app.invalidate_right_click_paste(&TuiEvent::Mouse(MouseEvent {

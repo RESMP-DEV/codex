@@ -139,6 +139,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
+use test_case::test_case;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use uuid::Uuid;
@@ -805,7 +806,18 @@ async fn thread_resume_restores_startup_and_updated_runtime_workspace_roots() ->
 async fn cold_resume_workspace_roots_honor_owned_snapshot_and_caller_overrides() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri())
+        .with_sandbox_mode("workspace-write")
+        .with_extra_config(
+            r#"[sandbox_workspace_write]
+exclude_tmpdir_env_var = true
+exclude_slash_tmp = true
+
+[windows]
+sandbox = "unelevated"
+"#,
+        )
+        .write(codex_home.path())?;
     let saved_cwd = normalized_existing_path(codex_home.path())?.abs();
     let new_workspace = TempDir::new()?;
     let new_cwd = normalized_existing_path(new_workspace.path())?.abs();
@@ -829,13 +841,17 @@ async fn cold_resume_workspace_roots_honor_owned_snapshot_and_caller_overrides()
             "runtime_workspace_roots": [saved_cwd, new_cwd, extra_root],
             "approval_policy": "never",
             "approvals_reviewer": "user",
-            "permission_profile": PermissionProfile::read_only(),
+            "permission_profile": PermissionProfile::workspace_write()
+                .materialize_project_roots_with_workspace_roots(
+                    &[saved_cwd.clone(), new_cwd.clone(), extra_root.clone()]
+                ),
             "collaboration_mode": { "mode": "default", "settings": { "model": "gpt-5.4" } },
         },
     }))?;
     let mut foreign = owned.clone();
     foreign.thread_id = Some(ThreadId::new());
     foreign.thread_settings.runtime_workspace_roots = Some(vec![extra_root.clone()]);
+    foreign.thread_settings.permission_profile = PermissionProfile::Disabled;
     for settings in [owned, foreign] {
         append_rollout_item_to_path(
             &path,
@@ -843,7 +859,6 @@ async fn cold_resume_workspace_roots_honor_owned_snapshot_and_caller_overrides()
         )
         .await?;
     }
-
     // Every iteration is a cold resume; the final one must retain the preceding explicit clear.
     for (cwd_override, roots_override, expected_cwd, expected_roots) in [
         (
@@ -864,6 +879,7 @@ async fn cold_resume_workspace_roots_honor_owned_snapshot_and_caller_overrides()
         let mut mcp = TestAppServer::builder()
             .with_codex_home(codex_home.path())
             .without_auto_env()
+            .without_managed_config()
             .build_initialized()
             .await?;
         let resume_id = mcp
@@ -891,14 +907,25 @@ async fn cold_resume_workspace_roots_honor_owned_snapshot_and_caller_overrides()
                 Some((
                     event.thread_settings.cwd,
                     event.thread_settings.runtime_workspace_roots,
+                    event.thread_settings.permission_profile,
                 ))
             }
             _ => None,
         });
+        let (persisted_cwd, persisted_roots, permission_profile) =
+            persisted.expect("resumed thread settings");
         assert_eq!(
-            persisted,
-            Some((expected_cwd.clone(), Some(expected_roots)))
+            (persisted_cwd, persisted_roots),
+            (expected_cwd.clone(), Some(expected_roots.clone()))
         );
+        let file_system = permission_profile.file_system_sandbox_policy();
+        for root in [&saved_cwd, &new_cwd, &extra_root] {
+            assert_eq!(
+                file_system.can_write_local_path_with_cwd(root.as_path(), expected_cwd.as_path()),
+                expected_roots.contains(root),
+                "resumed write permission at {root:?}"
+            );
+        }
         timeout(DEFAULT_READ_TIMEOUT, mcp.shutdown_gracefully()).await??;
     }
     Ok(())
@@ -1788,23 +1815,59 @@ async fn cold_resume_permission_overrides_win_over_persisted_profile() -> Result
     Ok(())
 }
 
+// Unelevated Windows sandboxes cannot enforce managed deny-read.
+#[cfg_attr(unix, test_case(
+    "[permissions.filesystem]\ndeny_read = [\"./private\"]",
+    AppSandboxPolicy::WorkspaceWrite {
+        writable_roots: Vec::new(),
+        network_access: false,
+        exclude_tmpdir_env_var: false,
+        exclude_slash_tmp: false,
+    };
+    "managed deny-read"
+))]
+#[test_case("", AppSandboxPolicy::DangerFullAccess; "restore saved full access")]
+#[test_case(
+    "allowed_sandbox_modes = [\"read-only\"]",
+    AppSandboxPolicy::ReadOnly { network_access: false };
+    "managed modes"
+)]
+#[test_case(
+    "default_permissions = \":read-only\"\n[allowed_permission_profiles]\n\":read-only\" = true",
+    AppSandboxPolicy::ReadOnly { network_access: false };
+    "managed catalog"
+)]
 #[tokio::test]
-async fn cold_resume_without_active_permission_profile_uses_current_config() -> Result<()> {
+async fn cold_resume_without_active_permission_profile_restores_base_permissions(
+    requirements: &str,
+    expected: AppSandboxPolicy,
+) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     mock_responses_config(&server.uri()).write(codex_home.path())?;
+    // Only deny-read names a path on the app-server host.
+    let local = requirements.contains("deny_read");
     let thread_id = {
-        let mut mcp = TestAppServer::builder()
+        let mut builder = TestAppServer::builder()
             .with_codex_home(codex_home.path())
-            .without_managed_config()
-            .build_initialized()
-            .await?;
-        let ThreadStartResponse { thread, .. } = mcp
-            .start_thread(ThreadStartParams {
-                model: Some("mock-model".to_string()),
-                ..Default::default()
-            })
-            .await?;
+            .without_managed_config();
+        if local {
+            builder = builder.without_auto_env();
+        }
+        let mut mcp = builder.build_initialized().await?;
+        let params = ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            sandbox: Some(SandboxMode::DangerFullAccess),
+            approval_policy: Some(AskForApproval::Never),
+            ..Default::default()
+        };
+        let request_id = if local {
+            mcp.send_thread_start_request(params).await?
+        } else {
+            mcp.send_thread_start_request_with_auto_env(params).await?
+        };
+        let ThreadStartResponse { thread, .. } =
+            timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
         timeout(
             DEFAULT_READ_TIMEOUT,
             mcp.start_turn_and_wait_for_completion(TurnStartParams {
@@ -1813,7 +1876,6 @@ async fn cold_resume_without_active_permission_profile_uses_current_config() -> 
                     text: "persist full access".to_string(),
                     text_elements: Vec::new(),
                 }],
-                sandbox_policy: Some(AppSandboxPolicy::DangerFullAccess),
                 ..Default::default()
             }),
         )
@@ -1826,29 +1888,24 @@ async fn cold_resume_without_active_permission_profile_uses_current_config() -> 
             "default_permissions = \"{BUILT_IN_PERMISSION_PROFILE_WORKSPACE}\""
         ))
         .write(codex_home.path())?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .without_managed_config()
-        .build_initialized()
-        .await?;
+    std::fs::write(codex_home.path().join("requirements.toml"), requirements)?;
+    let mut builder = TestAppServer::builder().with_codex_home(codex_home.path());
+    if local {
+        builder = builder.without_auto_env();
+    }
+    let mut mcp = builder.build_initialized().await?;
     let resume_id = mcp
         .send_thread_resume_request(ThreadResumeParams {
             thread_id,
             ..Default::default()
         })
         .await?;
-    let ThreadResumeResponse {
-        sandbox,
-        active_permission_profile,
-        ..
-    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
-
-    assert!(matches!(sandbox, AppSandboxPolicy::WorkspaceWrite { .. }));
+    let response: ThreadResumeResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
     assert_eq!(
-        active_permission_profile,
-        Some(ActivePermissionProfile::new(
-            BUILT_IN_PERMISSION_PROFILE_WORKSPACE
-        ))
+        (response.sandbox, response.approval_policy),
+        (expected, AskForApproval::Never),
+        "requirements: {requirements}"
     );
     Ok(())
 }

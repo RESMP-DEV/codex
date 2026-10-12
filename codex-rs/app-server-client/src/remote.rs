@@ -604,7 +604,6 @@ impl RemoteAppServerClient {
             worker_handle,
         } = self;
         let mut worker_handle = worker_handle;
-        drop(event_rx);
         let (response_tx, response_rx) = oneshot::channel();
         if command_tx
             .send(RemoteClientCommand::Shutdown { response_tx })
@@ -619,6 +618,8 @@ impl RemoteAppServerClient {
             worker_handle.abort();
             let _ = worker_handle.await;
         }
+        // Keep events deliverable until the worker has closed the websocket.
+        drop(event_rx);
         Ok(())
     }
 }
@@ -1064,9 +1065,21 @@ mod tests {
     #[tokio::test]
     async fn shutdown_tolerates_worker_exit_after_command_is_queued() {
         let (command_tx, mut command_rx) = mpsc::channel(1);
-        let (_event_tx, event_rx) = mpsc::unbounded_channel::<AppServerEvent>();
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<AppServerEvent>();
+        let (delivered_tx, delivered_rx) = oneshot::channel();
         let worker_handle = tokio::spawn(async move {
             let _ = command_rx.recv().await;
+            // Force an event after shutdown is queued but before this worker has exited.
+            let result = deliver_event(
+                &event_tx,
+                AppServerEvent::ServerNotification(Box::new(ServerNotification::AccountUpdated(
+                    codex_app_server_protocol::AccountUpdatedNotification {
+                        auth_mode: None,
+                        plan_type: None,
+                    },
+                ))),
+            );
+            let _ = delivered_tx.send(result);
         });
         let client = RemoteAppServerClient {
             command_tx,
@@ -1080,5 +1093,9 @@ mod tests {
             .shutdown()
             .await
             .expect("shutdown should complete when worker exits first");
+        delivered_rx
+            .await
+            .expect("worker should attempt delivery")
+            .expect("an in-flight event must not abort the worker during shutdown");
     }
 }

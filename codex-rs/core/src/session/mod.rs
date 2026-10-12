@@ -137,6 +137,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSandboxPolicyContext;
 use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -459,6 +460,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) conversation_history: InitialHistory,
     pub(crate) history_initialization: HistoryInitialization,
     pub(crate) disabled_plugin_ids: Option<Vec<String>>,
+    pub(crate) persisted_permission_profile: Option<PermissionProfile>,
     pub(crate) requested_history_mode: Option<ThreadHistoryMode>,
     pub(crate) fork_persistence: ForkPersistence,
     pub(crate) session_source: SessionSource,
@@ -574,6 +576,7 @@ impl Session {
             conversation_history,
             history_initialization,
             disabled_plugin_ids,
+            persisted_permission_profile,
             requested_history_mode,
             fork_persistence,
             session_source,
@@ -869,7 +872,7 @@ impl Session {
         let service_tier =
             get_service_tier(config.service_tier.clone(), &config.features, &model_info);
         let storage_originator = AuthStorageOriginator::from_client_name(&originator);
-        let session_configuration = SessionConfiguration {
+        let mut session_configuration = SessionConfiguration {
             turn_extension_init,
             provider: create_model_provider(
                 config.model_provider.clone(),
@@ -912,6 +915,35 @@ impl Session {
             dynamic_tools,
             user_shell_override,
         };
+        // Restore the thread's base policy, not an executor's enforcement or
+        // materialized grants that might outlive the workspace they came from.
+        if let Some(profile) = persisted_permission_profile
+            && !matches!(profile, PermissionProfile::External { .. })
+            && !profile.file_system_sandbox_policy().entries.iter().any(|entry| {
+                entry.access.can_read()
+                    && matches!(
+                        entry.path,
+                        FileSystemPath::Path { .. } | FileSystemPath::GlobPattern { .. }
+                    )
+            })
+            && config
+                .config_layer_stack
+                .requirements_toml()
+                .allowed_permission_profiles
+                .is_none()
+            // Reject a disallowed saved mode before the live-update path can
+            // narrow it into a different policy (for example, Full + denies).
+            && config.permissions.can_set_permission_profile(&profile).is_ok()
+            && let Ok(restored) = session_configuration.apply(
+                &SessionSettingsUpdate {
+                    permission_profile: Some(profile),
+                    ..Default::default()
+                },
+                &environment_selections,
+            )
+        {
+            session_configuration = restored;
+        }
         session_configuration
             .validate(&environment_selections)
             .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
@@ -4804,8 +4836,21 @@ impl Session {
         }
         // Persist one `TurnContextItem` per real user turn so resume/lazy replay can recover the
         // latest durable baseline even when this turn emitted no model-visible context diffs.
-        self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item.clone())])
-            .await;
+        // Checkpoint current thread-owned settings after the first turn's context:
+        // the step may predate an acknowledged update or use executor-owned permissions.
+        // Serialize with settings updates so an older checkpoint cannot supersede a newer one.
+        let _settings_guard = if should_inject_full_context {
+            Some(thread_settings::acquire_persistence_lock(self).await)
+        } else {
+            None
+        };
+        let mut rollout_items = vec![RolloutItem::TurnContext(turn_context_item.clone())];
+        if should_inject_full_context {
+            rollout_items.push(RolloutItem::EventMsg(
+                thread_settings::applied_event(self).await,
+            ));
+        }
+        self.persist_rollout_items(&rollout_items).await;
 
         // Advance the persisted-settings baseline even when this turn emitted no model-visible
         // context items.

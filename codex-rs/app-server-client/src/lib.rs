@@ -1746,24 +1746,25 @@ mod tests {
 
     #[tokio::test]
     async fn remote_notifications_arrive_over_websocket() {
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
         let websocket_url = start_test_remote_server(|mut websocket| async move {
             expect_remote_initialize(&mut websocket).await;
-            write_websocket_message(
-                &mut websocket,
-                JSONRPCMessage::Notification(
-                    serde_json::from_value(
-                        serde_json::to_value(ServerNotification::AccountUpdated(
-                            AccountUpdatedNotification {
-                                auth_mode: None,
-                                plan_type: None,
-                            },
-                        ))
-                        .expect("notification should serialize"),
-                    )
-                    .expect("notification should convert to JSON-RPC"),
-                ),
-            )
-            .await;
+            let notification = JSONRPCMessage::Notification(
+                serde_json::from_value(
+                    serde_json::to_value(ServerNotification::AccountUpdated(
+                        AccountUpdatedNotification {
+                            auth_mode: None,
+                            plan_type: None,
+                        },
+                    ))
+                    .expect("notification should serialize"),
+                )
+                .expect("notification should convert to JSON-RPC"),
+            );
+            // Only the first notification is consumed; the other can arrive during shutdown.
+            write_websocket_message(&mut websocket, notification.clone()).await;
+            write_websocket_message(&mut websocket, notification).await;
+            let _ = close_tx.send(websocket.next().await);
         })
         .await;
         let mut client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
@@ -1778,6 +1779,14 @@ mod tests {
         ));
 
         client.shutdown().await.expect("shutdown should complete");
+        assert_eq!(
+            close_rx
+                .await
+                .expect("server should observe shutdown")
+                .expect("server should receive a frame")
+                .expect("websocket should close cleanly"),
+            Message::Close(None),
+        );
     }
 
     #[tokio::test]

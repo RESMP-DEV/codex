@@ -12,7 +12,7 @@ use tokio::sync::broadcast;
 
 /// Readiness and browser authorization progress for a gateway credential.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum GatewayAuthStatus {
+pub enum OAuthSessionStatus {
     NotReady,
     Started,
     Succeeded,
@@ -22,26 +22,26 @@ pub enum GatewayAuthStatus {
 // Keep terminal status tied to its credential and retain successful credential expiry for busy reads.
 // Deliberately omit Debug: this snapshot contains credentials.
 #[derive(Clone)]
-pub(super) struct GatewayAuthStatusSnapshot {
-    pub(super) status: GatewayAuthStatus,
+pub(super) struct OAuthSessionStatusSnapshot {
+    pub(super) status: OAuthSessionStatus,
     pub(super) credential: Option<StoredToken>,
 }
 
 /// A credential status change scoped to the configured OAuth account.
 #[derive(Clone, Debug)]
-pub struct GatewayAuthStatusChange {
-    pub config: GatewayAuthConfig,
-    pub status: GatewayAuthStatus,
+pub struct OAuthSessionStatusChange {
+    pub config: OAuthSessionConfig,
+    pub status: OAuthSessionStatus,
 }
 
 /// Browser policy shared by gateway managers with the same home and network configuration.
 #[derive(Debug)]
-pub struct GatewayLoginControl {
+pub struct OAuthLoginControl {
     pub(super) explicit_login: AtomicBool,
-    status_tx: broadcast::Sender<GatewayAuthStatusChange>,
+    status_tx: broadcast::Sender<OAuthSessionStatusChange>,
 }
 
-impl GatewayLoginControl {
+impl OAuthLoginControl {
     /// Returns the control shared across this runtime's provider configurations.
     pub fn for_runtime(runtime: &crate::AuthRuntimeConfig) -> Arc<Self> {
         Self::for_host(
@@ -51,7 +51,7 @@ impl GatewayLoginControl {
     }
 
     pub(super) fn for_host(codex_home: &std::path::Path, factory: &HttpClientFactory) -> Arc<Self> {
-        type Controls = Vec<(PathBuf, HttpClientFactory, Arc<GatewayLoginControl>)>;
+        type Controls = Vec<(PathBuf, HttpClientFactory, Arc<OAuthLoginControl>)>;
         static CONTROLS: OnceLock<std::sync::Mutex<Controls>> = OnceLock::new();
         let mut controls = CONTROLS
             .get_or_init(std::sync::Mutex::default)
@@ -94,10 +94,10 @@ impl GatewayLoginControl {
 
 /// Subscribes to gateway status changes for this home and network configuration.
 /// The subscription also covers managers created after configuration changes.
-pub fn subscribe_gateway_auth_status(
+pub fn subscribe_oauth_session_status(
     runtime: &crate::AuthRuntimeConfig,
-) -> broadcast::Receiver<GatewayAuthStatusChange> {
-    GatewayLoginControl::for_runtime(runtime)
+) -> broadcast::Receiver<OAuthSessionStatusChange> {
+    OAuthLoginControl::for_runtime(runtime)
         .status_tx
         .subscribe()
 }
@@ -105,29 +105,29 @@ pub fn subscribe_gateway_auth_status(
 pub(super) fn status_sender_for_host(
     codex_home: &std::path::Path,
     factory: &HttpClientFactory,
-) -> broadcast::Sender<GatewayAuthStatusChange> {
-    GatewayLoginControl::for_host(codex_home, factory)
+) -> broadcast::Sender<OAuthSessionStatusChange> {
+    OAuthLoginControl::for_host(codex_home, factory)
         .status_tx
         .clone()
 }
 
-impl GatewayAuthManager {
+impl OAuthSessionManager {
     /// Returns the OAuth account configuration used to scope status notifications.
-    pub fn config(&self) -> &GatewayAuthConfig {
+    pub fn config(&self) -> &OAuthSessionConfig {
         &self.state.config
     }
 
     /// Returns whether the status changed and a notification was published.
     pub(super) fn publish_status(
         &self,
-        status: GatewayAuthStatus,
+        status: OAuthSessionStatus,
         credential: Option<&StoredToken>,
     ) -> bool {
         let credential = match status {
-            GatewayAuthStatus::NotReady
-            | GatewayAuthStatus::Failed { .. }
-            | GatewayAuthStatus::Succeeded => credential.cloned(),
-            GatewayAuthStatus::Started => None,
+            OAuthSessionStatus::NotReady
+            | OAuthSessionStatus::Failed { .. }
+            | OAuthSessionStatus::Succeeded => credential.cloned(),
+            OAuthSessionStatus::Started => None,
         };
         let mut changed = false;
         self.state.status.send_if_modified(|previous| {
@@ -141,12 +141,12 @@ impl GatewayAuthManager {
             {
                 return false;
             }
-            *previous = Some(GatewayAuthStatusSnapshot {
+            *previous = Some(OAuthSessionStatusSnapshot {
                 status: status.clone(),
                 credential,
             });
             if changed {
-                let _ = self.state.status_tx.send(GatewayAuthStatusChange {
+                let _ = self.state.status_tx.send(OAuthSessionStatusChange {
                     config: self.state.config.clone(),
                     status: status.clone(),
                 });
@@ -159,19 +159,19 @@ impl GatewayAuthManager {
     pub(super) fn login_required_error(&self, credential: Option<&StoredToken>) -> io::Error {
         // Requests must re-prompt even after an earlier NotReady notification was dismissed.
         // Passive readiness reads continue to use the deduplicated publisher above.
-        if !self.publish_status(GatewayAuthStatus::NotReady, credential) {
-            let _ = self.state.status_tx.send(GatewayAuthStatusChange {
+        if !self.publish_status(OAuthSessionStatus::NotReady, credential) {
+            let _ = self.state.status_tx.send(OAuthSessionStatusChange {
                 config: self.state.config.clone(),
-                status: GatewayAuthStatus::NotReady,
+                status: OAuthSessionStatus::NotReady,
             });
         }
         io::Error::new(
             io::ErrorKind::PermissionDenied,
-            GatewayAuthError::LoginRequired,
+            OAuthSessionError::LoginRequired,
         )
     }
 
-    pub(super) async fn lock_cached_token(&self) -> io::Result<OwnedMutexGuard<GatewayAuthCache>> {
+    pub(super) async fn lock_cached_token(&self) -> io::Result<OwnedMutexGuard<OAuthSessionCache>> {
         let mut status = self.state.status.subscribe();
         let lock = Arc::clone(&self.state.cached_token).lock_owned();
         tokio::pin!(lock);
@@ -179,11 +179,11 @@ impl GatewayAuthManager {
             if status
                 .borrow_and_update()
                 .as_ref()
-                .is_some_and(|snapshot| snapshot.status == GatewayAuthStatus::Started)
+                .is_some_and(|snapshot| snapshot.status == OAuthSessionStatus::Started)
             {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
-                    GatewayAuthError::LoginInProgress,
+                    OAuthSessionError::LoginInProgress,
                 ));
             }
             tokio::select! {
@@ -195,14 +195,14 @@ impl GatewayAuthManager {
     }
 
     /// Reads readiness without refreshing credentials, opening a browser, or waiting for login.
-    pub async fn status(&self) -> io::Result<GatewayAuthStatus> {
+    pub async fn status(&self) -> io::Result<OAuthSessionStatus> {
         let manager = self.clone();
         tokio::task::spawn_blocking(move || manager.status_blocking())
             .await
             .map_err(|_| io::Error::other("provider OAuth readiness task failed"))?
     }
 
-    fn status_blocking(&self) -> io::Result<GatewayAuthStatus> {
+    fn status_blocking(&self) -> io::Result<OAuthSessionStatus> {
         let mut status_changes = self.state.status.subscribe();
         let previous_cache = {
             let Ok(cached) = self.state.cached_token.try_lock() else {
@@ -211,9 +211,9 @@ impl GatewayAuthManager {
             if status_changes
                 .borrow_and_update()
                 .as_ref()
-                .is_some_and(|snapshot| snapshot.status == GatewayAuthStatus::Started)
+                .is_some_and(|snapshot| snapshot.status == OAuthSessionStatus::Started)
             {
-                return Ok(GatewayAuthStatus::Started);
+                return Ok(OAuthSessionStatus::Started);
             }
             cached.clone()
         };
@@ -233,7 +233,7 @@ impl GatewayAuthManager {
         let terminal = snapshot.as_ref().filter(|snapshot| {
             matches!(
                 snapshot.status,
-                GatewayAuthStatus::NotReady | GatewayAuthStatus::Failed { .. }
+                OAuthSessionStatus::NotReady | OAuthSessionStatus::Failed { .. }
             )
         });
         if stored.as_ref().is_some_and(token_is_usable)
@@ -245,31 +245,31 @@ impl GatewayAuthManager {
             cached.token = stored;
             cached.pending = None;
             cached.login_required = None;
-            self.publish_status(GatewayAuthStatus::Succeeded, cached.token.as_ref());
-            return Ok(GatewayAuthStatus::Succeeded);
+            self.publish_status(OAuthSessionStatus::Succeeded, cached.token.as_ref());
+            return Ok(OAuthSessionStatus::Succeeded);
         }
         if let Some(snapshot) = terminal {
             return Ok(snapshot.status.clone());
         }
-        self.publish_status(GatewayAuthStatus::NotReady, stored.as_ref());
-        Ok(GatewayAuthStatus::NotReady)
+        self.publish_status(OAuthSessionStatus::NotReady, stored.as_ref());
+        Ok(OAuthSessionStatus::NotReady)
     }
 
-    fn snapshot_status(&self) -> GatewayAuthStatus {
-        let mut status = GatewayAuthStatus::NotReady;
+    fn snapshot_status(&self) -> OAuthSessionStatus {
+        let mut status = OAuthSessionStatus::NotReady;
         // Check and downgrade atomically so an expired observation cannot overwrite
         // a completed refresh or newly started login.
         self.state.status.send_if_modified(|snapshot| {
             let Some(snapshot) = snapshot else {
                 return false;
             };
-            let expired = snapshot.status == GatewayAuthStatus::Succeeded
+            let expired = snapshot.status == OAuthSessionStatus::Succeeded
                 && !snapshot.credential.as_ref().is_some_and(token_is_usable);
             if expired {
-                snapshot.status = GatewayAuthStatus::NotReady;
-                let _ = self.state.status_tx.send(GatewayAuthStatusChange {
+                snapshot.status = OAuthSessionStatus::NotReady;
+                let _ = self.state.status_tx.send(OAuthSessionStatusChange {
                     config: self.state.config.clone(),
-                    status: GatewayAuthStatus::NotReady,
+                    status: OAuthSessionStatus::NotReady,
                 });
             }
             status = snapshot.status.clone();
@@ -289,7 +289,10 @@ impl GatewayAuthManager {
         let _login_attempt = Arc::clone(&self.state.login_attempt)
             .try_lock_owned()
             .map_err(|_| {
-                io::Error::new(io::ErrorKind::WouldBlock, GatewayAuthError::LoginInProgress)
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    OAuthSessionError::LoginInProgress,
+                )
             })?;
         tokio::pin!(cancel);
         let mut cached = tokio::select! {
@@ -305,7 +308,7 @@ impl GatewayAuthManager {
             credential: cached.token.clone(),
             completed: false,
         };
-        self.publish_status(GatewayAuthStatus::Started, /*credential*/ None);
+        self.publish_status(OAuthSessionStatus::Started, /*credential*/ None);
         let result = tokio::select! {
             biased;
             _ = &mut cancel => Err(io::Error::new(io::ErrorKind::Interrupted, "Gateway sign-in was canceled")),
@@ -335,7 +338,7 @@ impl GatewayAuthManager {
 }
 
 struct LoginStatusGuard<'a> {
-    manager: &'a GatewayAuthManager,
+    manager: &'a OAuthSessionManager,
     credential: Option<StoredToken>,
     completed: bool,
 }
@@ -344,8 +347,8 @@ impl LoginStatusGuard<'_> {
     fn finish<T>(&mut self, result: &io::Result<T>) {
         self.manager.publish_status(
             match result {
-                Ok(_) => GatewayAuthStatus::Succeeded,
-                Err(error) => GatewayAuthStatus::Failed {
+                Ok(_) => OAuthSessionStatus::Succeeded,
+                Err(error) => OAuthSessionStatus::Failed {
                     message: error.to_string(),
                 },
             },
@@ -359,7 +362,7 @@ impl Drop for LoginStatusGuard<'_> {
     fn drop(&mut self) {
         if !self.completed {
             self.manager.publish_status(
-                GatewayAuthStatus::Failed {
+                OAuthSessionStatus::Failed {
                     message: "Gateway sign-in was canceled".to_string(),
                 },
                 self.credential.as_ref(),

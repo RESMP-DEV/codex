@@ -5,11 +5,14 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Result;
+use base64::Engine;
 use codex_api::AuthProvider;
 use codex_http_client::DestinationPolicy;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::NetworkPolicyController;
 use codex_http_client::OutboundProxyPolicy;
+use futures::SinkExt;
+use futures::StreamExt;
 use http::HeaderMap;
 use http::HeaderValue;
 use pretty_assertions::assert_eq;
@@ -18,6 +21,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::time::timeout;
 use tokio_tungstenite::accept_hdr_async;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::Request as HandshakeRequest;
 use tokio_tungstenite::tungstenite::handshake::server::Response as HandshakeResponse;
 use wiremock::Mock;
@@ -60,6 +64,99 @@ impl AuthProvider for StaticAuthProvider {
 
 #[derive(Debug)]
 struct QueryAuthProvider;
+
+#[tokio::test]
+async fn direct_environment_accepts_large_file_writes() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let registry = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/cloud/environment/environment-requested/direct/register",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "environment_id": "environment-requested",
+            "transport": DIRECT_TRANSPORT,
+            "registration_id": "registration-1",
+            "url": format!("ws://{}", listener.local_addr()?),
+        })))
+        .expect(1)
+        .mount(&registry)
+        .await;
+    let config = RemoteEnvironmentConfig::new_with_transport(
+        registry.uri(),
+        "environment-requested".to_string(),
+        RemoteEnvironmentTransport::Direct,
+        Arc::new(StaticAuthProvider),
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    )?;
+    let runtime_paths = ExecServerRuntimeOptions::new(
+        std::env::current_exe()?,
+        /*codex_linux_sandbox_exe*/ None,
+    )?;
+    let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+        crate::run_remote_environment(config, runtime_paths),
+    ));
+    let (socket, _) = timeout(Duration::from_secs(5), listener.accept()).await??;
+    let mut websocket = tokio_tungstenite::accept_async(socket).await?;
+    websocket
+        .send(Message::Text(
+            serde_json::json!({
+                "id": 1, "method": "initialize", "params": {"clientName": "direct-test"},
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+    let response = timeout(Duration::from_secs(5), websocket.next())
+        .await?
+        .expect("initialize response")?;
+    let response: serde_json::Value = serde_json::from_slice(&response.into_data())?;
+    assert_eq!(response["id"], 1);
+    assert!(response.get("result").is_some(), "{response}");
+    websocket
+        .send(Message::Text(
+            serde_json::json!({
+                "method": "initialized", "params": {},
+            })
+            .to_string()
+            .into(),
+        ))
+        .await?;
+
+    let directory = tempfile::tempdir()?;
+    let output = directory.path().join("report.txt");
+    let path = codex_utils_path_uri::PathUri::from_host_native_path(&output)?;
+    let data = "report contents\n".repeat(1024);
+    // Exercise both JSON-RPC WebSocket encodings on the production direct runner.
+    for binary in [false, true] {
+        let request = serde_json::json!({
+            "id": 2, "method": "fs/writeFile", "params": {
+                "path": path,
+                "dataBase64": base64::engine::general_purpose::STANDARD.encode(&data),
+            },
+        })
+        .to_string();
+        assert!(
+            request.len() > crate::client_inbound_request_limit::MAX_CLIENT_INBOUND_REQUEST_LEN
+        );
+        let frame = if binary {
+            Message::Binary(request.into_bytes().into())
+        } else {
+            Message::Text(request.into())
+        };
+        websocket.send(frame).await?;
+        let response = timeout(Duration::from_secs(5), websocket.next())
+            .await?
+            .expect("large write must not disconnect the executor")?;
+        let response: serde_json::Value = serde_json::from_slice(&response.into_data())?;
+        assert_eq!(response["id"], 2);
+        assert_eq!(response["result"], serde_json::json!({}), "{response}");
+        assert_eq!(tokio::fs::read(&output).await?, data.as_bytes());
+    }
+    registry.verify().await;
+    task.abort();
+    Ok(())
+}
 
 impl AuthProvider for QueryAuthProvider {
     fn add_auth_headers(&self, _headers: &mut HeaderMap) {}

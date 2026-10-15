@@ -17,24 +17,24 @@ use wiremock::matchers::body_string_contains;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-use super::GatewayAuthConfig;
-use super::GatewayAuthManager;
+use super::OAuthSessionConfig;
+use super::OAuthSessionManager;
 use super::StoredToken;
 use super::callback::CallbackListener;
 use crate::test_support::transport_default_auth_route_config;
 
-#[path = "gateway_auth_login_tests.rs"]
+#[path = "oauth_session_login_tests.rs"]
 mod login_tests;
 
-#[path = "gateway_auth_storage_tests.rs"]
+#[path = "oauth_session_storage_tests.rs"]
 mod storage_tests;
 
 fn client(
-    config: GatewayAuthConfig,
+    config: OAuthSessionConfig,
     keyring: Arc<MockKeyringStore>,
-) -> (GatewayAuthManager, tempfile::TempDir) {
+) -> (OAuthSessionManager, tempfile::TempDir) {
     let home = tempfile::tempdir().expect("Codex home");
-    let manager = GatewayAuthManager::new(
+    let manager = OAuthSessionManager::new(
         config,
         home.path().to_path_buf(),
         transport_default_auth_route_config().http_client_factory(),
@@ -45,8 +45,8 @@ fn client(
     (manager, home)
 }
 
-fn config(server: &MockServer) -> GatewayAuthConfig {
-    GatewayAuthConfig {
+fn config(server: &MockServer) -> OAuthSessionConfig {
+    OAuthSessionConfig {
         authorization_url: format!("{}/authorize", server.uri()),
         token_url: format!("{}/token", server.uri()),
         client_id: "codex-test".to_string(),
@@ -56,8 +56,8 @@ fn config(server: &MockServer) -> GatewayAuthConfig {
     }
 }
 
-fn loopback_config() -> GatewayAuthConfig {
-    GatewayAuthConfig {
+fn loopback_config() -> OAuthSessionConfig {
+    OAuthSessionConfig {
         authorization_url: "http://127.0.0.1:18080/authorize".to_string(),
         token_url: "http://127.0.0.1:18080/token".to_string(),
         client_id: "codex-test".to_string(),
@@ -68,7 +68,7 @@ fn loopback_config() -> GatewayAuthConfig {
 }
 
 fn save_token(
-    client: &GatewayAuthManager,
+    client: &OAuthSessionManager,
     access_token: &str,
     refresh_token: Option<&str>,
     expires_at: i64,
@@ -158,7 +158,7 @@ async fn expired_tokens_refresh_once_when_the_response_omits_rotation_and_expiry
         Utc::now().timestamp() - 1,
     );
 
-    let other = GatewayAuthManager::new(
+    let other = OAuthSessionManager::new(
         client.state.config.clone(),
         client.state.codex_home.clone(),
         transport_default_auth_route_config().http_client_factory(),
@@ -193,7 +193,7 @@ async fn different_configurations_refresh_under_the_same_store_lock() {
     let (first, home) = client(config(&server), keyring.clone());
     let mut other_config = first.state.config.clone();
     other_config.client_id = "other-client".to_string();
-    let second = GatewayAuthManager::new(
+    let second = OAuthSessionManager::new(
         other_config,
         home.path().to_path_buf(),
         transport_default_auth_route_config().http_client_factory(),
@@ -462,13 +462,13 @@ async fn query_credentials_are_not_exposed_by_echoed_errors_or_truncated_request
             let message =
                 "Gateway sign-in failed; check the gateway configuration and credential store.";
             assert_eq!(error.to_string(), message);
-            let failed = crate::GatewayAuthStatus::Failed {
+            let failed = crate::OAuthSessionStatus::Failed {
                 message: message.into(),
             };
             assert_eq!(manager.status().await.unwrap(), failed);
             assert_eq!(
                 events.try_recv().unwrap().status,
-                crate::GatewayAuthStatus::Started
+                crate::OAuthSessionStatus::Started
             );
             let event = events.try_recv().unwrap();
             assert_eq!(event.status, failed);
@@ -483,7 +483,7 @@ async fn gateway_credentials_use_a_dedicated_encrypted_file_and_reload_large_tok
     let keyring = Arc::new(MockKeyringStore::default());
     let access_token = "gateway-token-".repeat(/*n*/ 512);
     let config = loopback_config();
-    let client = GatewayAuthManager::new(
+    let client = OAuthSessionManager::new(
         config.clone(),
         codex_home.path().to_path_buf(),
         transport_default_auth_route_config().http_client_factory(),
@@ -506,7 +506,7 @@ async fn gateway_credentials_use_a_dedicated_encrypted_file_and_reload_large_tok
     );
     assert!(!codex_home.path().join("secrets/codex_auth.age").exists());
 
-    let reloaded = GatewayAuthManager::new(
+    let reloaded = OAuthSessionManager::new(
         config,
         codex_home.path().to_path_buf(),
         transport_default_auth_route_config().http_client_factory(),
@@ -796,7 +796,7 @@ async fn cancelled_refresh_still_records_rotated_or_rejected_credentials() {
             drop(cached);
             assert_eq!(
                 manager.status().await.unwrap(),
-                crate::GatewayAuthStatus::NotReady
+                crate::OAuthSessionStatus::NotReady
             );
             assert_eq!(
                 manager.resolve_access_token().await.unwrap_err().kind(),
@@ -815,7 +815,7 @@ async fn cancelled_refresh_still_records_rotated_or_rejected_credentials() {
             );
             assert_eq!(
                 manager.status().await.unwrap(),
-                crate::GatewayAuthStatus::Succeeded
+                crate::OAuthSessionStatus::Succeeded
             );
         }
     }

@@ -32,40 +32,40 @@ use tokio::sync::Mutex;
 use url::Host;
 use url::Url;
 
-#[path = "gateway_auth_callback.rs"]
+#[path = "oauth_session_callback.rs"]
 mod callback;
-#[path = "gateway_auth_login.rs"]
+#[path = "oauth_session_login.rs"]
 mod login;
-#[path = "gateway_auth_storage.rs"]
+#[path = "oauth_session_storage.rs"]
 mod storage;
-#[path = "gateway_auth_token.rs"]
+#[path = "oauth_session_token.rs"]
 mod token;
 
-pub use login::GatewayAuthStatus;
-pub use login::GatewayAuthStatusChange;
-pub use login::GatewayLoginControl;
-pub use login::subscribe_gateway_auth_status;
+pub use login::OAuthLoginControl;
+pub use login::OAuthSessionStatus;
+pub use login::OAuthSessionStatusChange;
+pub use login::subscribe_oauth_session_status;
 
 use callback::CallbackListener;
-use storage::GatewayAuthStorage;
+use storage::OAuthSessionStorage;
 use token::StoredToken;
 use token::TokenResponse;
 
 const REFRESH_SKEW_SECONDS: i64 = 30;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 20);
 
-/// Gateway authentication states that require user action rather than request retries.
+/// Credential states that require user action rather than request retries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum GatewayAuthError {
+pub enum OAuthSessionError {
     #[error("Gateway sign-in required. Choose Sign in or Reconnect, then retry your request")]
     LoginRequired,
     #[error("Gateway authentication is in progress; retry after sign-in")]
     LoginInProgress,
 }
 
-/// Public-client OAuth settings for a model provider.
+/// Public-client OAuth settings that identify one configured authorization grant.
 #[derive(Clone, PartialEq, Eq)]
-pub struct GatewayAuthConfig {
+pub struct OAuthSessionConfig {
     pub authorization_url: String,
     pub token_url: String,
     pub client_id: String,
@@ -74,11 +74,11 @@ pub struct GatewayAuthConfig {
     pub redirect_port: Option<u16>,
 }
 
-/// Resolves and persists an OAuth access token for a model provider.
+/// Resolves and persists an OAuth access token without knowing how a consumer uses it.
 #[derive(Clone)]
-pub struct GatewayAuthManager {
-    control: Arc<GatewayLoginControl>,
-    state: Arc<GatewayAuthState>,
+pub struct OAuthSessionManager {
+    control: Arc<OAuthLoginControl>,
+    state: Arc<OAuthSessionState>,
 }
 
 enum RefreshPolicy {
@@ -103,20 +103,20 @@ enum RefreshOutcome {
     LoginRequired,
 }
 
-struct GatewayAuthState {
-    config: GatewayAuthConfig,
+struct OAuthSessionState {
+    config: OAuthSessionConfig,
     codex_home: PathBuf,
-    storage: GatewayAuthStorage,
+    storage: OAuthSessionStorage,
     http_client: HttpClient,
-    cached_token: Arc<Mutex<GatewayAuthCache>>,
+    cached_token: Arc<Mutex<OAuthSessionCache>>,
     // Reserve explicit login independently of background credential reads and refreshes.
     login_attempt: Arc<Mutex<()>>,
-    status: tokio::sync::watch::Sender<Option<login::GatewayAuthStatusSnapshot>>,
-    status_tx: tokio::sync::broadcast::Sender<GatewayAuthStatusChange>,
+    status: tokio::sync::watch::Sender<Option<login::OAuthSessionStatusSnapshot>>,
+    status_tx: tokio::sync::broadcast::Sender<OAuthSessionStatusChange>,
 }
 
 #[derive(Clone, Default, PartialEq, Eq)]
-struct GatewayAuthCache {
+struct OAuthSessionCache {
     token: Option<StoredToken>,
     // Retain rotated credentials across a failed save. The prior persisted token remains
     // available for comparison so retrying cannot overwrite a newer external login.
@@ -125,11 +125,11 @@ struct GatewayAuthCache {
     login_required: Option<StoredToken>,
 }
 
-impl GatewayAuthManager {
-    /// Creates independent gateway credentials in their encrypted store using the caller's HTTP policy.
+impl OAuthSessionManager {
+    /// Creates a configured OAuth session using the caller's encrypted store and HTTP policy.
     /// Token grants never follow redirects or include primary-provider credentials or request logs.
     pub fn new(
-        config: GatewayAuthConfig,
+        config: OAuthSessionConfig,
         codex_home: PathBuf,
         http_client_factory: &HttpClientFactory,
         keyring: Arc<dyn KeyringStore>,
@@ -144,14 +144,14 @@ impl GatewayAuthManager {
             )
             .map_err(|_| io::Error::other("failed to create provider OAuth HTTP client"))?;
         Ok(Self {
-            control: GatewayLoginControl::for_host(&codex_home, http_client_factory),
-            state: Arc::new(GatewayAuthState {
+            control: OAuthLoginControl::for_host(&codex_home, http_client_factory),
+            state: Arc::new(OAuthSessionState {
                 config,
                 status_tx: login::status_sender_for_host(&codex_home, http_client_factory),
-                storage: GatewayAuthStorage::new(codex_home.clone(), keyring),
+                storage: OAuthSessionStorage::new(codex_home.clone(), keyring),
                 codex_home,
                 http_client,
-                cached_token: Arc::new(Mutex::new(GatewayAuthCache::default())),
+                cached_token: Arc::new(Mutex::new(OAuthSessionCache::default())),
                 login_attempt: Arc::new(Mutex::new(())),
                 status: tokio::sync::watch::channel(/*init*/ None).0,
             }),
@@ -186,7 +186,7 @@ impl GatewayAuthManager {
         let terminal_status = self.state.status.borrow().as_ref().is_some_and(|snapshot| {
             matches!(
                 snapshot.status,
-                GatewayAuthStatus::NotReady | GatewayAuthStatus::Failed { .. }
+                OAuthSessionStatus::NotReady | OAuthSessionStatus::Failed { .. }
             )
         });
         // A cached token may predate the failed login. Only persisted replacements can clear it.
@@ -216,11 +216,11 @@ impl GatewayAuthManager {
             let terminal_matches = self.state.status.borrow().as_ref().is_some_and(|snapshot| {
                 matches!(
                     snapshot.status,
-                    GatewayAuthStatus::NotReady | GatewayAuthStatus::Failed { .. }
+                    OAuthSessionStatus::NotReady | OAuthSessionStatus::Failed { .. }
                 ) && snapshot.credential.as_ref() == Some(token)
             });
             if !terminal_matches {
-                self.publish_status(GatewayAuthStatus::Succeeded, Some(token));
+                self.publish_status(OAuthSessionStatus::Succeeded, Some(token));
             }
             let access_token = token.access_token.clone();
             cached.login_required = None;
@@ -234,7 +234,7 @@ impl GatewayAuthManager {
                 Err(error) => Err(error),
                 Ok(RefreshOutcome::AccessToken(access_token)) => {
                     cached.login_required = None;
-                    manager.publish_status(GatewayAuthStatus::Succeeded, cached.token.as_ref());
+                    manager.publish_status(OAuthSessionStatus::Succeeded, cached.token.as_ref());
                     Ok(access_token)
                 }
                 Ok(RefreshOutcome::LoginRequired) => {
@@ -249,8 +249,8 @@ impl GatewayAuthManager {
         if result.as_ref().is_err_and(|error| {
             error
                 .get_ref()
-                .and_then(|source| source.downcast_ref::<GatewayAuthError>())
-                == Some(&GatewayAuthError::LoginRequired)
+                .and_then(|source| source.downcast_ref::<OAuthSessionError>())
+                == Some(&OAuthSessionError::LoginRequired)
         }) && !self
             .control
             .explicit_login
@@ -263,7 +263,7 @@ impl GatewayAuthManager {
 
     async fn persist_pending(
         &self,
-        cached: &mut GatewayAuthCache,
+        cached: &mut OAuthSessionCache,
         credential_lock: &Arc<std::fs::File>,
     ) -> io::Result<String> {
         let token = cached
@@ -289,7 +289,7 @@ impl GatewayAuthManager {
 
     async fn refresh(
         &self,
-        cached: &mut GatewayAuthCache,
+        cached: &mut OAuthSessionCache,
         policy: &RefreshPolicy,
     ) -> io::Result<RefreshOutcome> {
         let credential_lock = Arc::new(storage::lock_credentials(&self.state.codex_home).await?);
@@ -321,6 +321,7 @@ impl GatewayAuthManager {
                 .refresh::<TokenResponse>(RefreshTokenGrant {
                     refresh_token,
                     resource: self.state.config.resource.as_deref(),
+                    refresh_reason: None,
                 })
                 .await
             {
@@ -417,7 +418,7 @@ impl GatewayAuthManager {
 
     async fn authorize_with_browser(
         &self,
-        cached: &mut GatewayAuthCache,
+        cached: &mut OAuthSessionCache,
         open_browser: impl FnOnce(&Url),
     ) -> io::Result<String> {
         let pkce = generate_pkce();
@@ -469,7 +470,7 @@ impl GatewayAuthManager {
             })?;
         cached.pending = Some(response.into_stored(/*previous_refresh_token*/ None)?);
         let access_token = self.persist_pending(cached, &credential_lock).await?;
-        self.publish_status(GatewayAuthStatus::Succeeded, cached.token.as_ref());
+        self.publish_status(OAuthSessionStatus::Succeeded, cached.token.as_ref());
         Ok(access_token)
     }
 
@@ -487,11 +488,11 @@ impl GatewayAuthManager {
     }
 }
 
-impl fmt::Debug for GatewayAuthConfig {
+impl fmt::Debug for OAuthSessionConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Configured URLs may contain issuer-specific credentials in arbitrary query keys.
         formatter
-            .debug_struct("GatewayAuthConfig")
+            .debug_struct("OAuthSessionConfig")
             .field("client_id", &self.client_id)
             .field("scopes", &self.scopes)
             .field("redirect_port", &self.redirect_port)
@@ -499,10 +500,10 @@ impl fmt::Debug for GatewayAuthConfig {
     }
 }
 
-impl fmt::Debug for GatewayAuthManager {
+impl fmt::Debug for OAuthSessionManager {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("GatewayAuthManager")
+            .debug_struct("OAuthSessionManager")
             .field("config", &self.state.config)
             .finish_non_exhaustive()
     }
@@ -514,7 +515,7 @@ fn token_is_usable(token: &StoredToken) -> bool {
         .is_none_or(|expires_at| expires_at > Utc::now().timestamp() + REFRESH_SKEW_SECONDS)
 }
 
-fn validate_config(config: &GatewayAuthConfig) -> io::Result<()> {
+fn validate_config(config: &OAuthSessionConfig) -> io::Result<()> {
     let authorization = validate_oauth_url(
         &config.authorization_url,
         "provider OAuth authorization endpoint",
@@ -572,5 +573,5 @@ fn validate_oauth_url(value: &str, description: &str) -> io::Result<Url> {
 }
 
 #[cfg(test)]
-#[path = "gateway_auth_tests.rs"]
+#[path = "oauth_session_tests.rs"]
 mod tests;

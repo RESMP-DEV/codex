@@ -1,4 +1,5 @@
-//! Persists gateway credentials and serializes exchanges across all configurations in one store.
+//! Persists configured OAuth grants and serializes exchanges in one encrypted store.
+//! Gateway storage paths and namespace are retained so existing credentials remain usable.
 
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -49,9 +50,9 @@ pub(super) async fn lock_credentials(codex_home: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-pub(super) struct GatewayAuthStorage(SecretsManager);
+pub(super) struct OAuthSessionStorage(SecretsManager);
 
-impl GatewayAuthStorage {
+impl OAuthSessionStorage {
     pub(super) fn new(codex_home: PathBuf, keyring: Arc<dyn KeyringStore>) -> Self {
         Self(SecretsManager::new_with_keyring_store_and_namespace(
             codex_home,

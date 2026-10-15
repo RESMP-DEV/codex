@@ -167,7 +167,7 @@ pub(super) async fn run_direct_environment(
                 );
                 processor
                     .run_connection(
-                        JsonRpcConnection::from_websocket(
+                        JsonRpcConnection::from_direct_websocket(
                             websocket,
                             format!(
                                 "direct exec-server websocket {}",

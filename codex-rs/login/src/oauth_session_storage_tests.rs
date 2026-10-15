@@ -53,7 +53,7 @@ impl KeyringStore for BlockingKeyring {
     }
 }
 
-fn blocking_client() -> (GatewayAuthManager, tempfile::TempDir, Arc<BlockingKeyring>) {
+fn blocking_client() -> (OAuthSessionManager, tempfile::TempDir, Arc<BlockingKeyring>) {
     let home = tempfile::tempdir().unwrap();
     let keyring = Arc::new(BlockingKeyring {
         inner: MockKeyringStore::default(),
@@ -61,7 +61,7 @@ fn blocking_client() -> (GatewayAuthManager, tempfile::TempDir, Arc<BlockingKeyr
         check_thread: AtomicBool::new(/*v*/ false),
         gate: Mutex::new(/*t*/ None),
     });
-    let manager = GatewayAuthManager::new(
+    let manager = OAuthSessionManager::new(
         loopback_config(),
         home.path().to_path_buf(),
         transport_default_auth_route_config().http_client_factory(),
@@ -122,7 +122,7 @@ async fn readiness_does_not_block_cached_requests_or_overwrite_newer_credentials
     release_tx.send(()).unwrap();
     assert_eq!(
         readiness.await.unwrap().unwrap(),
-        crate::GatewayAuthStatus::Succeeded
+        crate::OAuthSessionStatus::Succeeded
     );
     assert_eq!(manager.resolve_access_token().await.unwrap(), "replacement");
 }
@@ -159,16 +159,16 @@ async fn cancel_during_keyring_read_releases_login_and_cached_credentials() {
     assert_eq!(
         error
             .get_ref()
-            .and_then(|error| error.downcast_ref::<crate::GatewayAuthError>()),
-        Some(&crate::GatewayAuthError::LoginInProgress),
+            .and_then(|error| error.downcast_ref::<crate::OAuthSessionError>()),
+        Some(&crate::OAuthSessionError::LoginInProgress),
     );
     assert_eq!(
         manager.status().await.unwrap(),
-        crate::GatewayAuthStatus::Started
+        crate::OAuthSessionStatus::Started
     );
     assert_eq!(
         events.try_recv().unwrap().status,
-        crate::GatewayAuthStatus::Started
+        crate::OAuthSessionStatus::Started
     );
     cancel.notify_one();
     let error = tokio::time::timeout(Duration::from_secs(/*secs*/ 2), login)
@@ -179,7 +179,7 @@ async fn cancel_during_keyring_read_releases_login_and_cached_credentials() {
     assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
     assert_eq!(
         events.try_recv().unwrap().status,
-        crate::GatewayAuthStatus::Failed {
+        crate::OAuthSessionStatus::Failed {
             message: "Gateway sign-in was canceled".into(),
         }
     );

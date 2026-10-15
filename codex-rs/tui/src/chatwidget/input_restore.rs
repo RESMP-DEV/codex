@@ -313,6 +313,11 @@ impl ChatWidget {
         self.requeue_image_submission();
         // Finalize, log a gentle prompt, and clear running state.
         self.finalize_turn();
+        // Cancellation means idle in the program-status protocol, not a failed task.
+        if reason == TurnAbortReason::Interrupted {
+            self.status_state.program_status_after_turn =
+                crate::terminal_program_status::ProgramStatus::Idle;
+        }
         let send_pending_steers_immediately =
             self.input_queue.submit_pending_steers_after_interrupt;
         self.input_queue.submit_pending_steers_after_interrupt = false;

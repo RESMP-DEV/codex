@@ -1,8 +1,8 @@
 //! Explicit browser login shares credentials with request consumers and remains cancellable.
 
 use super::*;
-use crate::GatewayAuthError;
-use crate::GatewayAuthStatus;
+use crate::OAuthSessionError;
+use crate::OAuthSessionStatus;
 use pretty_assertions::assert_eq;
 use tokio::sync::Notify;
 
@@ -15,8 +15,8 @@ async fn status_subscriptions_survive_gateway_changes_and_are_isolated_by_home()
         auth_route_config: transport_default_auth_route_config(),
     };
     // Subscribe before any manager exists, as app-server does without gateway configuration.
-    let mut events = crate::subscribe_gateway_auth_status(&runtime);
-    crate::GatewayLoginControl::for_runtime(&runtime).require_explicit_login();
+    let mut events = crate::subscribe_oauth_session_status(&runtime);
+    crate::OAuthLoginControl::for_runtime(&runtime).require_explicit_login();
     let keyring = Arc::new(MockKeyringStore::default());
     let (other_manager, _other_home) = client(config(&server), keyring.clone());
     other_manager.resolve_access_token().await.unwrap_err();
@@ -28,7 +28,7 @@ async fn status_subscriptions_survive_gateway_changes_and_are_isolated_by_home()
     for client_id in ["first-gateway", "replacement-gateway"] {
         let mut gateway = config(&server);
         gateway.client_id = client_id.to_string();
-        let manager = GatewayAuthManager::new(
+        let manager = OAuthSessionManager::new(
             gateway.clone(),
             home.path().to_path_buf(),
             runtime.auth_route_config.http_client_factory(),
@@ -42,7 +42,7 @@ async fn status_subscriptions_survive_gateway_changes_and_are_isolated_by_home()
             .unwrap();
         assert_eq!(
             (event.config, event.status),
-            (gateway, GatewayAuthStatus::NotReady)
+            (gateway, OAuthSessionStatus::NotReady)
         );
         // The next gateway must reach the same subscriber after the last manager is dropped.
         drop(manager);
@@ -69,7 +69,10 @@ async fn cancel_releases_callback_while_reads_and_requests_stay_responsive() {
     });
     let check = async {
         let callback = url_rx.await.unwrap();
-        assert_eq!(observer.status().await.unwrap(), GatewayAuthStatus::Started);
+        assert_eq!(
+            observer.status().await.unwrap(),
+            OAuthSessionStatus::Started
+        );
         assert_eq!(
             observer.resolve_access_token().await.unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
@@ -79,13 +82,13 @@ async fn cancel_releases_callback_while_reads_and_requests_stay_responsive() {
     };
     let (result, callback) = tokio::join!(login, check);
     assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
-    let failed = GatewayAuthStatus::Failed {
+    let failed = OAuthSessionStatus::Failed {
         message: "Gateway sign-in was canceled".to_string(),
     };
     assert_eq!(observer.status().await.unwrap(), failed);
     assert_eq!(
         events.recv().await.unwrap().status,
-        GatewayAuthStatus::Started
+        OAuthSessionStatus::Started
     );
     assert_eq!(events.recv().await.unwrap().status, failed);
     tokio::time::timeout(Duration::from_secs(/*secs*/ 2), async {
@@ -115,9 +118,9 @@ async fn credential_read_failure_finishes_login_status() {
     assert_eq!(error.to_string(), message);
     assert_eq!(
         events.try_recv().unwrap().status,
-        GatewayAuthStatus::Started
+        OAuthSessionStatus::Started
     );
-    let failed = GatewayAuthStatus::Failed {
+    let failed = OAuthSessionStatus::Failed {
         message: message.into(),
     };
     assert_eq!(events.try_recv().unwrap().status, failed);
@@ -160,10 +163,13 @@ async fn rejected_credentials_stay_not_ready_until_replaced() {
             .kind(),
         std::io::ErrorKind::PermissionDenied
     );
-    assert_eq!(manager.status().await.unwrap(), GatewayAuthStatus::NotReady);
+    assert_eq!(
+        manager.status().await.unwrap(),
+        OAuthSessionStatus::NotReady
+    );
     assert_eq!(
         events.try_recv().unwrap().status,
-        GatewayAuthStatus::NotReady
+        OAuthSessionStatus::NotReady
     );
     for _ in 0..2 {
         assert_eq!(
@@ -172,9 +178,12 @@ async fn rejected_credentials_stay_not_ready_until_replaced() {
         );
         assert_eq!(
             events.try_recv().unwrap().status,
-            GatewayAuthStatus::NotReady
+            OAuthSessionStatus::NotReady
         );
-        assert_eq!(manager.status().await.unwrap(), GatewayAuthStatus::NotReady);
+        assert_eq!(
+            manager.status().await.unwrap(),
+            OAuthSessionStatus::NotReady
+        );
         assert!(matches!(
             events.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
@@ -197,7 +206,7 @@ async fn rejected_credentials_stay_not_ready_until_replaced() {
     );
     assert_eq!(
         manager.status().await.unwrap(),
-        GatewayAuthStatus::Succeeded
+        OAuthSessionStatus::Succeeded
     );
     assert_eq!(manager.resolve_access_token().await.unwrap(), "replacement");
 
@@ -236,7 +245,7 @@ async fn rejected_credentials_stay_not_ready_until_replaced() {
     let cache_lock = Arc::clone(&manager.state.cached_token).lock_owned().await;
     assert_eq!(
         manager.status().await.unwrap(),
-        GatewayAuthStatus::Succeeded
+        OAuthSessionStatus::Succeeded
     );
     drop(cache_lock);
     assert_eq!(manager.resolve_access_token().await.unwrap(), "signed-in");
@@ -256,12 +265,15 @@ async fn dropping_login_clears_in_progress_status() {
             .await
     });
     started_rx.await.unwrap();
-    assert_eq!(observer.status().await.unwrap(), GatewayAuthStatus::Started);
+    assert_eq!(
+        observer.status().await.unwrap(),
+        OAuthSessionStatus::Started
+    );
     login.abort();
     assert!(login.await.unwrap_err().is_cancelled());
     assert_eq!(
         observer.status().await.unwrap(),
-        GatewayAuthStatus::Failed {
+        OAuthSessionStatus::Failed {
             message: "Gateway sign-in was canceled".to_string()
         }
     );
@@ -279,7 +291,7 @@ async fn expired_readiness_stays_not_ready_while_refresh_is_blocked() {
         };
         manager.save_token(&expired).unwrap();
         // Seed the last successful observation with a credential that has since expired.
-        manager.publish_status(GatewayAuthStatus::Succeeded, Some(&expired));
+        manager.publish_status(OAuthSessionStatus::Succeeded, Some(&expired));
         let mut events = manager.state.status_tx.subscribe();
         Mock::given(method("POST"))
             .and(path("/token"))
@@ -291,7 +303,10 @@ async fn expired_readiness_stays_not_ready_while_refresh_is_blocked() {
             .mount(&server)
             .await;
         if read_before_refresh {
-            assert_eq!(manager.status().await.unwrap(), GatewayAuthStatus::NotReady);
+            assert_eq!(
+                manager.status().await.unwrap(),
+                OAuthSessionStatus::NotReady
+            );
         }
         // Block the real refresh on the cross-process store lock after it takes the cache lock.
         let store_lock = super::super::storage::lock_credentials(home.path())
@@ -307,11 +322,17 @@ async fn expired_readiness_stays_not_ready_while_refresh_is_blocked() {
                 }
             }) => ready.expect("refresh holds cache lock"),
         }
-        assert_eq!(manager.status().await.unwrap(), GatewayAuthStatus::NotReady);
-        assert_eq!(manager.status().await.unwrap(), GatewayAuthStatus::NotReady);
+        assert_eq!(
+            manager.status().await.unwrap(),
+            OAuthSessionStatus::NotReady
+        );
+        assert_eq!(
+            manager.status().await.unwrap(),
+            OAuthSessionStatus::NotReady
+        );
         assert_eq!(
             events.try_recv().unwrap().status,
-            GatewayAuthStatus::NotReady
+            OAuthSessionStatus::NotReady
         );
         assert!(matches!(
             events.try_recv(),
@@ -324,16 +345,16 @@ async fn expired_readiness_stays_not_ready_while_refresh_is_blocked() {
         let cache_lock = Arc::clone(&manager.state.cached_token).lock_owned().await;
         assert_eq!(
             manager.status().await.unwrap(),
-            GatewayAuthStatus::Succeeded
+            OAuthSessionStatus::Succeeded
         );
         drop(cache_lock);
         assert_eq!(
             events.try_recv().unwrap().status,
-            GatewayAuthStatus::Succeeded
+            OAuthSessionStatus::Succeeded
         );
         assert_eq!(
             manager.status().await.unwrap(),
-            GatewayAuthStatus::Succeeded
+            OAuthSessionStatus::Succeeded
         );
     }
 }
@@ -365,12 +386,12 @@ async fn external_credentials_recover_missing_and_failed_readiness() {
                 .login_with_browser(cancel.notified(), |_| cancel.notify_one())
                 .await
                 .unwrap_err();
-            GatewayAuthStatus::Failed {
+            OAuthSessionStatus::Failed {
                 message: "Gateway sign-in was canceled".into(),
             }
         } else {
             manager.resolve_access_token().await.unwrap_err();
-            GatewayAuthStatus::NotReady
+            OAuthSessionStatus::NotReady
         };
         assert_eq!(manager.status().await.unwrap(), expected);
         if failed_login {
@@ -397,7 +418,7 @@ async fn external_credentials_recover_missing_and_failed_readiness() {
         }
         assert_eq!(
             manager.status().await.unwrap(),
-            GatewayAuthStatus::Succeeded
+            OAuthSessionStatus::Succeeded
         );
         assert_eq!(manager.resolve_access_token().await.unwrap(), "replacement");
     }
@@ -433,9 +454,9 @@ async fn login_waits_for_background_credentials_and_can_cancel_while_queued() {
         assert_eq!(
             duplicate
                 .get_ref()
-                .and_then(|error| error.downcast_ref::<GatewayAuthError>())
+                .and_then(|error| error.downcast_ref::<OAuthSessionError>())
                 .copied(),
-            Some(GatewayAuthError::LoginInProgress),
+            Some(OAuthSessionError::LoginInProgress),
         );
         if cancel_while_queued {
             cancel.notify_one();
@@ -444,13 +465,16 @@ async fn login_waits_for_background_credentials_and_can_cancel_while_queued() {
                 .unwrap()
                 .unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
-            assert_eq!(manager.status().await.unwrap(), GatewayAuthStatus::NotReady);
+            assert_eq!(
+                manager.status().await.unwrap(),
+                OAuthSessionStatus::NotReady
+            );
             drop(cache_lock);
         } else {
             drop(cache_lock);
             let check = async {
                 url_rx.await.unwrap();
-                assert_eq!(manager.status().await.unwrap(), GatewayAuthStatus::Started);
+                assert_eq!(manager.status().await.unwrap(), OAuthSessionStatus::Started);
                 cancel.notify_one();
             };
             let (result, ()) = tokio::join!(login, check);
@@ -514,7 +538,7 @@ async fn legacy_policy_authorizes_missing_and_rejected_credentials() {
         );
         assert_eq!(
             manager.status().await.unwrap(),
-            GatewayAuthStatus::Succeeded
+            OAuthSessionStatus::Succeeded
         );
     }
 }

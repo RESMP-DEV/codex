@@ -9,7 +9,7 @@ use codex_secrets::redact_secrets;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::GatewayAuthConfig;
+use super::OAuthSessionConfig;
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub(super) struct StoredToken {
@@ -78,7 +78,7 @@ impl TokenResponse {
 
 pub(super) fn endpoint_error(
     error: OAuthError,
-    config: &GatewayAuthConfig,
+    config: &OAuthSessionConfig,
     grant_type: &str,
     redirect_uri: Option<&str>,
 ) -> io::Error {

@@ -214,7 +214,7 @@ pub enum Feature {
     NetworkProxy,
     /// Mask credentials and inject them through an already enabled network proxy.
     CredentialMasking,
-    /// Enable managed worktree creation and repository-aware sessions.
+    /// Removed compatibility flag. Managed worktrees and repository-aware sessions are always available.
     Worktrees,
     /// Respect host system proxy settings for Codex-owned network clients.
     RespectSystemProxy,
@@ -416,7 +416,7 @@ pub enum Feature {
     UltrafastMode,
     /// Enable explicitly requested model changes for later step captures.
     StepModelSwitching,
-    /// Enable voice conversations in the TUI.
+    /// Removed compatibility flag. TUI voice availability follows platform support.
     RealtimeConversation,
     /// Prevent idle system sleep while a turn is actively running.
     PreventIdleSleep,
@@ -667,7 +667,7 @@ impl Features {
                     self.record_legacy_usage_force("features.transcript_v2", Feature::TranscriptV2);
                     continue;
                 }
-                "tui_app_server" => {
+                "tui_app_server" | "worktrees" | "realtime_conversation" => {
                     continue;
                 }
                 "undo" => {
@@ -1453,7 +1453,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::Worktrees,
         key: "worktrees",
-        stage: Stage::Stable,
+        stage: Stage::Removed,
         default_enabled: true,
     },
     FeatureSpec {
@@ -1999,7 +1999,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::RealtimeConversation,
         key: "realtime_conversation",
-        stage: Stage::Stable,
+        stage: Stage::Removed,
         default_enabled: true,
     },
     FeatureSpec {

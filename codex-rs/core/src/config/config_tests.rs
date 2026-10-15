@@ -11909,6 +11909,8 @@ shell_tool = false
 
 #[test_case::test_case(Feature::Personality; "personality")]
 #[test_case::test_case(Feature::GuardianThreadContext; "guardian thread context")]
+#[test_case::test_case(Feature::Worktrees; "worktrees")]
+#[test_case::test_case(Feature::RealtimeConversation; "realtime conversation")]
 #[test_case::test_case(Feature::ShellZshFork; "shell zsh fork")]
 #[test_case::test_case(Feature::UnifiedExecZshFork; "unified exec zsh fork")]
 fn retired_feature_requirements_do_not_pin_configured_values(
@@ -11960,6 +11962,13 @@ fn retired_feature_requirements_do_not_pin_configured_values(
                 usize::from(feature != Feature::Personality),
             ),
         );
+        if matches!(feature, Feature::Worktrees | Feature::RealtimeConversation) {
+            assert!(
+                warnings[0].contains(&format!("Ignoring removed `features` requirement `{key}`"))
+            );
+            assert!(warnings[0].contains("enterprise"));
+            assert!(warnings[0].contains("availability no longer depends on this feature flag"));
+        }
     }
 
     Ok(())

@@ -101,6 +101,7 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
             /*runtime_paths*/ None,
             /*network_policy_decider*/ None,
             /*network_policy_audit_observer*/ None,
+            &codex_network_proxy::RemoteCredentialBrokerCache::default(),
             &ProcessTelemetry::default(),
         )
         .await
@@ -111,6 +112,7 @@ async fn snapshot_failure_retries_are_bounded_and_single_flight(
             /*runtime_paths*/ None,
             /*network_policy_decider*/ None,
             /*network_policy_audit_observer*/ None,
+            &codex_network_proxy::RemoteCredentialBrokerCache::default(),
             &ProcessTelemetry::default(),
         )
         .await

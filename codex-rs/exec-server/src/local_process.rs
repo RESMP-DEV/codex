@@ -161,6 +161,7 @@ struct Inner {
     notifications: std::sync::RwLock<Option<RpcNotificationSender>>,
     requests: Arc<std::sync::RwLock<Option<RpcServerRequestSender>>>,
     processes: Mutex<HashMap<ProcessId, ProcessEntry>>,
+    credential_brokers: codex_network_proxy::RemoteCredentialBrokerCache,
     #[cfg(unix)]
     shell_snapshots: crate::shell_snapshot::ShellSnapshotCache,
     telemetry: ExecServerTelemetry,
@@ -220,6 +221,7 @@ impl LocalProcess {
                 notifications: std::sync::RwLock::new(Some(notifications)),
                 requests: Arc::new(std::sync::RwLock::new(Some(requests))),
                 processes: Mutex::new(HashMap::new()),
+                credential_brokers: codex_network_proxy::RemoteCredentialBrokerCache::default(),
                 #[cfg(unix)]
                 shell_snapshots: crate::shell_snapshot::ShellSnapshotCache::default(),
                 telemetry,
@@ -368,6 +370,7 @@ impl LocalProcess {
             self.runtime_paths.as_ref(),
             network_policy_decider,
             network_policy_audit_observer,
+            &self.inner.credential_brokers,
             &telemetry,
         )
         .await?;
@@ -838,6 +841,7 @@ impl ExecBackend for LocalProcess {
                 self.runtime_paths.as_ref(),
                 /*network_policy_decider*/ None,
                 /*network_policy_audit_observer*/ None,
+                &self.inner.credential_brokers,
                 &ProcessTelemetry::default(),
             )
             .await
@@ -1928,6 +1932,8 @@ mod tests {
         let state = NetworkProxyState::from_remote_launch_config(
             RemoteNetworkProxyLaunchConfig::new(proxy_config),
             codex_utils_path_uri::Platform::native(),
+            &codex_network_proxy::RemoteCredentialBrokerCache::default(),
+            &HashMap::new(),
         )
         .expect("build network proxy state");
         let proxy = NetworkProxy::builder()

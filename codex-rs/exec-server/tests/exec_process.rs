@@ -2,6 +2,9 @@ mod common;
 #[cfg(unix)]
 #[path = "exec_process/shell_snapshot.rs"]
 mod shell_snapshot;
+#[cfg(unix)]
+#[path = "common/tls_proxy.rs"]
+mod tls_proxy;
 #[path = "exec_process/windows_sandbox.rs"]
 mod windows_sandbox;
 
@@ -492,19 +495,87 @@ async fn exec_metadata_overrides_policy_and_cached_snapshot(
 }
 
 #[cfg(unix)]
+#[test_case(false, "bash", &["-lc", "-lc"]; "unmasked")]
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), test_case(true, "bash", &["-c", "-c", "-lc"]; "masked_bash"))]
+#[cfg_attr(any(target_os = "linux", target_os = "macos"), test_case(true, "bash", &["-lc", "-lc"]; "bash_profile_fallback"))]
+#[cfg_attr(target_os = "macos", test_case(true, "zsh", &["-lc", "-lc"]; "zsh_profile_gateway_fallback"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial(remote_exec_server)]
-async fn shell_snapshot_v2_remote_managed_proxy_uses_prepared_execution_context() -> Result<()> {
-    let context = create_process_context(/*use_remote*/ true).await?;
+async fn shell_snapshot_v2_remote_managed_proxy_uses_prepared_execution_context(
+    credential_masking: bool,
+    shell_name: &str,
+    shell_args: &[&str],
+) -> Result<()> {
+    const API_KEY: &str = "sk-proj-executor-only-0000000000000000000000000000000000";
+    let shell_path = format!("/bin/{shell_name}");
+    let api_host = if shell_name == "zsh" {
+        "chatgpt.com"
+    } else {
+        "api.openai.com"
+    };
     let home = TempDir::new()?;
+    if credential_masking
+        && let Some(warning) = codex_sandboxing::system_bwrap_warning(
+            &PermissionProfile::workspace_write(),
+            home.path(),
+        )
+    {
+        eprintln!("skipping sandbox test: {warning}");
+        return Ok(());
+    }
+    let upstream = credential_masking
+        .then(|| tls_proxy::TlsInterceptingProxy::start(shell_args.len()))
+        .transpose()?;
+    let mut executor_env = vec![("OPENAI_API_KEY", API_KEY.to_string())];
+    if let Some(upstream) = &upstream {
+        let ca_path = home.path().join("upstream-ca.pem");
+        std::fs::write(&ca_path, &upstream.ca_cert_pem)?;
+        executor_env.extend([
+            ("AUTH_ALIAS", format!("Bearer {API_KEY}")),
+            ("OPENAI_BASE_URL", "https://api.openai.com/v1".to_string()),
+            ("GH_HOST", String::new()),
+            (
+                "GH_ENTERPRISE_TOKEN",
+                "executor-unbound-enterprise-token".to_string(),
+            ),
+            (
+                "CODEX_CA_CERTIFICATE",
+                ca_path.to_string_lossy().into_owned(),
+            ),
+            ("CURL_CA_BUNDLE", ca_path.to_string_lossy().into_owned()),
+            ("HTTPS_PROXY", upstream.url.clone()),
+            ("https_proxy", upstream.url.clone()),
+            ("ALL_PROXY", upstream.url.clone()),
+            ("all_proxy", upstream.url.clone()),
+            ("NO_PROXY", String::new()),
+            ("no_proxy", String::new()),
+        ]);
+    }
+    let mut server = common::exec_server::exec_server_with_env(executor_env, &[]).await?;
+    let environment = Environment::create_for_tests(Some(server.websocket_url().to_string()))?;
+    let backend = environment.get_exec_backend();
     let cwd = PathUri::from_host_native_path(home.path())?;
-    std::fs::write(
-        home.path().join(".bashrc"),
-        "printf '%s\\n' \"$HTTP_PROXY\" >> \"$HOME/captures\"\ntest \"$CODEX_NETWORK_PROXY_ACTIVE\" = 1 || exit 41\nexport PROFILE_ALLOWED=profile\nprofile_helper() { printf helper; }\n",
+    let profile_bin = home.path().join("profile-bin");
+    std::fs::create_dir(&profile_bin)?;
+    codex_utils_cargo_bin::write_executable(
+        &profile_bin.join("profile_command"),
+        "#!/bin/sh\nprintf helper\n",
     )?;
-    let policy = ExecEnvPolicy {
+    let profile = "printf '%s\\n' \"$HTTP_PROXY\" >> \"$HOME/captures\"\ntest \"$CODEX_NETWORK_PROXY_ACTIVE\" = 1 || exit 41\nexport PROFILE_ALLOWED=profile\nprofile_helper() { profile_command; }\n";
+    std::fs::write(home.path().join(".bashrc"), profile)?;
+    std::fs::write(
+        home.path().join(".bash_profile"),
+        "export PATH=\"$HOME/profile-bin:$PATH\"\n",
+    )?;
+    std::fs::write(
+        home.path().join(".zshenv"),
+        format!(
+            "export PATH=\"$HOME/profile-bin:$PATH\"\nexport OPENAI_BASE_URL=https://{api_host}/v1\n{profile}"
+        ),
+    )?;
+    let mut policy = ExecEnvPolicy {
         inherit: ShellEnvironmentPolicyInherit::All,
-        ignore_default_excludes: false,
+        ignore_default_excludes: true,
         exclude: Vec::new(),
         r#set: HashMap::from([(
             "HOME".to_string(),
@@ -514,39 +585,77 @@ async fn shell_snapshot_v2_remote_managed_proxy_uses_prepared_execution_context(
             "HOME".to_string(),
             "PATH".to_string(),
             "PROFILE_*".to_string(),
+            "OPENAI_API_KEY".to_string(),
         ],
     };
-    let proxy_config = RemoteNetworkProxyConfig::from_effective_config(&NetworkProxyConfig {
+    if credential_masking {
+        policy.include_only.extend(
+            [
+                "AUTH_ALIAS",
+                "GH_HOST",
+                "GH_ENTERPRISE_TOKEN",
+                "CURL_CA_BUNDLE",
+            ]
+            .map(str::to_string),
+        );
+    }
+    let mut proxy_settings = NetworkProxyConfig {
         enabled: true,
         ..NetworkProxyConfig::default()
-    })?;
+    };
+    proxy_settings.set_allowed_domains(vec![api_host.to_string()]);
+    let mut proxy_config = RemoteNetworkProxyConfig::from_effective_config(&proxy_settings)?;
+    proxy_config.credential_masking = credential_masking;
     let mut proxy_addresses = Vec::new();
+    let mut saved_api_key = None;
 
-    for attempt in 0..2 {
-        let started = context
-            .backend
+    for (attempt, &shell_args) in shell_args.iter().enumerate() {
+        let use_snapshot = shell_name == "bash" && shell_args == "-lc";
+        let expect_masking = credential_masking && shell_name == "bash" && !use_snapshot;
+        let expect_profile = use_snapshot || shell_name == "zsh";
+        let command = if expect_profile {
+            "profile_helper; printf '|%s|%s|%s' \"$PROFILE_ALLOWED\" \"$CODEX_NETWORK_PROXY_ACTIVE\" \"$HTTP_PROXY\""
+        } else {
+            "printf 'masked|%s|%s' \"$CODEX_NETWORK_PROXY_ACTIVE\" \"$HTTP_PROXY\""
+        };
+        let command = if credential_masking {
+            format!(
+                "{command}; test \"$GH_ENTERPRISE_TOKEN\" = executor-unbound-enterprise-token || exit 45; test \"$AUTH_ALIAS\" = \"Bearer $OPENAI_API_KEY\" || exit 42; printf '|%s' \"$OPENAI_API_KEY\"; curl --silent --show-error --fail --max-time 5 --noproxy '' --config \"$HOME/curl.conf\" \"${{OPENAI_BASE_URL:-https://api.openai.com/v1}}/models\" >/dev/null"
+            )
+        } else {
+            format!("{command}; test \"$OPENAI_API_KEY\" = '{API_KEY}' || exit 46")
+        };
+        let command = if credential_masking && attempt == 0 {
+            format!(
+                "printf 'header = \"Authorization: %s\"\\n' \"$AUTH_ALIAS\" > \"$HOME/curl.conf\" || exit 44; {command}"
+            )
+        } else {
+            command
+        };
+        let started = backend
             .start(ExecParams {
                 metadata: Default::default(),
                 process_id: ProcessId::from(format!("managed-snapshot-{attempt}")),
-                argv: vec![
-                    "/bin/bash".to_string(),
-                    "-lc".to_string(),
-                    "profile_helper; printf '|%s|%s|%s' \"$PROFILE_ALLOWED\" \"$CODEX_NETWORK_PROXY_ACTIVE\" \"$HTTP_PROXY\"".to_string(),
-                ],
+                argv: vec![shell_path.clone(), shell_args.to_string(), command],
                 cwd: cwd.clone(),
                 env_policy: Some(policy.clone()),
-                shell_snapshot: Some(ShellSnapshotRequest {
+                shell_snapshot: use_snapshot.then(|| ShellSnapshotRequest {
                     scope_id: "managed-attachment".to_string(),
                     shell: ShellInfo {
-                        name: "bash".to_string(),
-                        path: "/bin/bash".to_string(),
+                        name: shell_name.to_string(),
+                        path: shell_path.clone(),
                     },
                 }),
                 env: HashMap::new(),
                 tty: false,
                 pipe_stdin: false,
                 arg0: None,
-                sandbox: None,
+                sandbox: credential_masking.then(|| {
+                    FileSystemSandboxContext::from_permission_profile(
+                        PermissionProfile::workspace_write(),
+                        cwd.clone(),
+                    )
+                }),
                 enforce_managed_network: true,
                 managed_network: None,
                 network_proxy: Some(
@@ -559,18 +668,72 @@ async fn shell_snapshot_v2_remote_managed_proxy_uses_prepared_execution_context(
             .await?;
         let (stdout, stderr, status, closed) =
             collect_process_output_from_events(started.process).await?;
-        let proxy_address = stdout
-            .strip_prefix("helper|profile|1|")
-            .context("snapshot should restore profile functions and live proxy state")?;
-        assert!(proxy_address.starts_with("http://127.0.0.1:"));
         assert_eq!((stderr, status, closed), (String::new(), Some(0), true));
+        let prefix = if expect_profile {
+            "helper|profile|1|"
+        } else {
+            "masked|1|"
+        };
+        let proxy_state = stdout
+            .strip_prefix(prefix)
+            .context("command should preserve live proxy state")?;
+        let proxy_address = if let Some(upstream) = &upstream {
+            let (proxy_address, child_api_key) = proxy_state
+                .split_once('|')
+                .context("command should expose the child API key")?;
+            if expect_masking {
+                assert!(child_api_key.starts_with("sk-proj-"));
+                assert_ne!(child_api_key, API_KEY);
+                assert!(!stdout.contains(API_KEY));
+            } else {
+                assert_eq!(child_api_key, API_KEY);
+            }
+            let saved_api_key = saved_api_key.get_or_insert_with(|| child_api_key.to_string());
+            assert_eq!(
+                std::fs::read_to_string(home.path().join("curl.conf"))?,
+                format!("header = \"Authorization: Bearer {saved_api_key}\"\n")
+            );
+            let request = upstream.next_request()?;
+            assert_eq!(
+                (
+                    request.connect_authority.as_str(),
+                    request.request_line.as_str(),
+                    request.headers.get("authorization"),
+                ),
+                (
+                    format!("{api_host}:443").as_str(),
+                    "GET /v1/models HTTP/1.1",
+                    Some(&vec![format!("Bearer {API_KEY}")]),
+                )
+            );
+            proxy_address
+        } else {
+            proxy_state
+        };
+        assert!(proxy_address.starts_with("http://127.0.0.1:"));
         proxy_addresses.push(proxy_address.to_string());
     }
 
-    assert_eq!(
-        std::fs::read_to_string(home.path().join("captures"))?,
-        format!("{}\n", proxy_addresses[0])
-    );
+    let expected_captures = if shell_name == "zsh" {
+        Some(format!("{}\n", proxy_addresses.join("\n")))
+    } else {
+        shell_args
+            .iter()
+            .position(|flag| *flag == "-lc")
+            .map(|attempt| format!("{}\n", proxy_addresses[attempt]))
+    };
+    if let Some(expected_captures) = expected_captures {
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("captures"))?,
+            expected_captures
+        );
+    } else {
+        assert!(!home.path().join("captures").exists());
+    }
+    if let Some(upstream) = upstream {
+        upstream.finish()?;
+    }
+    server.shutdown().await?;
     Ok(())
 }
 

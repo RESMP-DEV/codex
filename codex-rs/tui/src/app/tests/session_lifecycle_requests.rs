@@ -1473,7 +1473,6 @@ async fn local_daemon_registers_approval_gated_mcp_tools_for_both_start_paths_sc
 -> Result<()> {
     let (mut app, events, _ops) = Box::pin(make_test_app_with_channels()).await;
     // Invalid optional worktree settings must preserve both daemon start paths.
-    app.config.features.enable(Feature::Worktrees)?;
     let codex_home = tempdir()?;
     app.config.codex_home = codex_home.path().to_path_buf().abs();
     app.config.sqlite = SqliteConfig::new_for_testing(codex_home.path().abs());

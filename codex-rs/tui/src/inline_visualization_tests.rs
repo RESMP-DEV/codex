@@ -346,7 +346,9 @@ fn finalized_agent_cell_replays_visualization_link() {
         .expect("visualization URL span");
     assert_eq!(
         url_span.style,
-        Style::new().fg(crate::style::accent_color()).underlined()
+        crate::render::highlight::foreground_style_for_scopes(&["markup.underline.link"])
+            .unwrap()
+            .underlined()
     );
     let destinations = lines
         .iter()

@@ -214,11 +214,6 @@ pub(super) async fn prepare(
             .await;
         }
     }
-    if !source.features.enabled(codex_features::Feature::Worktrees) {
-        color_eyre::eyre::bail!(
-            "`--worktree` requires the worktrees feature; enable it with `--enable worktrees`"
-        );
-    }
     if source.active_project.is_untrusted() {
         color_eyre::eyre::bail!(
             "`--worktree` cannot create a checkout from an explicitly untrusted source"

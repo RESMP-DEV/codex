@@ -423,11 +423,6 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             .cloud_config_bundle(gate_cloud_config.clone())
             .build()
             .await?;
-        if !gate_config.features.enabled(Feature::Worktrees) {
-            anyhow::bail!(
-                "--worktree requires the worktrees feature; enable it with --enable worktrees"
-            );
-        }
         if let Some(ExecCommand::Fork(args)) = command.as_mut() {
             let saved_cwd = worktree::fork_source(
                 args,

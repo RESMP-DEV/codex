@@ -334,6 +334,8 @@ impl NetworkProxyState {
     pub fn from_remote_launch_config(
         launch: crate::RemoteNetworkProxyLaunchConfig,
         executor_os: crate::Platform,
+        credential_brokers: &crate::RemoteCredentialBrokerCache,
+        environment: &HashMap<String, String>,
     ) -> Result<Self> {
         let crate::RemoteNetworkProxyLaunchConfig {
             proxy,
@@ -346,9 +348,15 @@ impl NetworkProxyState {
             proxy.enabled,
             "executor-local network proxy launch requires an enabled proxy"
         );
-        let config = proxy.into_network_proxy_config();
+        let mut config = proxy.into_network_proxy_config();
+        config.configure_credential_broker_environment(environment);
         let state = build_config_state(config, NetworkProxyConstraints::default(), executor_os)?;
-        Ok(Self {
+        let cached_broker = credential_brokers.broker_if_enabled(
+            environment_id.as_deref(),
+            audit_metadata.conversation_id.as_deref(),
+            &state.config,
+        );
+        let mut proxy_state = Self {
             environment_id: environment_id.map(Into::into),
             execution_id: execution_id.map(Into::into),
             ..Self::with_reloader_and_audit_metadata(
@@ -357,7 +365,11 @@ impl NetworkProxyState {
                 audit_metadata,
                 LocalBindingPolicy::DefaultFalse,
             )
-        })
+        };
+        if let Some(broker) = cached_broker {
+            proxy_state.credential_broker = broker;
+        }
+        Ok(proxy_state)
     }
 
     pub fn with_reloader(state: ConfigState, reloader: Arc<dyn ConfigReloader>) -> Self {
@@ -568,6 +580,15 @@ impl NetworkProxyState {
         env: &HashMap<String, String>,
     ) -> bool {
         self.credential_broker.virtualize_text(text, env)
+    }
+
+    pub(crate) fn handle_unmasked_credentials(
+        &self,
+        env: &mut HashMap<String, String>,
+        mode: crate::CredentialMaskingFailureMode,
+    ) -> anyhow::Result<()> {
+        self.credential_broker
+            .handle_unmasked_credentials(env, mode)
     }
 
     pub(crate) fn credential_broker_environment(

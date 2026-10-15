@@ -457,10 +457,7 @@ impl AppServerSession {
         app_event_tx: AppEventSender,
         status_updates: tokio::sync::broadcast::Sender<ThreadStatusChangedNotification>,
     ) -> std::io::Result<()> {
-        let worktrees = if !self.uses_remote_workspace()
-            && !config.active_project.is_untrusted()
-            && config.features.enabled(codex_features::Feature::Worktrees)
-        {
+        let worktrees = if !self.uses_remote_workspace() && !config.active_project.is_untrusted() {
             // Listing a fresh, nonexistent thread is read-only and returns an empty page
             // on supported stores. Probe before advertising tools or allocating a checkout.
             let support = self

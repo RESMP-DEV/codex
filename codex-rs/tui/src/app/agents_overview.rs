@@ -406,11 +406,10 @@ impl App {
         let mut view = AgentsOverviewView::new(
             rows,
             selected_thread_id,
-            self.config.features.enabled(Feature::Worktrees)
-                && !crate::uses_remote_workspace_or_environment(
-                    &self.app_server_target,
-                    self.environment_manager.as_ref(),
-                ),
+            !crate::uses_remote_workspace_or_environment(
+                &self.app_server_target,
+                self.environment_manager.as_ref(),
+            ),
             self.local_settings.tui.status_line_use_colors,
             self.app_event_tx.clone(),
             self.keymap.clone(),

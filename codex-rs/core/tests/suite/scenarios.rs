@@ -160,6 +160,10 @@ mod preparation;
 #[path = "scenarios_content_filter.rs"]
 mod content_filter;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "scenarios_credential_masking.rs"]
+mod credential_masking;
+
 #[path = "scenarios_provider_capabilities.rs"]
 mod provider_capabilities;
 

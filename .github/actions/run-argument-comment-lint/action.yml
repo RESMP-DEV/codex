@@ -24,6 +24,15 @@ runs:
         sudo DEBIAN_FRONTEND=noninteractive apt-get update
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
 
+    - name: Resolve app-server/exec-server compatibility releases
+      if: ${{ runner.os == 'Linux' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: bash
+      run: |
+        releases="$(python3 .github/scripts/resolve_exec_server_releases.py)"
+        echo "CODEX_COMPAT_RELEASES=$releases" >> "$GITHUB_ENV"
+
     - name: Run argument comment lint on codex-rs via Bazel
       if: ${{ runner.os != 'Windows' }}
       env:

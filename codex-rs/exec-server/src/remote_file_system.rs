@@ -5,13 +5,22 @@ use std::sync::MutexGuard;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use bytes::Bytes;
+use codex_file_system::FILE_WRITE_CHUNK_SIZE;
 use codex_utils_path_uri::PathUri;
+use futures::StreamExt;
+use futures::TryFutureExt;
+use futures::stream::BoxStream;
 use tokio::io;
 use tokio::sync::OnceCell;
+use tracing::Instrument;
+use tracing::instrument::WithSubscriber;
 use tracing::trace;
+use uuid::Uuid;
 
 use crate::CopyOptions;
 use crate::CreateDirectoryOptions;
+use crate::ExecServerClient;
 use crate::ExecServerError;
 use crate::ExecutorFileSystem;
 use crate::ExecutorFileSystemFuture;
@@ -28,13 +37,17 @@ use crate::WalkOutcome;
 use crate::WriteFileOptions;
 use crate::client::LazyRemoteExecServerClient;
 use crate::protocol::FsCanonicalizeParams;
+use crate::protocol::FsCloseParams;
 use crate::protocol::FsCopyParams;
 use crate::protocol::FsCreateDirectoryParams;
 use crate::protocol::FsGetMetadataParams;
+use crate::protocol::FsOpenMode;
+use crate::protocol::FsOpenParams;
 use crate::protocol::FsReadDirectoryParams;
 use crate::protocol::FsReadFileParams;
 use crate::protocol::FsRemoveParams;
 use crate::protocol::FsWalkParams;
+use crate::protocol::FsWriteBlockParams;
 use crate::protocol::FsWriteFileParams;
 
 const INVALID_REQUEST_ERROR_CODE: i64 = -32600;
@@ -317,6 +330,98 @@ impl RemoteFileSystem {
 }
 
 impl ExecutorFileSystem for RemoteFileSystem {
+    fn write_file_stream<'a>(
+        &'a self,
+        path: &'a PathUri,
+        contents: BoxStream<'a, FileSystemResult<Bytes>>,
+        sandbox: Option<&'a FileSystemSandboxContext>,
+    ) -> ExecutorFileSystemFuture<'a, u64> {
+        Box::pin(async move {
+            let client = self.client.get().await.map_err(map_remote_error)?;
+            let _invalidation = MetadataInvalidation(self);
+            let mut contents = contents.map(|chunk| {
+                let chunk = chunk?;
+                if !(1..=FILE_WRITE_CHUNK_SIZE).contains(&chunk.len()) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid file stream block length",
+                    ));
+                }
+                Ok(chunk)
+            });
+            // Choose the legacy write before opening a stream, so an open or write failure
+            // can never cause us to replay a replacement that may have already modified the file.
+            if !client
+                .supports_file_write_streaming()
+                .await
+                .map_err(map_remote_error)?
+            {
+                let mut bytes = Vec::new();
+                while let Some(chunk) = contents.next().await {
+                    bytes.extend_from_slice(&chunk?);
+                }
+                let len = bytes.len() as u64;
+                self.write_file(path, bytes, WriteFileOptions::default(), sandbox)
+                    .await?;
+                return Ok(len);
+            }
+
+            // Dropping the JoinHandle lets the open finish. If it succeeds after cancellation,
+            // Tokio drops the unclaimed registration, which closes that exact handle.
+            let open = client
+                .fs_open(FsOpenParams {
+                    handle_id: Uuid::new_v4().simple().to_string(),
+                    path: path.clone(),
+                    mode: FsOpenMode::Replace,
+                    sandbox: sandbox.cloned(),
+                })
+                .map_ok(move |opened| FileWriteRegistration {
+                    client,
+                    handle_id: opened.handle_id,
+                    active: true,
+                    runtime: tokio::runtime::Handle::current(),
+                });
+            let open = tokio::spawn(open.in_current_span().with_current_subscriber());
+            let mut registration = open
+                .await
+                .map_err(io::Error::other)?
+                .map_err(map_remote_error)?;
+
+            let result: io::Result<u64> = async {
+                let mut written = 0_u64;
+                while let Some(chunk) = contents.next().await {
+                    let chunk = chunk?;
+                    let next_offset = written.checked_add(chunk.len() as u64).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "file stream offset overflow")
+                    })?;
+                    registration
+                        .client
+                        .fs_write_block(FsWriteBlockParams {
+                            handle_id: registration.handle_id.clone(),
+                            offset: written,
+                            chunk: chunk.to_vec().into(),
+                        })
+                        .await
+                        .map_err(map_remote_error)?;
+                    written = next_offset;
+                }
+                Ok(written)
+            }
+            .await;
+            let close_result = registration
+                .client
+                .fs_close(FsCloseParams {
+                    handle_id: registration.handle_id.clone(),
+                })
+                .await
+                .map_err(map_remote_error);
+            registration.active = close_result.is_err();
+            let written = result?;
+            close_result?;
+            Ok(written)
+        })
+    }
+
     fn canonicalize<'a>(
         &'a self,
         path: &'a PathUri,
@@ -417,7 +522,36 @@ impl ExecutorFileSystem for RemoteFileSystem {
     }
 }
 
-fn map_remote_error(error: ExecServerError) -> io::Error {
+/// A cancelled write must stop later lookups from joining pre-cancellation metadata requests.
+struct MetadataInvalidation<'a>(&'a RemoteFileSystem);
+
+impl Drop for MetadataInvalidation<'_> {
+    fn drop(&mut self) {
+        self.0.lock_metadata_requests().clear();
+    }
+}
+
+/// Best-effort remote handle cleanup may outlive a cancelled transfer.
+struct FileWriteRegistration {
+    client: ExecServerClient,
+    handle_id: String,
+    active: bool,
+    runtime: tokio::runtime::Handle,
+}
+
+impl Drop for FileWriteRegistration {
+    fn drop(&mut self) {
+        if self.active {
+            let client = self.client.clone();
+            let handle_id = self.handle_id.clone();
+            self.runtime.spawn(async move {
+                let _ = client.fs_close(FsCloseParams { handle_id }).await;
+            });
+        }
+    }
+}
+
+pub(crate) fn map_remote_error(error: ExecServerError) -> io::Error {
     match error {
         ExecServerError::Server { code, message } if code == NOT_FOUND_ERROR_CODE => {
             io::Error::new(io::ErrorKind::NotFound, message)

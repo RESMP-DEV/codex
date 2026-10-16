@@ -2262,6 +2262,10 @@
         "enabled": {
           "type": "boolean"
         },
+        "trusted_content_hash": {
+          "description": "Approved plugin contents; kept separate for declaration-only clients.",
+          "type": "string"
+        },
         "trusted_hash": {
           "type": "string"
         }

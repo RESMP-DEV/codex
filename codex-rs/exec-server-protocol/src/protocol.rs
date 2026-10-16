@@ -266,7 +266,7 @@ impl EnvironmentInfo {
 
         let shell = codex_shell_command::shell_detect::default_user_shell();
         let credential_masking = cfg!(any(target_os = "linux", target_os = "macos"))
-            && shell.shell_type == ShellType::Bash;
+            && matches!(shell.shell_type, ShellType::Bash | ShellType::Zsh);
         Self {
             shell: shell.into(),
             executor_version: unknown_executor_version(),

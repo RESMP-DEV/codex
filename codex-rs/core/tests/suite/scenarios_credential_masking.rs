@@ -22,10 +22,12 @@ async fn remote_credential_masking_request_history(
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
-    if codex_core::shell::default_user_shell().name() != "bash" {
-        eprintln!("skipping credential masking: this scenario requires a Bash executor");
+    let shell = codex_core::shell::default_user_shell();
+    if !matches!(shell.name(), "bash" | "zsh") {
+        eprintln!("skipping credential masking: this scenario requires a Bash or Zsh executor");
         return Ok(());
     }
+    let use_zsh_snapshot = shell.name() == "zsh" && !configured_provider;
     let home = Arc::new(TempDir::new()?);
     if let Some(warning) =
         codex_sandboxing::system_bwrap_warning(&PermissionProfile::workspace_write(), home.path())
@@ -86,9 +88,15 @@ credential_masking = true
             )
             .expect("write credential masking config");
         })
-        .with_config(|config| {
+        .with_config(move |config| {
             configure_scenario_catalog(config);
             config.project_doc_max_bytes = 0;
+            if use_zsh_snapshot {
+                config
+                    .features
+                    .enable(Feature::ShellSnapshotV2)
+                    .expect("enable shell snapshots");
+            }
         })
         .with_model_info_override("gpt-5.5", |model| {
             model.tool_mode = Some(ToolMode::Direct);
@@ -118,7 +126,7 @@ credential_masking = true
                     &json!({
                         "cmd": command,
                         "environment_id": "remote",
-                        "login": use_login_shell,
+                        "login": use_login_shell || use_zsh_snapshot,
                         "yield_time_ms": 1000,
                     })
                     .to_string(),
@@ -195,6 +203,11 @@ credential_masking = true
             .replace_all(&snapshot, replacement)
             .into_owned();
     }
-    insta::assert_snapshot!("remote_credential_masking", snapshot);
+    let snapshot_name = if use_zsh_snapshot {
+        "remote_credential_masking_zsh"
+    } else {
+        "remote_credential_masking"
+    };
+    insta::assert_snapshot!(snapshot_name, snapshot);
     Ok(())
 }

@@ -136,7 +136,12 @@ impl Default for MarkdownStyles {
 impl MarkdownStyles {
     fn for_theme(theme: &syntect::highlighting::Theme) -> Self {
         let foreground = |scopes: &[&str]| {
-            foreground_style_for_scopes_with_theme(theme, scopes).unwrap_or_default()
+            let mut style =
+                foreground_style_for_scopes_with_theme(theme, scopes).unwrap_or_default();
+            style.fg = style.fg.map(|foreground| {
+                crate::style::readable_color_on(foreground, /*background*/ None)
+            });
+            style
         };
         Self {
             h1: foreground(&["markup.heading.1.markdown", "markup.heading.markdown"])
@@ -2675,20 +2680,13 @@ mod tests {
         let rendered =
             render_markdown_lines_with_width_and_cwd(markdown, Some(22), /*cwd*/ None);
         let source = rendered[0].source.as_ref().expect("blockquote source");
+        let styles = MarkdownStyles::default();
         assert_eq!(
             source.styled_range(0..source.text.len()),
             Line::from(vec![
-                Span::styled("block quote with ", MarkdownStyles::default().blockquote),
-                Span::styled(
-                    "content",
-                    MarkdownStyles::default()
-                        .blockquote
-                        .patch(MarkdownStyles::default().strong)
-                ),
-                Span::styled(
-                    " that should wrap nicely",
-                    MarkdownStyles::default().blockquote
-                ),
+                Span::styled("block quote with ", styles.blockquote),
+                Span::styled("content", styles.blockquote.patch(styles.strong)),
+                Span::styled(" that should wrap nicely", styles.blockquote),
             ])
         );
         let lines: Vec<_> = rendered.iter().map(|line| line.line.to_string()).collect();

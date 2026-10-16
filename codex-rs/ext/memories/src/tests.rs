@@ -230,6 +230,8 @@ async fn add_ad_hoc_note_tool_creates_note_file() {
             source: ToolCallSource::Direct,
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            attachment_store: codex_core::passthrough_image_store(),
+            ephemeral: false,
             environments: Vec::new(),
             payload: payload.clone(),
         })
@@ -314,6 +316,8 @@ async fn add_ad_hoc_note_tool_rejects_paths_as_filenames() {
             source: ToolCallSource::Direct,
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            attachment_store: codex_core::passthrough_image_store(),
+            ephemeral: false,
             environments: Vec::new(),
             payload,
         })
@@ -361,6 +365,8 @@ async fn read_tool_reads_memory_file() {
             source: ToolCallSource::Direct,
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            attachment_store: codex_core::passthrough_image_store(),
+            ephemeral: false,
             environments: Vec::new(),
             payload: payload.clone(),
         })
@@ -478,6 +484,8 @@ async fn search_tool_accepts_multiple_queries() {
             source: ToolCallSource::Direct,
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            attachment_store: codex_core::passthrough_image_store(),
+            ephemeral: false,
             environments: Vec::new(),
             payload: payload.clone(),
         })
@@ -554,6 +562,8 @@ async fn search_tool_accepts_windowed_all_match_mode() {
             source: ToolCallSource::Direct,
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            attachment_store: codex_core::passthrough_image_store(),
+            ephemeral: false,
             environments: Vec::new(),
             payload: payload.clone(),
         })
@@ -610,6 +620,8 @@ async fn search_tool_rejects_legacy_single_query() {
             source: ToolCallSource::Direct,
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            attachment_store: codex_core::passthrough_image_store(),
+            ephemeral: false,
             environments: Vec::new(),
             payload,
         })

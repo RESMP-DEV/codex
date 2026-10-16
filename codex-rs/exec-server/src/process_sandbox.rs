@@ -70,6 +70,16 @@ struct PreparedWindowsSandboxRequest {
 }
 
 impl PreparedExecRequest {
+    #[cfg(unix)]
+    pub(crate) fn credential_snapshot_proxy(&self, params: &ExecParams) -> Option<&NetworkProxy> {
+        if !params.network_proxy.as_ref()?.proxy.credential_masking
+            || !supports_credential_snapshot(params)
+        {
+            return None;
+        }
+        self.network_proxy_handle.as_ref()?.proxy()
+    }
+
     pub(crate) fn windows_sandbox_spawn_request(&self) -> Option<WindowsSandboxSpawnRequest<'_>> {
         self.windows_sandbox
             .as_ref()
@@ -83,6 +93,18 @@ impl PreparedExecRequest {
                 filesystem_overrides: request.filesystem_overrides.as_ref(),
             })
     }
+}
+
+fn supports_credential_snapshot(params: &ExecParams) -> bool {
+    cfg!(any(target_os = "linux", target_os = "macos"))
+        && params.arg0.is_none()
+        && params.shell_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.shell.name == "zsh"
+                && matches!(params.argv.as_slice(), [program, flag, _]
+                    if program == &snapshot.shell.path
+                        && flag == "-lc"
+                        && Path::new(program).file_name().is_some_and(|name| name == "zsh"))
+        })
 }
 
 #[tracing::instrument(
@@ -456,7 +478,10 @@ async fn prepare_managed_network(
             internal_error(format!("failed to prepare executor network proxy: {err}"))
         })?;
     if credential_masking {
-        if cfg!(any(target_os = "linux", target_os = "macos"))
+        if supports_credential_snapshot(params) {
+            // Requested snapshots trust startup profiles before masking their captured state.
+            proxy.restore_and_disable_brokered_credentials(&mut prepared.env, &mut []);
+        } else if cfg!(any(target_os = "linux", target_os = "macos"))
             && supported_shell
             && params.arg0.is_none()
             && params.shell_snapshot.is_none()

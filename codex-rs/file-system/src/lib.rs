@@ -1,6 +1,7 @@
 mod environment_accessor;
 mod exec_permission_profile_serde;
 mod find_up;
+mod nfs;
 
 use bytes::Bytes;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -28,6 +29,7 @@ pub use find_up::FindUpErrorPolicy;
 pub use find_up::find_nearest_ancestor_with_markers;
 pub use find_up::find_nearest_native_ancestor_with_markers;
 use futures::Stream;
+pub use nfs::is_nfs;
 use serde::Deserialize;
 use serde::Serialize;
 use std::future::Future;

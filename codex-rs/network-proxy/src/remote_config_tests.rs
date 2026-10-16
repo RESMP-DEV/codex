@@ -226,8 +226,8 @@ fn launch_config_materializes_audit_and_execution_attribution() {
     assert_eq!(state.execution_id().as_deref(), Some("execution-1"));
 }
 
-#[test]
-fn remote_credential_mappings_follow_the_environment_and_broker_config() {
+#[tokio::test]
+async fn remote_credential_mappings_follow_the_environment_and_broker_config() {
     const TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
     let brokers = crate::RemoteCredentialBrokerCache::default();
     let launch = |environment_id: &str,
@@ -283,13 +283,20 @@ fn remote_credential_mappings_follow_the_environment_and_broker_config() {
         "thread",
         NetworkMode::Full,
         /*allow_local_binding*/ false,
-        &next_env,
+        &env,
     );
+    let listener = next.clone();
+    next.bind_credential_broker_environment(&brokers, &next_env)
+        .await
+        .expect("bind startup credential context");
     next.virtualize_child_credentials(&mut next_env);
     let mut headers = rama_http::HeaderMap::from_iter([(
         rama_http::header::AUTHORIZATION,
         rama_http::HeaderValue::from_str(&format!("Bearer {placeholder}")).unwrap(),
     )]);
+    let mut listener_headers = headers.clone();
+    listener.inject_request_credentials("github.enterprise.example", &mut listener_headers);
+    assert_eq!(listener_headers, headers);
     first.inject_request_credentials("github.enterprise.example", &mut headers);
     assert_eq!(
         headers[rama_http::header::AUTHORIZATION].to_str().unwrap(),

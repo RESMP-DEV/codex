@@ -8,6 +8,9 @@ use std::fs;
 use std::process::Command;
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+static DAEMON_STARTUP_SERIAL: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
 #[tokio::test]
 #[cfg(unix)]
 async fn auto_daemon_start_attaches_to_shared_server() -> Result<()> {
@@ -152,6 +155,11 @@ async fn bedrock_onboarding_leaves_a_running_daemon_untouched() -> Result<()> {
 }
 
 async fn daemon_startup(command: &str) -> Result<()> {
+    // Background QoS is intentionally allowed to reduce throughput. Avoid
+    // making many independent daemon fixtures compete during this test binary.
+    #[cfg(target_os = "macos")]
+    let _serial = DAEMON_STARTUP_SERIAL.acquire().await?;
+
     #[cfg(windows)]
     let elevated = codex_app_server_daemon::is_elevated()?;
     #[cfg(not(windows))]

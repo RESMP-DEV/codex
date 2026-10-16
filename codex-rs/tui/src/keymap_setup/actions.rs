@@ -136,6 +136,7 @@ define_keymap_actions! {
         prompt_stack_back => "Move back through questions toward the composer.",
         skip_question => "Skip the focused question.",
         toggle_voice => "Start or stop a voice conversation.",
+        open_presets => "Run or save reusable inputs.",
         toggle_voice_mute => "Mute or unmute the voice microphone.",
     }
     composer "Composer" {

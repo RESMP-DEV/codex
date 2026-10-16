@@ -66,6 +66,7 @@ mod exec_args_tests;
 mod exec_server_args_tests;
 mod exec_server_auth;
 mod exec_server_command;
+mod exec_server_credential;
 mod exec_server_telemetry;
 mod marketplace_cmd;
 mod mcp_cmd;

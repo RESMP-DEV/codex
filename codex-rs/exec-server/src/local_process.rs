@@ -385,6 +385,7 @@ impl LocalProcess {
                 &mut prepared,
                 &self.inner.telemetry,
                 CapturePurpose::Execution,
+                &self.inner.credential_brokers,
             )
             .await?;
         if prepared.command.is_empty() {
@@ -853,6 +854,7 @@ impl ExecBackend for LocalProcess {
                     &mut prepared,
                     &self.inner.telemetry,
                     CapturePurpose::Prewarm,
+                    &self.inner.credential_brokers,
                 )
                 .await
                 .map(|_| ())

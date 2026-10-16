@@ -48,6 +48,11 @@ use settings::MAX_SHUTDOWN_GRACE_SECONDS;
 use tokio::time::sleep;
 
 const START_POLL_INTERVAL: Duration = Duration::from_millis(50);
+// The managed process starts with background CPU and I/O policy on macOS, so
+// foreground load can legitimately delay readiness.
+#[cfg(target_os = "macos")]
+const START_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(target_os = "macos"))]
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 // Leave room for the longest graceful stop, forced-exit check, and restart.
 const OPERATION_LOCK_TIMEOUT: Duration =

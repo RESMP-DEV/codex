@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use codex_utils_path_uri::PathUri;
 use tokio::io;
-use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
 use tracing::trace;
 
@@ -46,6 +47,7 @@ type InFlightMetadataRequest = OnceCell<Result<FileMetadata, Arc<io::Error>>>;
 
 pub(crate) struct RemoteFileSystem {
     client: LazyRemoteExecServerClient,
+    // Only the in-flight request map is locked; metadata I/O happens outside this lock.
     metadata_requests: Mutex<HashMap<PathUri, Arc<InFlightMetadataRequest>>>,
 }
 
@@ -56,6 +58,14 @@ impl RemoteFileSystem {
             client,
             metadata_requests: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn lock_metadata_requests(
+        &self,
+    ) -> MutexGuard<'_, HashMap<PathUri, Arc<InFlightMetadataRequest>>> {
+        self.metadata_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     async fn canonicalize(
@@ -126,7 +136,7 @@ impl RemoteFileSystem {
                 sandbox: sandbox.cloned(),
             })
             .await;
-        self.metadata_requests.lock().await.clear();
+        self.lock_metadata_requests().clear();
         result.map_err(map_remote_error)?;
         Ok(())
     }
@@ -147,7 +157,7 @@ impl RemoteFileSystem {
                 sandbox: sandbox.cloned(),
             })
             .await;
-        self.metadata_requests.lock().await.clear();
+        self.lock_metadata_requests().clear();
         result.map_err(map_remote_error)?;
         Ok(())
     }
@@ -164,7 +174,7 @@ impl RemoteFileSystem {
         }
 
         let request = {
-            let mut requests = self.metadata_requests.lock().await;
+            let mut requests = self.lock_metadata_requests();
             requests.retain(|_, in_flight| Arc::strong_count(in_flight) > 1);
             Arc::clone(requests.entry(path.clone()).or_default())
         };
@@ -180,7 +190,7 @@ impl RemoteFileSystem {
             Err(error) => Err(io::Error::new(error.kind(), error.to_string())),
         };
 
-        let mut requests = self.metadata_requests.lock().await;
+        let mut requests = self.lock_metadata_requests();
         if requests
             .get(path)
             .is_some_and(|in_flight| Arc::ptr_eq(in_flight, &request))
@@ -278,7 +288,7 @@ impl RemoteFileSystem {
                 sandbox: sandbox.cloned(),
             })
             .await;
-        self.metadata_requests.lock().await.clear();
+        self.lock_metadata_requests().clear();
         result.map_err(map_remote_error)?;
         Ok(())
     }
@@ -300,7 +310,7 @@ impl RemoteFileSystem {
                 sandbox: sandbox.cloned(),
             })
             .await;
-        self.metadata_requests.lock().await.clear();
+        self.lock_metadata_requests().clear();
         result.map_err(map_remote_error)?;
         Ok(())
     }

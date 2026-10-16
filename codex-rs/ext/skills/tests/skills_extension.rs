@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
 use assert_matches::assert_matches;
+use codex_attachment_store::InlineAttachmentStore;
 use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
@@ -2085,6 +2086,8 @@ async fn skills_list_only_returns_model_visible_bounded_metadata() -> TestResult
         source: ToolCallSource::Direct,
         conversation_history: ConversationHistory::default(),
         turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+        attachment_store: Arc::new(InlineAttachmentStore),
+        ephemeral: false,
         environments: Vec::new(),
         payload: payload.clone(),
     };
@@ -2245,6 +2248,8 @@ async fn skills_list_only_returns_model_visible_bounded_metadata() -> TestResult
             source: ToolCallSource::Direct,
             conversation_history: ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            attachment_store: Arc::new(InlineAttachmentStore),
+            ephemeral: false,
             environments: Vec::new(),
             payload: insufficient_budget_payload,
         })

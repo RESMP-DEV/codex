@@ -1970,6 +1970,7 @@ dependencies = [
  "base64 0.22.1",
  "caseless",
  "chrono",
+ "codex-attachment-store",
  "codex-extension-api",
  "codex-protocol",
  "codex-state",
@@ -2226,6 +2227,7 @@ dependencies = [
  "codex-uds",
  "codex-utils-cargo-bin",
  "codex-utils-home-dir",
+ "codex-utils-process",
  "futures",
  "libc",
  "pretty_assertions",
@@ -3483,6 +3485,7 @@ dependencies = [
  "codex-utils-absolute-path",
  "codex-utils-path-uri",
  "futures",
+ "rustix 1.1.4",
  "serde",
 ]
 
@@ -3757,6 +3760,7 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "codex-api",
+ "codex-attachment-store",
  "codex-core",
  "codex-exec-server",
  "codex-extension-api",
@@ -3771,10 +3775,13 @@ dependencies = [
  "codex-utils-image",
  "codex-utils-path-uri",
  "http 1.4.0",
+ "image",
  "pretty_assertions",
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -4619,6 +4626,7 @@ dependencies = [
  "assert_matches",
  "blake3",
  "codex-analytics",
+ "codex-attachment-store",
  "codex-config",
  "codex-exec-server",
  "codex-extension-api",
@@ -4655,6 +4663,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "codex-file-system",
  "codex-git-utils",
  "codex-history",
  "codex-protocol",
@@ -4772,6 +4781,7 @@ name = "codex-tools"
 version = "0.0.0"
 dependencies = [
  "bitflags 2.13.1",
+ "codex-attachment-store",
  "codex-code-mode",
  "codex-connectors",
  "codex-extension-items",

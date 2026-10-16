@@ -755,13 +755,15 @@ fn inline_code() {
 
 #[test]
 fn inline_code_and_file_paths_follow_syntax_theme() {
-    let markdown = "Use `src/main.rs` and [](./src/lib.rs).";
+    let markdown = "# Heading\n\n**Bold** *Italic* [Link](https://example.com)\n\n> Quote\n\n1. Ordered\n\n- Unordered\n\nUse `src/main.rs` and [](./src/lib.rs).";
     let mut rendered = Vec::new();
-    for name in [
-        "catppuccin-mocha",
-        "catppuccin-latte",
-        "ansi",
-        "no-markup-color",
+    for (name, background) in [
+        ("catppuccin-mocha", "dark"),
+        ("catppuccin-mocha", "light"),
+        ("catppuccin-latte", "light"),
+        ("nord", "dark"),
+        ("ansi", "dark"),
+        ("no-markup-color", "dark"),
     ] {
         let theme = if name == "no-markup-color" {
             syntect::highlighting::Theme::default()
@@ -769,7 +771,7 @@ fn inline_code_and_file_paths_follow_syntax_theme() {
             crate::render::highlight::resolve_theme_by_name(name, /*codex_home*/ None)
                 .expect("bundled theme")
         };
-        let colors = if name == "catppuccin-latte" {
+        let colors = if background == "light" {
             crate::terminal_probe::DefaultColors {
                 fg: (30, 30, 30),
                 bg: (255, 255, 255),
@@ -810,7 +812,7 @@ fn inline_code_and_file_paths_follow_syntax_theme() {
             if name == "no-markup-color" {
                 assert_eq!(code_style, ratatui::style::Style::new().fg(accent_color()));
             } else {
-                rendered.push((name, lines));
+                rendered.push((name, background, lines));
             }
         });
     }

@@ -171,6 +171,8 @@ pub struct TuiGlobalKeymap {
 #[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct TuiChatKeymap {
+    /// Open saved prompts and slash commands.
+    pub open_presets: Option<KeybindingsSpec>,
     /// Start or stop a voice conversation.
     pub toggle_voice: Option<KeybindingsSpec>,
     /// Toggle the microphone in an active voice conversation.

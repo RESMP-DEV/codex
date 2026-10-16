@@ -1041,6 +1041,14 @@ fn app_server_target_for_launch(
         return Ok(AppServerTarget::Embedded);
     }
     Ok(match explicit_remote_endpoint {
+        Some(RemoteAppServerEndpoint::UnixSocket { socket_path })
+            if default_daemon_socket.as_ref() == Some(&socket_path) =>
+        {
+            AppServerTarget::LocalDaemon {
+                endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+                allow_embedded_fallback: false,
+            }
+        }
         Some(endpoint) => AppServerTarget::Remote { endpoint },
         // A shared daemon cannot adopt this invocation's executor selection.
         None if can_reuse_implicit_local_daemon && exec_server_url.is_none() => {
@@ -3198,23 +3206,27 @@ requires_openai_auth = {requires_openai_auth}
     fn app_server_target_for_launch_uses_local_daemon_for_default_socket() -> color_eyre::Result<()>
     {
         let socket_path = AbsolutePathBuf::relative_to_current_dir("codex.sock")?;
-        let target = app_server_target_for_launch(
-            /*explicit_remote_endpoint*/ None,
-            Some(socket_path.clone()),
-            /*can_reuse_implicit_local_daemon*/ true,
-            /*workload_identity_selected*/ false,
-            /*exec_server_url*/ None,
-        )?;
-
-        assert_eq!(
-            target,
-            AppServerTarget::LocalDaemon {
-                allow_embedded_fallback: true,
-                endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
-            }
-        );
-        assert!(!target.uses_remote_workspace());
-        assert_eq!(target.thread_params_mode(), ThreadParamsMode::Embedded);
+        let endpoint = RemoteAppServerEndpoint::UnixSocket {
+            socket_path: socket_path.clone(),
+        };
+        for explicit in [false, true] {
+            let target = app_server_target_for_launch(
+                explicit.then_some(endpoint.clone()),
+                Some(socket_path.clone()),
+                /*can_reuse_implicit_local_daemon*/ !explicit,
+                /*workload_identity_selected*/ false,
+                /*exec_server_url*/ None,
+            )?;
+            assert_eq!(
+                target,
+                AppServerTarget::LocalDaemon {
+                    allow_embedded_fallback: !explicit,
+                    endpoint: endpoint.clone(),
+                }
+            );
+            assert!(!target.uses_remote_workspace());
+            assert_eq!(target.thread_params_mode(), ThreadParamsMode::Embedded);
+        }
         Ok(())
     }
 

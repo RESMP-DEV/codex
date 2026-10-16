@@ -927,6 +927,18 @@ impl NetworkProxy {
         self.state.current_cfg().await
     }
 
+    /// Selects cached credentials for the startup environment without changing listeners or policy.
+    /// Restore any existing placeholders before binding, then prepare the environment for execution.
+    pub async fn bind_credential_broker_environment(
+        &self,
+        credential_brokers: &crate::RemoteCredentialBrokerCache,
+        environment: &HashMap<String, String>,
+    ) -> Result<()> {
+        self.state
+            .bind_credential_broker_environment(credential_brokers, environment)
+            .await
+    }
+
     /// Revision of credential configuration, excluding ordinary network policy changes.
     pub fn credential_broker_config_revision(&self) -> u64 {
         self.state.credential_broker_config_revision()
@@ -1253,7 +1265,8 @@ impl NetworkProxy {
         let environment_id = self
             .execution_scope
             .as_ref()
-            .map(|scope| scope.environment_id.as_str());
+            .map(|scope| scope.environment_id.as_str())
+            .or(self.state.environment_id());
         self.state
             .virtualize_snapshot_credentials(env, environment_id);
     }
@@ -1646,6 +1659,7 @@ impl NetworkProxy {
             *active_route = Some(Arc::clone(&route));
             drop(active_route);
             return Ok(NetworkProxyHandle::windows_shared(
+                self.clone(),
                 route,
                 Arc::clone(&windows_runtime.active_route),
                 Arc::clone(&self.environment_proxies),
@@ -1720,6 +1734,7 @@ impl NetworkProxy {
 
         Ok(NetworkProxyHandle {
             runtime: Some(ProxyRuntime::Listeners(listeners)),
+            proxy: Some(self.clone()),
             environment_proxies: Some(Arc::clone(&self.environment_proxies)),
             #[cfg(target_os = "windows")]
             windows_active_route: None,
@@ -1729,6 +1744,7 @@ impl NetworkProxy {
 
 pub struct NetworkProxyHandle {
     runtime: Option<ProxyRuntime>,
+    proxy: Option<NetworkProxy>,
     environment_proxies: Option<Arc<Mutex<HashMap<String, EnvironmentProxy>>>>,
     #[cfg(target_os = "windows")]
     windows_active_route: Option<Arc<Mutex<Option<Arc<WindowsProxyRoute>>>>>,
@@ -1738,6 +1754,7 @@ impl NetworkProxyHandle {
     fn noop() -> Self {
         Self {
             runtime: None,
+            proxy: None,
             environment_proxies: None,
             #[cfg(target_os = "windows")]
             windows_active_route: None,
@@ -1746,15 +1763,22 @@ impl NetworkProxyHandle {
 
     #[cfg(target_os = "windows")]
     fn windows_shared(
+        proxy: NetworkProxy,
         route: Arc<WindowsProxyRoute>,
         active_route: Arc<Mutex<Option<Arc<WindowsProxyRoute>>>>,
         environment_proxies: Arc<Mutex<HashMap<String, EnvironmentProxy>>>,
     ) -> Self {
         Self {
             runtime: Some(ProxyRuntime::SharedIngress { route }),
+            proxy: Some(proxy),
             environment_proxies: Some(environment_proxies),
             windows_active_route: Some(active_route),
         }
+    }
+
+    /// Returns the running proxy. Disabled proxy handles return `None`.
+    pub fn proxy(&self) -> Option<&NetworkProxy> {
+        self.proxy.as_ref()
     }
 
     pub async fn wait(mut self) -> Result<()> {
@@ -1857,6 +1881,7 @@ mod tests {
             });
             let handle = NetworkProxyHandle {
                 runtime: Some(ProxyRuntime::Listeners(listeners)),
+                proxy: None,
                 environment_proxies: Some(Arc::new(Mutex::new(HashMap::new()))),
                 #[cfg(target_os = "windows")]
                 windows_active_route: None,

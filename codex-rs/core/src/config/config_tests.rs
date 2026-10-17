@@ -102,6 +102,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::NetworkAccess;
 use codex_protocol::protocol::RealtimeVoice;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol_test_support::ContentItemTestExt;
 use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use tempfile::tempdir;
@@ -12358,7 +12359,10 @@ max_concurrent_threads_per_session = 17
             &config, messages, /*omit_update_plan_instructions*/ false,
         );
         for hint in [usage_hints.root, usage_hints.subagent] {
-            let hint = hint.expect("default usage hints should be present").body();
+            let hint = hint
+                .expect("default usage hints should be present")
+                .body()
+                .expect_text();
             assert!(hint.contains(concurrency_guidance));
             assert_eq!(
                 hint.contains("When calling `wait_agent`, prefer longer waits"),
@@ -12408,8 +12412,8 @@ expose_spawn_agent_model_overrides = true
     );
     assert_eq!(
         (
-            usage_hints.root.map(|hint| hint.body()),
-            usage_hints.subagent.map(|hint| hint.body()),
+            usage_hints.root.map(|hint| hint.body().expect_text()),
+            usage_hints.subagent.map(|hint| hint.body().expect_text()),
         ),
         (
             Some("## Plan tool\nRoot guidance.".to_string()),
@@ -12441,10 +12445,14 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
             usage_hints_without_model_overrides.subagent,
         ),
     ] {
-        let hint = hint.expect("default usage hints should be present").body();
+        let hint = hint
+            .expect("default usage hints should be present")
+            .body()
+            .expect_text();
         let hint_without_model_overrides = hint_without_model_overrides
             .expect("default usage hints should be present without model overrides")
-            .body();
+            .body()
+            .expect_text();
 
         let model_override_guidance = hint
             .strip_prefix(hint_without_model_overrides.as_str())

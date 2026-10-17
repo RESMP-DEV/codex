@@ -96,6 +96,7 @@ members = [
     "realtime-webrtc",
     "voice-host",
     "protocol",
+    "protocol/tests/support",
     "prompts",
     "rollout",
     "rollout-trace",
@@ -266,6 +267,7 @@ codex-plugin = { path = "plugin" }
 codex-model-provider = { path = "model-provider" }
 codex-process-hardening = { path = "process-hardening" }
 codex-protocol = { path = "protocol" }
+codex-protocol-test-support = { path = "protocol/tests/support" }
 codex-prompts = { path = "prompts" }
 codex-queue-extension = { path = "ext/queue" }
 codex-responses-api-proxy = { path = "responses-api-proxy" }

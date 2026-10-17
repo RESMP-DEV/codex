@@ -2162,7 +2162,10 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventTex
             ) =>
         {
             Some(RealtimeEventText::Handoff(
-                UserVerificationNotice.render(),
+                UserVerificationNotice
+                    .render()
+                    .into_text()
+                    .unwrap_or_default(),
                 None,
             ))
         }

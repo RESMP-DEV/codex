@@ -174,10 +174,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Bazel
-        uses: ./.github/actions/setup-bazel-ci
+      - name: Prepare Bazel CI
+        uses: ./.github/actions/prepare-bazel-ci
         with:
           target: ${{ matrix.target }}
+          cache-scope: bazel-v8
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0

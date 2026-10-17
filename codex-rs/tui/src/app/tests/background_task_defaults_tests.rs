@@ -716,6 +716,7 @@ async fn command_center_new_preserves_only_selected_server_profiles() -> Result<
     )
     .await?;
     let mut server = AppServerSession::new(
+        crate::backend_id::BackendId::new(),
         codex_app_server_client::AppServerClient::InProcess(client),
         crate::app_server_session::ThreadParamsMode::Remote,
     );

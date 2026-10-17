@@ -8839,6 +8839,13 @@ class McpServerStatus(BaseModel):
         ),
     ] = None
     server_info: Annotated[McpServerInfo | None, Field(alias="serverInfo")] = None
+    tool_list_meta: Annotated[
+        Any | None,
+        Field(
+            alias="toolListMeta",
+            description="Opaque `_meta` from the first page of the corresponding MCP tool catalog. Null when unavailable.",
+        ),
+    ] = None
     tools: dict[str, Tool]
     tools_error: Annotated[
         str | None,

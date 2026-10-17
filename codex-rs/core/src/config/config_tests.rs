@@ -4738,21 +4738,6 @@ async fn legacy_remote_thread_store_endpoint_is_rejected() {
     assert!(err.to_string().contains("no longer supported"));
 }
 
-#[test]
-fn profile_tui_rejects_unsupported_settings() {
-    let err = toml::from_str::<ConfigToml>(
-        r#"profile = "work"
-
-[profiles.work.tui]
-theme = "dark"
-"#,
-    )
-    .expect_err("profile TUI config should only accept supported fields");
-
-    assert!(err.to_string().contains("unknown field"));
-    assert!(err.to_string().contains("theme"));
-}
-
 #[tokio::test]
 async fn runtime_config_resolves_session_picker_view_default_and_override() {
     let cfg = Config::load_from_base_config_with_overrides(

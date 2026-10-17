@@ -322,6 +322,7 @@ pub(crate) struct AppServerBootstrap {
 }
 
 pub(crate) struct AppServerSession {
+    backend_id: crate::backend_id::BackendId,
     client: AppServerClient,
     next_request_id: i64,
     history_pagination: HashMap<ThreadId, history::ThreadHistoryPagination>,
@@ -428,8 +429,13 @@ impl AppServerSession {
         self.client.platform_os()
     }
 
-    pub(crate) fn new(client: AppServerClient, thread_params_mode: ThreadParamsMode) -> Self {
+    pub(crate) fn new(
+        backend_id: crate::backend_id::BackendId,
+        client: AppServerClient,
+        thread_params_mode: ThreadParamsMode,
+    ) -> Self {
         Self {
+            backend_id,
             client,
             next_request_id: 1,
             history_pagination: HashMap::new(),
@@ -449,6 +455,10 @@ impl AppServerSession {
             dynamic_tool_mcp: None,
             worktree_source_config_builder: None,
         }
+    }
+
+    pub(crate) fn backend_id(&self) -> crate::backend_id::BackendId {
+        self.backend_id
     }
 
     pub(crate) async fn start_dynamic_tool_mcp(

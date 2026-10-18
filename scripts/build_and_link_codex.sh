@@ -25,11 +25,15 @@ Options:
   --install-path <path>      Install path to update (default: ~/.local/bin/codex).
   --lib-root <path>          Snapshot root (default: ~/.local/lib/resmp/codex).
   --keep-snapshots <count>   Non-protected snapshots to retain (default: 4).
+  --refresh-daemon <mode>    Repin the app-server daemon after publishing:
+                             auto (default) refresh when no interactive codex
+                             client is running, always, or never.
   -h, --help                 Show this help text.
 
 Environment:
   CODEX_LIB_ROOT            Default for --lib-root.
   CODEX_KEEP_SNAPSHOTS      Default for --keep-snapshots.
+  CODEX_REFRESH_DAEMON      Default for --refresh-daemon.
 EOF
 }
 
@@ -37,12 +41,27 @@ do_build=1
 install_path="${HOME}/.local/bin/codex"
 lib_root="${CODEX_LIB_ROOT:-${HOME}/.local/lib/resmp/codex}"
 keep_snapshots="${CODEX_KEEP_SNAPSHOTS:-4}"
+refresh_daemon="${CODEX_REFRESH_DAEMON:-auto}"
 
 while (($# > 0)); do
   case "$1" in
     --no-build)
       do_build=0
       shift
+      ;;
+    --refresh-daemon)
+      if (($# < 2)); then
+        echo "error: --refresh-daemon requires a value" >&2
+        exit 1
+      fi
+      case "$2" in
+        auto | always | never) refresh_daemon="$2" ;;
+        *)
+          echo "error: --refresh-daemon must be auto, always, or never" >&2
+          exit 1
+          ;;
+      esac
+      shift 2
       ;;
     --install-path)
       if (($# < 2)); then
@@ -197,11 +216,44 @@ elif [[ "${host_path}" -ot "${release_bin}" ]]; then
 fi
 echo "Release SHA: ${release_sha}"
 
-# --- daemon refresh hint --------------------------------------------------------
-# The running daemon keeps its own copy under CODEX_HOME; point the user at the
-# update command instead of restarting it here (it may interrupt active work).
+# --- daemon refresh --------------------------------------------------------------
+# The running daemon keeps its own pinned copy under CODEX_HOME and does not
+# follow the invoking CLI, so a publish without a daemon refresh silently leaves
+# every resume attaching to the previous build. Refresh by default, but never
+# while an interactive codex client could be interrupted mid-turn: the update
+# restarts the daemon, which drops attached TUI/resume sessions.
+# Non-TUI commands (app-server, exec, mcp, daemon lifecycle) are excluded from
+# the client check; they do not hold interactive threads in the shared server.
+codex_tui_clients_running() {
+  ps -axo command= |
+    grep -E '(^|/)codex( |$)' |
+    grep -vE 'app-server|/exec |exec |mcp |daemon|grep' || true
+}
+
 if [[ -e "${HOME}/.codex/packages/app-server-daemon/current" ]]; then
-  echo "note: a daemon package is installed; run 'codex app-server daemon update --from-cli --yes' to switch it to this snapshot." >&2
+  case "${refresh_daemon}" in
+    never)
+      echo "note: daemon refresh skipped (--refresh-daemon never); run '${install_path} app-server daemon update --from-cli --yes' manually." >&2
+      ;;
+    always | auto)
+      clients=""
+      if [[ "${refresh_daemon}" == "auto" ]]; then
+        clients="$(codex_tui_clients_running)"
+      fi
+      if [[ -n "${clients}" ]]; then
+        echo "note: interactive codex clients are attached; daemon refresh deferred to avoid interrupting them:" >&2
+        printf '%s\n' "${clients}" >&2
+        echo "note: rerun this script later or pass --refresh-daemon always to force." >&2
+      else
+        echo "Repointing the app-server daemon to ${snapshot_name}..." >&2
+        if "${install_path}" app-server daemon update --from-cli --yes >/dev/null 2>&1; then
+          echo "Daemon refreshed to this snapshot." >&2
+        else
+          echo "warning: daemon refresh failed; run '${install_path} app-server daemon update --from-cli --yes' manually." >&2
+        fi
+      fi
+      ;;
+  esac
 fi
 
 if command -v codex >/dev/null 2>&1; then

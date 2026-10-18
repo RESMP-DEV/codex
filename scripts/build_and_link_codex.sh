@@ -121,9 +121,6 @@ fi
 if command -v rg >/dev/null 2>&1; then
   package_args+=(--rg-bin "$(command -v rg)")
 fi
-if [[ -x /bin/zsh ]]; then
-  package_args+=(--zsh-bin /bin/zsh)
-fi
 echo "Assembling snapshot package ${snapshot_name}..."
 (
   cd "${repo_root}"

@@ -753,6 +753,9 @@
             "api_key_model_discovery": {
               "type": "boolean"
             },
+            "app_server_websocket_compression": {
+              "type": "boolean"
+            },
             "apply_patch_freeform": {
               "type": "boolean"
             },
@@ -1292,6 +1295,9 @@
               "type": "boolean"
             },
             "view_image": {
+              "type": "boolean"
+            },
+            "wake_on_agent_messages": {
               "type": "boolean"
             },
             "web_search": {
@@ -7142,6 +7148,9 @@
         "api_key_model_discovery": {
           "type": "boolean"
         },
+        "app_server_websocket_compression": {
+          "type": "boolean"
+        },
         "apply_patch_freeform": {
           "type": "boolean"
         },
@@ -7681,6 +7690,9 @@
           "type": "boolean"
         },
         "view_image": {
+          "type": "boolean"
+        },
+        "wake_on_agent_messages": {
           "type": "boolean"
         },
         "web_search": {

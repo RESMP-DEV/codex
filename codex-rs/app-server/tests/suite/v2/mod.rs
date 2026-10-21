@@ -62,6 +62,7 @@ mod experimental_feature_list;
 mod external_agent_config;
 mod external_agent_import_sync;
 mod feedback;
+mod frozen_cloud_skills;
 mod fs;
 #[path = "gateway_oauth_tests.rs"]
 mod gateway_oauth;
@@ -154,6 +155,7 @@ mod thread_read;
 mod thread_read_state;
 mod thread_resume;
 mod thread_revert;
+mod thread_sample;
 mod thread_sections;
 mod thread_settings_update;
 mod thread_shell_command;

@@ -3001,6 +3001,13 @@ class NetworkRequirements(BaseModel):
             description="When true, only managed allowlist entries are respected while managed network enforcement is active.",
         ),
     ] = None
+    review_domains: Annotated[
+        list[str] | None,
+        Field(
+            alias="reviewDomains",
+            description="Host patterns routed to network approval before ordinary allow rules.",
+        ),
+    ] = None
     socks_port: Annotated[int | None, Field(alias="socksPort", ge=0)] = None
     unix_sockets: Annotated[
         dict[str, Any] | None,
@@ -6950,11 +6957,16 @@ class ApplicationNetworkRequirements(BaseModel):
     ]
 
 
-class ApplicationRequirements(BaseModel):
+class ApplicationStorageRequirements(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
-    network: ApplicationNetworkRequirements | None = None
+    default_project_parent: Annotated[
+        LegacyAppPathString | None, Field(alias="defaultProjectParent")
+    ] = None
+    projectless_workspace_root: Annotated[
+        LegacyAppPathString | None, Field(alias="projectlessWorkspaceRoot")
+    ] = None
 
 
 class AppsConfig(BaseModel):
@@ -10790,6 +10802,14 @@ class AppListUpdatedNotification(BaseModel):
         populate_by_name=True,
     )
     data: list[AppInfo]
+
+
+class ApplicationRequirements(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    network: ApplicationNetworkRequirements | None = None
+    storage: ApplicationStorageRequirements | None = None
 
 
 class AppsListResponse(BaseModel):

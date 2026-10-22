@@ -2181,7 +2181,7 @@ async fn run_ratatui_app(
     // transitions have enough stack headroom to rebuild configuration and the chat widget.
     let app_result = Box::pin(App::run(
         &mut tui,
-        app_server,
+        crate::app::backend_sessions::InitialBackendSessions::singleton(app_server),
         config,
         current_cwd.to_path_buf(),
         cli_kv_overrides.clone(),
@@ -2563,8 +2563,15 @@ requires_openai_auth = {requires_openai_auth}
 
         for (label, config_toml, login_status, target, expected) in [
             (
-                "disabled by default",
+                "enabled by default",
                 "",
+                LoginStatus::NotAuthenticated,
+                AppServerTarget::Embedded,
+                true,
+            ),
+            (
+                "explicitly disabled",
+                "[features]\nbedrock_setup_wizard = false\n",
                 LoginStatus::NotAuthenticated,
                 AppServerTarget::Embedded,
                 false,

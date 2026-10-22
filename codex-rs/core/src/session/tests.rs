@@ -291,7 +291,7 @@ impl StepContext {
             turn: Arc::clone(&turn),
             inherited_environments: environments.clone(),
             environments,
-            executor_capability_discovery: None,
+            executor_hook_sources: Vec::new(),
             extension_data: codex_extension_api::ExtensionData::new(turn.sub_id.clone()),
             mcp: Arc::new(codex_mcp::McpBinding::empty(mcp_config_for_test(
                 &turn.config,
@@ -6989,6 +6989,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         thread_id,
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         tx_event,
+        parent_observer_event_tx: OnceLock::new(),
         agent_status: agent_status_tx,
         state: Mutex::new(state),
         thread_settings_persistence: Semaphore::new(/*permits*/ 1),
@@ -9026,7 +9027,7 @@ where
     .await
 }
 
-async fn make_session_and_context_with_auth_config_home_and_rx<F>(
+pub(crate) async fn make_session_and_context_with_auth_config_home_and_rx<F>(
     auth: CodexAuth,
     dynamic_tools: Vec<DynamicToolSpec>,
     codex_home: &Path,
@@ -9262,6 +9263,7 @@ where
         thread_id,
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         tx_event,
+        parent_observer_event_tx: OnceLock::new(),
         agent_status: agent_status_tx,
         state: Mutex::new(state),
         thread_settings_persistence: Semaphore::new(/*permits*/ 1),

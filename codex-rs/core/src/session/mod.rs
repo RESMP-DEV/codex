@@ -149,6 +149,8 @@ use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::PrivateSessionEvent;
+use codex_protocol::protocol::PrivateSessionEventPayload;
 use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -596,6 +598,9 @@ impl Session {
     }
 
     async fn spawn_internal(args: SessionSpawnArgs) -> CodexResult<(Arc<Self>, SessionIo)> {
+        args.config
+            .config_layer_stack
+            .ensure_config_server_applied()?;
         args.config.validate_windows_mxc_requirement()?;
         let SessionSpawnArgs {
             startup,
@@ -2738,6 +2743,30 @@ impl Session {
     }
 
     async fn deliver_event_raw(&self, event: Event) {
+        if let Some(parent_tx) = self.parent_observer_event_tx.get() {
+            let forwarded = match &event.msg {
+                EventMsg::RawResponseItem(item) => {
+                    Some(PrivateSessionEventPayload::RecordedItem(item.clone()))
+                }
+                EventMsg::TurnAborted(aborted) => {
+                    Some(PrivateSessionEventPayload::TurnAborted(aborted.clone()))
+                }
+                _ => None,
+            };
+            if let Some(forwarded) = forwarded {
+                // Queue observer events before the private consumer can finish the review.
+                // They bypass the parent's history and retain the reviewer's identity.
+                let _ = parent_tx
+                    .send(Event {
+                        id: event.id.clone(),
+                        msg: EventMsg::PrivateSessionEvent(PrivateSessionEvent {
+                            thread_id: self.thread_id,
+                            event: forwarded,
+                        }),
+                    })
+                    .await;
+            }
+        }
         // Record the last known agent status.
         if let Some(status) = agent_status_from_event(&event.msg) {
             self.agent_status.send_replace(status);
@@ -3995,8 +4024,6 @@ impl Session {
                 .executor_capability_discovery_for_step_v2(&turn_context.config, &environments)
                 .await;
             let v2_snapshots = executor_capability_discovery_v2.as_ref();
-            // V1 discovery is still retained on StepContext for executor Stop/Interrupt hooks.
-            // TODO: Prepare hook sources at capture time, including V2, instead.
             let (executor_capability_discovery, discovery_recovered) = if v2_snapshots.is_some() {
                 (None, false)
             } else {
@@ -4071,6 +4098,12 @@ impl Session {
                     .or_cancel(cancellation_token)
                     .await?;
             }
+            let executor_hook_sources = crate::hook_runtime::prepare_executor_hook_sources(
+                &mcp,
+                &selected_plugins,
+                executor_capability_discovery.as_deref(),
+                executor_capability_discovery_v2.as_deref(),
+            );
             extension_data.insert(selected_plugins);
             let tool_router = turn::built_tools(
                 self.as_ref(),
@@ -4082,12 +4115,7 @@ impl Session {
                 prepared_recommendations,
             )
             .await?;
-            Ok::<_, CodexErr>((
-                executor_capability_discovery,
-                mcp,
-                tool_router,
-                extension_data,
-            ))
+            Ok::<_, CodexErr>((executor_hook_sources, mcp, tool_router, extension_data))
         });
         // Returned warnings must finish delivery even if tools fail or preparation is cancelled.
         let (loaded_agents_md, prepared_tools) =
@@ -4096,7 +4124,7 @@ impl Session {
         if cancellation_token.is_cancelled() {
             return Err(CodexErr::TurnAborted);
         }
-        let (executor_capability_discovery, mcp, tool_router, extension_data) = prepared_tools??;
+        let (executor_hook_sources, mcp, tool_router, extension_data) = prepared_tools??;
         Ok(Arc::new(StepContext {
             preempt: turn_context
                 .config
@@ -4111,7 +4139,7 @@ impl Session {
             extension_data,
             environments,
             inherited_environments,
-            executor_capability_discovery,
+            executor_hook_sources,
             mcp,
             tool_router,
             loaded_agents_md,
@@ -5249,6 +5277,8 @@ impl Session {
             }
 
             state.set_token_info(Some(info));
+            // The local estimate already includes every retained reasoning item.
+            state.set_server_reasoning_included(/*included*/ true);
         }
         self.set_auto_compact_window_estimated_prefill_for_scope(
             turn_context,

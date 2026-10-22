@@ -7780,6 +7780,42 @@
                 "type": "null"
               }
             ]
+          },
+          "storage": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ApplicationStorageRequirements"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ApplicationStorageRequirements": {
+        "description": "Managed storage settings for new Desktop workspaces, not filesystem access restrictions.",
+        "properties": {
+          "defaultProjectParent": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/LegacyAppPathString"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "projectlessWorkspaceRoot": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/LegacyAppPathString"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object"
@@ -16243,6 +16279,16 @@
             "description": "When true, only managed allowlist entries are respected while managed network enforcement is active.",
             "type": [
               "boolean",
+              "null"
+            ]
+          },
+          "reviewDomains": {
+            "description": "Host patterns routed to network approval before ordinary allow rules.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
               "null"
             ]
           },

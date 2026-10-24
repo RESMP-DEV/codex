@@ -203,3 +203,19 @@ log *args:
 [windows]
 log *args:
     $forwarded_args = @($args | Select-Object -Skip 1); if ($forwarded_args.Count -gt 0 -and $forwarded_args[0] -eq "--") { $forwarded_args = @($forwarded_args | Select-Object -Skip 1) }; cargo run -p codex-cli --bin logs_client -- @forwarded_args
+
+# Fork-local: build the current tree, publish it as a versioned snapshot under
+# ~/.local/lib/resmp/codex, and repoint ~/.local/bin/codex at it. Defers the
+# daemon re-pin while interactive clients are attached; a publish without that
+# re-pin leaves codex resume on the previous build.
+[no-cd]
+publish *args:
+    {{ justfile_directory() }}/scripts/build_and_link_codex.sh "$@"
+
+# Verify the freshly published snapshot with a real model round-trip; on
+# failure it rolls `current` back to previous-good and re-pins the daemon.
+# After a passing smoke test, re-pin the daemon when clients allow:
+#   ~/.local/bin/codex app-server daemon update --from-cli --yes
+[no-cd]
+publish-smoke *args:
+    {{ justfile_directory() }}/scripts/smoke_test_codex.sh "$@"

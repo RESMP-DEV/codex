@@ -194,7 +194,7 @@ while IFS= read -r snap; do
   if [[ "${snap}" == "${snapshot_name}" || "${snap}" == "${previous_target}" ]]; then
     continue
   fi
-  ((kept++))
+  kept=$((kept + 1))
   if ((kept > keep_snapshots)); then
     rm -rf "${packages_root:?}/${snap}"
     echo "Pruned old snapshot: ${snap}"

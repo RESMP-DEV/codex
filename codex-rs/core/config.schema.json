@@ -346,7 +346,7 @@
       ]
     },
     "AsyncClassifierMode": {
-      "description": "Async classifier experiment, resolved once for each parent task.",
+      "description": "Legacy classifier modes retained for configuration and model-catalog compatibility.",
       "enum": [
         "snapshot",
         "conversation"
@@ -453,6 +453,12 @@
         "policy": {
           "description": "Additional policy instructions inserted into the guardian prompt.",
           "type": "string"
+        },
+        "timeout_ms": {
+          "description": "Overall Guardian review budget in milliseconds, including setup and retries. Defaults to 90,000. Set to 0 to wait without a review deadline; cancellation and independent transport timeouts still apply.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -512,6 +518,51 @@
       },
       "required": [
         "command"
+      ],
+      "type": "object"
+    },
+    "AwsSigV4Config": {
+      "additionalProperties": false,
+      "description": "AWS SigV4 action selected by an exact-host, method, and path MITM hook.",
+      "properties": {
+        "access_key_id": {
+          "$ref": "#/definitions/ProxySecretSource"
+        },
+        "max_body_bytes": {
+          "default": 8388608,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "placeholder_access_key_id": {
+          "description": "Nonsecret access key ID installed in the guest AWS profile.",
+          "type": "string"
+        },
+        "port": {
+          "default": 443,
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "region": {
+          "type": "string"
+        },
+        "secret_access_key": {
+          "$ref": "#/definitions/ProxySecretSource"
+        },
+        "service": {
+          "type": "string"
+        },
+        "session_token": {
+          "$ref": "#/definitions/ProxySecretSource"
+        }
+      },
+      "required": [
+        "access_key_id",
+        "placeholder_access_key_id",
+        "region",
+        "secret_access_key",
+        "service"
       ],
       "type": "object"
     },
@@ -981,6 +1032,9 @@
             },
             "guardianv2_decisions_comparison": {
               "type": "boolean"
+            },
+            "guardianv3": {
+              "$ref": "#/definitions/FeatureToml_for_GuardianV3ConfigToml"
             },
             "hooks": {
               "type": "boolean"
@@ -1688,6 +1742,16 @@
         }
       ]
     },
+    "FeatureToml_for_GuardianV3ConfigToml": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "$ref": "#/definitions/GuardianV3ConfigToml"
+        }
+      ]
+    },
     "FeatureToml_for_MultiAgentV2ConfigToml": {
       "anyOf": [
         {
@@ -1997,7 +2061,7 @@
               "$ref": "#/definitions/AsyncClassifierMode"
             }
           ],
-          "description": "Classifier mode override. Otherwise use the model default, then conversation."
+          "description": "Deprecated and ignored; asynchronous classification always uses conversations."
         },
         "classifier_instructions": {
           "type": "string"
@@ -2138,6 +2202,16 @@
         "reasoning"
       ],
       "type": "string"
+    },
+    "GuardianV3ConfigToml": {
+      "additionalProperties": false,
+      "description": "User-configurable settings for Guardian V3.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     },
     "History": {
       "additionalProperties": false,
@@ -2950,6 +3024,10 @@
           "description": "Additional HTTP headers to include in requests to this provider where the (key, value) pairs are the header name and value.",
           "type": "object"
         },
+        "location": {
+          "description": "Google Cloud location for the built-in GCP provider. Takes precedence over `GOOGLE_CLOUD_LOCATION`; defaults to `global` when neither is set.",
+          "type": "string"
+        },
         "model_catalog_url": {
           "description": "Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery uses the Codex backend unless `base_url` overrides the inference endpoint.",
           "type": "string"
@@ -2957,6 +3035,10 @@
         "name": {
           "default": "",
           "description": "Friendly display name.",
+          "type": "string"
+        },
+        "project_id": {
+          "description": "Google Cloud project ID for the built-in GCP provider. Takes precedence over `GOOGLE_CLOUD_PROJECT` when deriving the Vertex AI endpoint.",
           "type": "string"
         },
         "query_params": {
@@ -3126,6 +3208,14 @@
     "NetworkMitmActionToml": {
       "additionalProperties": false,
       "properties": {
+        "aws_sigv4": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AwsSigV4Config"
+            }
+          ],
+          "default": null
+        },
         "inject_request_headers": {
           "default": [],
           "items": {
@@ -3930,6 +4020,35 @@
         }
       },
       "type": "object"
+    },
+    "ProxySecretSource": {
+      "description": "A credential source in the trusted proxy process, never in the executor environment.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "env_var": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "env_var"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "file": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "RawMcpServerConfig": {
       "additionalProperties": false,
@@ -7499,6 +7618,9 @@
         },
         "guardianv2_decisions_comparison": {
           "type": "boolean"
+        },
+        "guardianv3": {
+          "$ref": "#/definitions/FeatureToml_for_GuardianV3ConfigToml"
         },
         "hooks": {
           "type": "boolean"

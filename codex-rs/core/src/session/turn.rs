@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
@@ -394,6 +395,18 @@ pub(crate) async fn run_turn(
     {
         return Ok(None);
     }
+
+    // Guardian can replace its submitted prompt with response items during finalization.
+    // Those skip UserInput telemetry above, so emit the saved prompt after acceptance.
+    if crate::guardian::is_basic_session_source(&turn_context.session_source)
+        && !user_input.is_empty()
+        && input
+            .iter()
+            .all(|item| matches!(item, TurnInput::ResponseItem(_)))
+    {
+        turn_context.session_telemetry.user_prompt(&user_input);
+    }
+
     // Only speculate after hooks accept the turn, using its finalized tools and permissions.
     {
         let mut state = sess.state.lock().await;
@@ -960,6 +973,10 @@ pub(crate) async fn run_hooks_and_record_inputs(
             blocked_input = true;
             record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
         } else {
+            if let TurnInput::UserInput { content, .. } = input_item {
+                // Prompt telemetry can contain the full text, so emit it only after hooks accept it.
+                turn_context.session_telemetry.user_prompt(content);
+            }
             if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {
                 accepted_user_input = true;
             }
@@ -2402,6 +2419,7 @@ async fn emit_streamed_assistant_text_delta(
 }
 
 /// Flush buffered assistant text parser state when an assistant message item ends.
+#[instrument(level = "trace", skip_all)]
 async fn flush_assistant_text_segments_for_item(
     sess: &Session,
     turn_context: &TurnContext,
@@ -2414,6 +2432,7 @@ async fn flush_assistant_text_segments_for_item(
 }
 
 /// Flush any remaining buffered assistant text parser state at response completion.
+#[instrument(level = "trace", skip_all)]
 async fn flush_assistant_text_segments_all(
     sess: &Session,
     turn_context: &TurnContext,
@@ -2799,14 +2818,21 @@ async fn try_run_sampling_request(
             gen_ai.usage.output_tokens = field::Empty,
             codex.usage.reasoning_output_tokens = field::Empty,
             codex.usage.total_tokens = field::Empty,
+            codex.response.receive_wait_ms = field::Empty,
         );
 
+        let receive_started = Instant::now();
         let event = stream
             .next()
             .instrument(trace_span!(parent: &handle_responses, "receiving"))
             .or_cancel(&preempt)
             .or_cancel(&cancellation_token)
             .await;
+        // Split the existing iteration span without adding another span per streamed delta.
+        handle_responses.record(
+            "codex.response.receive_wait_ms",
+            receive_started.elapsed().as_secs_f64() * 1000.0,
+        );
         // Account for an already-received terminal error even if cancellation raced it.
         // Cancellation still stops ordinary stream events before they can run tools.
         let event = match event {

@@ -215,7 +215,7 @@ publish *args:
 # Verify the freshly published snapshot with a real model round-trip; on
 # failure it rolls `current` back to previous-good and re-pins the daemon.
 # After a passing smoke test, re-pin the daemon when clients allow:
-#   ~/.local/bin/codex app-server daemon update --from-cli --yes
+# ~/.local/bin/codex app-server daemon update --from-cli --yes
 [no-cd]
 publish-smoke *args:
     {{ justfile_directory() }}/scripts/smoke_test_codex.sh "$@"

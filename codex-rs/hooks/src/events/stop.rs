@@ -105,7 +105,12 @@ pub(crate) fn preview(
         .target
         .select_handlers(handlers)
         .into_iter()
-        .filter(|handler| matches!(handler.source_path, HandlerSourcePath::Local(_)))
+        .filter(|handler| {
+            !matches!(
+                handler.source_path,
+                HandlerSourcePath::ExecutorScoped { .. }
+            )
+        })
         .map(|handler| dispatcher::running_summary(&handler))
         .collect()
 }
@@ -136,7 +141,7 @@ pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> Sto
                 HandlerSourcePath::ExecutorScoped { .. }
             )
     });
-    let input_json = match request.target {
+    let input = match request.target {
         StopHookTarget::Stop | StopHookTarget::MemoryConsolidation => {
             let input = StopCommandInput {
                 session_id: request.session_id.to_string(),
@@ -152,8 +157,8 @@ pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> Sto
                 ),
                 changed_files,
             };
-            match serde_json::to_string(&input) {
-                Ok(input_json) => input_json,
+            match serde_json::to_value(input) {
+                Ok(input) => input,
                 Err(error) => {
                     return serialization_failure_outcome(
                         common::serialization_failure_hook_events(
@@ -187,8 +192,8 @@ pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> Sto
                 ),
                 changed_files,
             };
-            match serde_json::to_string(&input) {
-                Ok(input_json) => input_json,
+            match serde_json::to_value(input) {
+                Ok(input) => input,
                 Err(error) => {
                     return serialization_failure_outcome(
                         common::serialization_failure_hook_events(
@@ -205,7 +210,7 @@ pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> Sto
     let results = dispatcher::execute_handlers_with_metadata(
         engine,
         matched,
-        input_json.clone(),
+        &input,
         request.cwd.as_path(),
         Some(request.turn_id.clone()),
         request.request_metadata.as_ref(),
@@ -217,7 +222,7 @@ pub(crate) async fn run(engine: &ClaudeHooksEngine, request: StopRequest) -> Sto
         dispatcher::execute_handlers_with_metadata(
             engine,
             executor_cleanup,
-            input_json,
+            &input,
             request.cwd.as_path(),
             Some(request.turn_id),
             request.request_metadata.as_ref(),

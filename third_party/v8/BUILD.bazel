@@ -1,3 +1,4 @@
+load("@@//third_party/v8:artifact_profile.bzl", "v8_artifact_files")
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("@rules_cc//cc:cc_static_library.bzl", "cc_static_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
@@ -7,15 +8,31 @@ package(default_visibility = ["//visibility:public"])
 exports_files([
     "abseil.BUILD.bazel",
     "abseil_repository.bzl",
+    "artifact_profile.bzl",
     "dependencies.bzl",
     "dependency_config.bzl",
     "dragonbox.BUILD.bazel",
+    "engine.BUILD.bazel",
+    "engine_repository.bzl",
+    "engine_rules.bzl",
     "fast_float.BUILD.bazel",
     "fp16.BUILD.bazel",
     "highway.BUILD.bazel",
     "icu.BUILD.bazel",
+    "libcxx_rules.bzl",
+    "native_windows.bzl",
+    "push_registers_gnullvm.S",
     "simdutf.BUILD.bazel",
+    "v8_defs.patch",
 ])
+
+config_setting(
+    name = "platform_windows_msvc",
+    constraint_values = [
+        "@platforms//os:windows",
+        "@llvm//constraints/windows/abi:msvc",
+    ],
+)
 
 config_setting(
     name = "platform_aarch64_unknown_linux_musl",
@@ -37,6 +54,17 @@ config_setting(
 
 config_setting(
     name = "use_rusty_v8_custom_libcxx",
+    flag_values = {
+        "@v8//:v8_use_rusty_v8_custom_libcxx": "True",
+    },
+)
+
+config_setting(
+    name = "use_rusty_v8_custom_libcxx_native_windows",
+    constraint_values = [
+        "@platforms//os:windows",
+        "@llvm//constraints/windows/abi:msvc",
+    ],
     flag_values = {
         "@v8//:v8_use_rusty_v8_custom_libcxx": "True",
     },
@@ -79,16 +107,13 @@ alias(
     actual = ":src_binding_release_aarch64_unknown_linux_gnu_152_2_0_release",
 )
 
-# Published files contain both pointer compression and the in-process sandbox.
-# Use the source pair together whenever those options differ or a caller needs
-# custom V8 C++ flags. The main-repo flag is shared with the @v8_targets copy
-# of this BUILD file used by rules_rs.
+# Both ordinary consumers and source consumers use the current sandbox ABI.
+# Switch the archive and binding together for source instrumentation. The same
+# root setting is visible in the @v8_targets copy used by rules_rs.
 config_setting(
     name = "use_rusty_v8_prebuilts",
     flag_values = {
         "@//:rusty_v8_from_source": "False",
-        "@v8//:v8_enable_pointer_compression": "True",
-        "@v8//:v8_enable_sandbox": "True",
     },
 )
 
@@ -205,9 +230,20 @@ alias(
     }),
 )
 
-V8_COPTS = ["-std=c++20"]
+V8_COPTS = select({
+    ":platform_windows_msvc": [
+        "/std:c++20",
+        "/Zc:__cplusplus",
+    ],
+    "//conditions:default": ["-std=c++20"],
+})
 
 V8_CUSTOM_LIBCXX_COPTS = select({
+    ":use_rusty_v8_custom_libcxx_native_windows": [
+        "/D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
+        "/D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE",
+        "/D_LIBCPP_INSTRUMENTED_WITH_ASAN=0",
+    ],
     ":use_rusty_v8_custom_libcxx": [
         "-nostdinc++",
         "-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS",
@@ -236,19 +272,19 @@ cc_library(
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
-    deps = [
-        "@rusty_v8_libcxx//:headers",
-        "@rusty_v8_libcxxabi//:headers",
-    ],
+    deps = ["@rusty_v8_libcxx//:headers"] + select({
+        ":use_rusty_v8_custom_libcxx_native_windows": [],
+        "//conditions:default": ["@rusty_v8_libcxxabi//:headers"],
+    }),
 )
 
 cc_library(
     name = "rusty_v8_custom_libcxx_runtime",
     visibility = ["//visibility:public"],
-    deps = [
-        "@rusty_v8_libcxx//:libcxx",
-        "@rusty_v8_libcxxabi//:libcxxabi",
-    ],
+    deps = ["@rusty_v8_libcxx//:libcxx"] + select({
+        ":use_rusty_v8_custom_libcxx_native_windows": [],
+        "//conditions:default": ["@rusty_v8_libcxxabi//:libcxxabi"],
+    }),
 )
 
 genrule(
@@ -310,9 +346,84 @@ cc_library(
     }),
 )
 
+alias(
+    name = "native_windows_compiler_builtins",
+    actual = "@v8_native_windows_llvm//:builtins",
+    tags = ["manual"],
+    target_compatible_with = select({
+        ":platform_windows_msvc": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+# Compile the pinned Chromium libc++ into V8 with the Microsoft CRT.
 cc_static_library(
-    name = "v8_152_2_0_aarch64_apple_darwin_bazel",
+    name = "v8_152_2_0_native_windows_objects",
     features = V8_STATIC_LIBRARY_FEATURES,
+    tags = ["manual"],
+    target_compatible_with = select({
+        ":platform_windows_msvc": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":rusty_v8_custom_libcxx_runtime",
+        ":v8_152_2_0_binding",
+    ],
+)
+
+# cc_static_library only collects object files, not prebuilt libraries.
+# The Rust build script receives one .lib without Bazel's CcInfo/linkdeps, so
+# merge compiler-rt into the staged artifact explicitly.
+genrule(
+    name = "v8_152_2_0_native_windows_library",
+    srcs = [
+        ":v8_152_2_0_native_windows_objects",
+        "@v8_native_windows_llvm//:builtins_archive",
+    ],
+    outs = ["rusty_v8_native_windows.lib"],
+    cmd_bat = '""$(location @v8_native_windows_llvm//:llvm-lib)" /NOLOGO /OUT:"$@" "$(location :v8_152_2_0_native_windows_objects)" "$(location @v8_native_windows_llvm//:builtins_archive)""',
+    tags = ["manual"],
+    target_compatible_with = [
+        "@platforms//os:windows",
+        "@llvm//constraints/windows/abi:msvc",
+    ],
+    tools = ["@v8_native_windows_llvm//:llvm-lib"],
+)
+
+[
+    v8_artifact_files(
+        name = "v8_152_2_0_%s_pc_windows_msvc_bazel" % arch,
+        srcs = [":v8_152_2_0_native_windows_library"],
+        profile = "sandbox_release",
+        tags = ["manual"],
+        target_compatible_with = [
+            "@platforms//cpu:%s" % arch,
+            "@platforms//os:windows",
+            "@llvm//constraints/windows/abi:msvc",
+        ],
+        v8_cpu = cpu,
+    )
+    for arch, cpu in [
+        ("x86_64", "x64"),
+        ("aarch64", "arm64"),
+    ]
+]
+
+# Producer selectors never fall back to published inputs. Keep them separate
+# from the consumer aliases so a version upgrade can build before publishing.
+alias(
+    name = "rusty_v8_native_windows_archive_for_target",
+    actual = select({
+        "@rules_rs//rs/platforms/config:aarch64-pc-windows-msvc": ":v8_152_2_0_aarch64_pc_windows_msvc_bazel",
+        "@rules_rs//rs/platforms/config:x86_64-pc-windows-msvc": ":v8_152_2_0_x86_64_pc_windows_msvc_bazel",
+    }),
+    tags = ["manual"],
+)
+
+cc_static_library(
+    name = "_v8_152_2_0_aarch64_apple_darwin_bazel",
+    features = V8_STATIC_LIBRARY_FEATURES,
+    visibility = ["//visibility:private"],
     deps = [
         ":rusty_v8_custom_libcxx_runtime",
         ":v8_152_2_0_binding",
@@ -320,8 +431,9 @@ cc_static_library(
 )
 
 cc_static_library(
-    name = "v8_152_2_0_aarch64_unknown_linux_gnu_bazel",
+    name = "_v8_152_2_0_aarch64_unknown_linux_gnu_bazel",
     features = V8_STATIC_LIBRARY_FEATURES,
+    visibility = ["//visibility:private"],
     deps = [
         ":rusty_v8_custom_libcxx_runtime",
         ":v8_152_2_0_binding",
@@ -329,14 +441,16 @@ cc_static_library(
 )
 
 cc_static_library(
-    name = "v8_152_2_0_aarch64_pc_windows_gnullvm_bazel",
+    name = "_v8_152_2_0_aarch64_pc_windows_gnullvm_bazel",
     features = V8_STATIC_LIBRARY_FEATURES,
+    visibility = ["//visibility:private"],
     deps = [":v8_152_2_0_binding"],
 )
 
 cc_static_library(
-    name = "v8_152_2_0_aarch64_unknown_linux_musl_release_base",
+    name = "_v8_152_2_0_aarch64_unknown_linux_musl_release_base",
     features = V8_STATIC_LIBRARY_FEATURES,
+    visibility = ["//visibility:private"],
     deps = [
         ":rusty_v8_custom_libcxx_runtime",
         ":v8_152_2_0_binding",
@@ -344,16 +458,16 @@ cc_static_library(
 )
 
 genrule(
-    name = "v8_152_2_0_aarch64_unknown_linux_musl_release",
+    name = "_v8_152_2_0_aarch64_unknown_linux_musl_release",
     srcs = [
-        ":v8_152_2_0_aarch64_unknown_linux_musl_release_base",
+        ":_v8_152_2_0_aarch64_unknown_linux_musl_release_base",
         "@llvm//runtimes/compiler-rt:clang_rt.builtins.static",
     ],
     outs = ["libv8_152_2_0_aarch64_unknown_linux_musl.a"],
     cmd = """
       cat > "$(@D)/merge.mri" <<'EOF'
 create $@
-addlib $(location :v8_152_2_0_aarch64_unknown_linux_musl_release_base)
+addlib $(location :_v8_152_2_0_aarch64_unknown_linux_musl_release_base)
 addlib $(location @llvm//runtimes/compiler-rt:clang_rt.builtins.static)
 save
 end
@@ -365,11 +479,13 @@ EOF
         "@llvm//tools:llvm-ar",
         "@llvm//tools:llvm-ranlib",
     ],
+    visibility = ["//visibility:private"],
 )
 
 cc_static_library(
-    name = "v8_152_2_0_x86_64_apple_darwin_bazel",
+    name = "_v8_152_2_0_x86_64_apple_darwin_bazel",
     features = V8_STATIC_LIBRARY_FEATURES,
+    visibility = ["//visibility:private"],
     deps = [
         ":rusty_v8_custom_libcxx_runtime",
         ":v8_152_2_0_binding",
@@ -377,8 +493,9 @@ cc_static_library(
 )
 
 cc_static_library(
-    name = "v8_152_2_0_x86_64_unknown_linux_gnu_bazel",
+    name = "_v8_152_2_0_x86_64_unknown_linux_gnu_bazel",
     features = V8_STATIC_LIBRARY_FEATURES,
+    visibility = ["//visibility:private"],
     deps = [
         ":rusty_v8_custom_libcxx_runtime",
         ":v8_152_2_0_binding",
@@ -386,19 +503,43 @@ cc_static_library(
 )
 
 cc_static_library(
-    name = "v8_152_2_0_x86_64_pc_windows_gnullvm_bazel",
+    name = "_v8_152_2_0_x86_64_pc_windows_gnullvm_bazel",
     features = V8_STATIC_LIBRARY_FEATURES,
+    visibility = ["//visibility:private"],
     deps = [":v8_152_2_0_binding"],
 )
 
 cc_static_library(
-    name = "v8_152_2_0_x86_64_unknown_linux_musl_release",
+    name = "_v8_152_2_0_x86_64_unknown_linux_musl_release",
     features = V8_STATIC_LIBRARY_FEATURES,
+    visibility = ["//visibility:private"],
     deps = [
         ":rusty_v8_custom_libcxx_runtime",
         ":v8_152_2_0_binding",
     ],
 )
+
+# Local source producers match the Rust consumer's sandbox ABI, and use the
+# workspace C++ runtime. Release pairs below select pinned Chromium libc++ and
+# build the private source nodes directly under their own profiles.
+[
+    v8_artifact_files(
+        name = name,
+        srcs = [":_" + name],
+        profile = "source",
+        v8_cpu = cpu,
+    )
+    for name, cpu in [
+        ("v8_152_2_0_aarch64_apple_darwin_bazel", "arm64"),
+        ("v8_152_2_0_aarch64_unknown_linux_gnu_bazel", "arm64"),
+        ("v8_152_2_0_aarch64_pc_windows_gnullvm_bazel", "arm64"),
+        ("v8_152_2_0_aarch64_unknown_linux_musl_release", "arm64"),
+        ("v8_152_2_0_x86_64_apple_darwin_bazel", "x64"),
+        ("v8_152_2_0_x86_64_unknown_linux_gnu_bazel", "x64"),
+        ("v8_152_2_0_x86_64_pc_windows_gnullvm_bazel", "x64"),
+        ("v8_152_2_0_x86_64_unknown_linux_musl_release", "x64"),
+    ]
+]
 
 filegroup(
     name = "src_binding_release_aarch64_apple_darwin_152_2_0_release",
@@ -440,52 +581,64 @@ alias(
     actual = "@rusty_v8_152_2_0_x86_64_pc_windows_msvc_binding//file",
 )
 
-filegroup(
+v8_artifact_files(
     name = "rusty_v8_release_pair_x86_64_apple_darwin",
     srcs = [
+        ":_v8_152_2_0_x86_64_apple_darwin_bazel",
         ":src_binding_release_x86_64_apple_darwin_152_2_0_release",
-        ":v8_152_2_0_x86_64_apple_darwin_bazel",
     ],
+    profile = "release",
+    v8_cpu = "x64",
 )
 
-filegroup(
+v8_artifact_files(
     name = "rusty_v8_release_pair_aarch64_apple_darwin",
     srcs = [
+        ":_v8_152_2_0_aarch64_apple_darwin_bazel",
         ":src_binding_release_aarch64_apple_darwin_152_2_0_release",
-        ":v8_152_2_0_aarch64_apple_darwin_bazel",
     ],
+    profile = "release",
+    v8_cpu = "arm64",
 )
 
-filegroup(
+v8_artifact_files(
     name = "rusty_v8_release_pair_x86_64_unknown_linux_gnu",
     srcs = [
+        ":_v8_152_2_0_x86_64_unknown_linux_gnu_bazel",
         ":src_binding_release_x86_64_unknown_linux_gnu_152_2_0_release",
-        ":v8_152_2_0_x86_64_unknown_linux_gnu_bazel",
     ],
+    profile = "release",
+    v8_cpu = "x64",
 )
 
-filegroup(
+v8_artifact_files(
     name = "rusty_v8_release_pair_aarch64_unknown_linux_gnu",
     srcs = [
+        ":_v8_152_2_0_aarch64_unknown_linux_gnu_bazel",
         ":src_binding_release_aarch64_unknown_linux_gnu_152_2_0_release",
-        ":v8_152_2_0_aarch64_unknown_linux_gnu_bazel",
     ],
+    profile = "release",
+    v8_cpu = "arm64",
 )
 
-filegroup(
+v8_artifact_files(
     name = "rusty_v8_release_pair_x86_64_unknown_linux_musl",
     srcs = [
+        ":_v8_152_2_0_x86_64_unknown_linux_musl_release",
         ":src_binding_release_x86_64_unknown_linux_musl_152_2_0_release",
-        ":v8_152_2_0_x86_64_unknown_linux_musl_release",
     ],
+    profile = "release",
+    v8_cpu = "x64",
 )
 
-filegroup(
+v8_artifact_files(
     name = "rusty_v8_release_pair_aarch64_unknown_linux_musl",
     srcs = [
+        ":_v8_152_2_0_aarch64_unknown_linux_musl_release",
         ":src_binding_release_aarch64_unknown_linux_musl_152_2_0_release",
-        ":v8_152_2_0_aarch64_unknown_linux_musl_release",
     ],
+    profile = "release",
+    v8_cpu = "arm64",
 )
 
 filegroup(
@@ -504,50 +657,62 @@ filegroup(
     ],
 )
 
-filegroup(
+v8_artifact_files(
     name = "rusty_v8_sandbox_release_pair_x86_64_apple_darwin",
     srcs = [
+        ":_v8_152_2_0_x86_64_apple_darwin_bazel",
         ":src_binding_release_x86_64_apple_darwin_152_2_0_release",
-        ":v8_152_2_0_x86_64_apple_darwin_bazel",
     ],
+    profile = "sandbox_release",
+    v8_cpu = "x64",
 )
 
-filegroup(
+v8_artifact_files(
     name = "rusty_v8_sandbox_release_pair_aarch64_apple_darwin",
     srcs = [
+        ":_v8_152_2_0_aarch64_apple_darwin_bazel",
         ":src_binding_release_aarch64_apple_darwin_152_2_0_release",
-        ":v8_152_2_0_aarch64_apple_darwin_bazel",
     ],
+    profile = "sandbox_release",
+    v8_cpu = "arm64",
 )
 
-filegroup(
+v8_artifact_files(
     name = "rusty_v8_sandbox_release_pair_x86_64_unknown_linux_gnu",
     srcs = [
+        ":_v8_152_2_0_x86_64_unknown_linux_gnu_bazel",
         ":src_binding_release_x86_64_unknown_linux_gnu_152_2_0_release",
-        ":v8_152_2_0_x86_64_unknown_linux_gnu_bazel",
     ],
+    profile = "sandbox_release",
+    v8_cpu = "x64",
 )
 
-filegroup(
+v8_artifact_files(
     name = "rusty_v8_sandbox_release_pair_aarch64_unknown_linux_gnu",
     srcs = [
+        ":_v8_152_2_0_aarch64_unknown_linux_gnu_bazel",
         ":src_binding_release_aarch64_unknown_linux_gnu_152_2_0_release",
-        ":v8_152_2_0_aarch64_unknown_linux_gnu_bazel",
     ],
+    profile = "sandbox_release",
+    v8_cpu = "arm64",
 )
 
-filegroup(
+v8_artifact_files(
     name = "rusty_v8_sandbox_release_pair_x86_64_unknown_linux_musl",
     srcs = [
+        ":_v8_152_2_0_x86_64_unknown_linux_musl_release",
         ":src_binding_release_x86_64_unknown_linux_musl_152_2_0_release",
-        ":v8_152_2_0_x86_64_unknown_linux_musl_release",
     ],
+    profile = "sandbox_release",
+    v8_cpu = "x64",
 )
 
-filegroup(
+v8_artifact_files(
     name = "rusty_v8_sandbox_release_pair_aarch64_unknown_linux_musl",
     srcs = [
+        ":_v8_152_2_0_aarch64_unknown_linux_musl_release",
         ":src_binding_release_aarch64_unknown_linux_musl_152_2_0_release",
-        ":v8_152_2_0_aarch64_unknown_linux_musl_release",
     ],
+    profile = "sandbox_release",
+    v8_cpu = "arm64",
 )

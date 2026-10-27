@@ -19,6 +19,7 @@ use codex_models_manager::manager::OpenAiModelsManager;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::account::ProviderAccount;
+use codex_protocol::auth::RefreshTokenFailedError;
 use codex_protocol::error::CodexErr;
 use codex_protocol::openai_models::ModelsResponse;
 
@@ -32,6 +33,7 @@ use crate::auth::ResolvedProviderAuth;
 use crate::auth::auth_manager_for_provider;
 use crate::auth::resolve_provider_auth;
 use crate::auth::resolve_provider_auth_for_scope;
+use crate::auth::uses_fedramp_api_key;
 use crate::combined_auth::compose_auth;
 use crate::gcp::GcpModelProvider;
 use crate::models_endpoint::OpenAiModelsEndpoint;
@@ -92,6 +94,8 @@ pub type ProviderAccountResult = std::result::Result<ProviderAccountState, Provi
 pub const DEFAULT_APPROVAL_REVIEW_PREFERRED_MODEL: &str = "codex-auto-review";
 
 const API_KEY_APPROVAL_REVIEW_PREFERRED_MODEL: &str = "gpt-5.6-luna";
+
+const FEDRAMP_API_BASE_URL: &str = "https://gov.api.openai.com/v1";
 
 /// Default model used for memory extraction when a provider does not require a
 /// backend-specific model ID.
@@ -212,32 +216,54 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     fn api_provider(&self) -> ModelProviderFuture<'_, codex_protocol::error::Result<Provider>> {
         Box::pin(async move {
             let auth = self.auth().await;
-            self.info()
-                .to_api_provider(auth.as_ref().map(CodexAuth::auth_mode))
+            self.api_provider_for_auth(auth.as_ref())
         })
     }
 
+    /// Returns the endpoint and authentication for one API client.
+    /// Providers with credential-dependent routing should resolve both from the same auth read.
+    fn api_provider_and_auth(
+        &self,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<(Provider, SharedAuthProvider)>>
+    {
+        Box::pin(async move { Ok((self.api_provider().await?, self.api_auth().await?)) })
+    }
+
     /// Resolves routing for Responses HTTP, compaction, and WebSocket handshakes.
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "serialize discovery and the session's first successful routing transition"
-    )]
     fn responses_api_provider<'a>(
         &'a self,
         routing_context: &'a WorkspaceRoutingContext,
     ) -> ModelProviderFuture<'a, codex_protocol::error::Result<ResolvedResponsesProvider>> {
         Box::pin(async move {
-            let mut provider = self.api_provider().await?;
+            let provider = self.api_provider().await?;
+            let auth = self.auth().await;
+            self.route_responses_api_provider(provider, auth.as_ref(), routing_context)
+                .await
+        })
+    }
+
+    /// Applies workspace routing using the credentials already selected for this request.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "serialize discovery and the session's first successful routing transition"
+    )]
+    fn route_responses_api_provider<'a>(
+        &'a self,
+        mut provider: Provider,
+        auth: Option<&'a CodexAuth>,
+        routing_context: &'a WorkspaceRoutingContext,
+    ) -> ModelProviderFuture<'a, codex_protocol::error::Result<ResolvedResponsesProvider>> {
+        Box::pin(async move {
             let mut redirect_policy = ClientRedirectPolicy::Default;
             if provider_uses_first_party_auth_path(self.info())
                 && self.info().supports_codex_backend_routes()
-                && let Some(auth) = self.auth().await.filter(CodexAuth::is_chatgpt_auth)
+                && let Some(auth) = auth.filter(|auth| auth.is_chatgpt_auth())
                 && let Some(auth_manager) = self.auth_manager()
             {
                 let mut previously_routed = routing_context.previously_routed.lock().await;
                 if let Some(routing) = auth_manager
                     .workspace_routing(
-                        &auth,
+                        auth,
                         WorkspaceRoutingRequest {
                             provider_base_url: provider.base_url.clone(),
                             chatgpt_base_url: routing_context.chatgpt_base_url.clone(),
@@ -245,7 +271,11 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
                             session: routing_context.session.clone(),
                         },
                     )
-                    .await?
+                    .await
+                    .map_err(|error| match error.downcast::<RefreshTokenFailedError>() {
+                        Ok(rejection) => CodexErr::RefreshTokenFailed(rejection),
+                        Err(error) => error.into(),
+                    })?
                 {
                     crate::workspace_routing::apply_workspace_routing(&mut provider, routing)?;
                     redirect_policy = ClientRedirectPolicy::Reject;
@@ -257,6 +287,14 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
                 redirect_policy,
             })
         })
+    }
+
+    /// Adapt routing from the same frozen credential selected for the request.
+    fn api_provider_for_auth(
+        &self,
+        auth: Option<&CodexAuth>,
+    ) -> codex_protocol::error::Result<Provider> {
+        resolve_api_provider(self.info(), auth)
     }
 
     /// Returns the provider base URL that will be used at request time.
@@ -274,6 +312,14 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
             let auth = self.auth().await;
             resolve_provider_auth(auth.as_ref(), self.info())
         })
+    }
+
+    /// Adds provider-owned credentials, such as gateway OAuth, to already selected primary auth.
+    fn compose_auth(
+        &self,
+        resolved: ResolvedProviderAuth,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ResolvedProviderAuth>> {
+        Box::pin(async move { Ok(resolved) })
     }
 
     /// Returns request credentials, optionally scoped to a Codex session task.
@@ -333,7 +379,19 @@ pub type ModelProviderFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a
 /// Shared runtime model provider handle.
 pub type SharedModelProvider = Arc<dyn ModelProvider>;
 
-fn provider_uses_first_party_auth_path(provider: &ModelProviderInfo) -> bool {
+/// Resolve credential-dependent defaults without changing configured endpoints.
+pub fn resolve_api_provider(
+    info: &ModelProviderInfo,
+    auth: Option<&CodexAuth>,
+) -> codex_protocol::error::Result<Provider> {
+    let mut provider = info.to_api_provider(auth.map(CodexAuth::auth_mode))?;
+    if info.base_url.is_none() && uses_fedramp_api_key(auth, info)? {
+        provider.base_url = FEDRAMP_API_BASE_URL.to_string();
+    }
+    Ok(provider)
+}
+
+pub fn provider_uses_first_party_auth_path(provider: &ModelProviderInfo) -> bool {
     provider.requires_openai_auth
         && provider.env_key.is_none()
         && provider.experimental_bearer_token.is_none()
@@ -487,14 +545,38 @@ impl ModelProvider for ConfiguredModelProvider {
         Box::pin(async move {
             let auth = self.auth().await;
             let primary = resolve_provider_auth(auth.as_ref(), &self.info)?;
-            Ok(compose_auth(
-                &self.info,
-                self.gateway_auth_manager.as_ref(),
-                ResolvedProviderAuth::new(primary),
-            )
-            .await?
-            .auth)
+            Ok(self
+                .compose_auth(ResolvedProviderAuth::new(primary))
+                .await?
+                .auth)
         })
+    }
+
+    fn api_provider_and_auth(
+        &self,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<(Provider, SharedAuthProvider)>>
+    {
+        Box::pin(async move {
+            let auth = self.auth().await;
+            let provider = self.api_provider_for_auth(auth.as_ref())?;
+            let primary = resolve_provider_auth(auth.as_ref(), &self.info)?;
+            let auth = self
+                .compose_auth(ResolvedProviderAuth::new(primary))
+                .await?
+                .auth;
+            Ok((provider, auth))
+        })
+    }
+
+    fn compose_auth(
+        &self,
+        resolved: ResolvedProviderAuth,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ResolvedProviderAuth>> {
+        Box::pin(compose_auth(
+            &self.info,
+            self.gateway_auth_manager.as_ref(),
+            resolved,
+        ))
     }
 
     fn api_auth_for_scope(
@@ -515,7 +597,7 @@ impl ModelProvider for ConfiguredModelProvider {
                 let auth = self.auth().await;
                 ResolvedProviderAuth::new(resolve_provider_auth(auth.as_ref(), &self.info)?)
             };
-            compose_auth(&self.info, self.gateway_auth_manager.as_ref(), resolved).await
+            self.compose_auth(resolved).await
         })
     }
 
@@ -590,6 +672,8 @@ impl ModelProvider for ConfiguredModelProvider {
 mod tests {
     use std::future::Future;
     use std::num::NonZeroU64;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use std::task::Context;
     use std::task::Waker;
 
@@ -669,6 +753,7 @@ mod tests {
             capabilities: None,
             project_id: None,
             location: None,
+            credential_file: None,
             include_internal_metadata: false,
         }
     }
@@ -814,8 +899,30 @@ mod tests {
         );
     }
 
+    struct RotatingAuth(AtomicUsize);
+
+    impl codex_login::ExternalAuth for RotatingAuth {
+        fn resolve(&self) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+            Box::pin(async move {
+                let key = if self.0.fetch_add(1, Ordering::SeqCst).is_multiple_of(2) {
+                    "sk-proj-fedramp-synthetic-test-key"
+                } else {
+                    "commercial-key"
+                };
+                Ok(CodexAuth::from_api_key(key))
+            })
+        }
+
+        fn refresh(
+            &self,
+            _context: codex_login::ExternalAuthRefreshContext,
+        ) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+            self.resolve()
+        }
+    }
+
     #[tokio::test]
-    async fn configured_provider_runtime_base_url_uses_configured_base_url() {
+    async fn configured_provider_resolves_default_and_explicit_endpoints() {
         let provider = create_model_provider(
             provider_for("https://example.test/v1".to_string()),
             /*auth_manager*/ None,
@@ -828,6 +935,79 @@ mod tests {
                 .expect("runtime base URL should resolve"),
             Some("https://example.test/v1".to_string())
         );
+        assert_eq!(
+            provider.api_provider_and_auth().await.unwrap().0.base_url,
+            "https://example.test/v1"
+        );
+
+        let home = tempfile::tempdir().unwrap();
+        let auth = AuthManager::from_auth_for_testing_with_home(
+            CodexAuth::from_api_key("initial-key"),
+            home.path().to_path_buf(),
+        );
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(auth.clone()),
+        );
+        for (api_key, expected_base_url) in [
+            ("legacy-key", "https://api.openai.com/v1"),
+            (
+                "sk-proj-fedramp-synthetic-test-key",
+                "https://gov.api.openai.com/v1",
+            ),
+            ("commercial-key", "https://api.openai.com/v1"),
+        ] {
+            codex_login::login_with_api_key(
+                home.path(),
+                api_key,
+                codex_login::AuthCredentialsStoreMode::File,
+                codex_login::AuthKeyringBackendKind::default(),
+            )
+            .unwrap();
+            auth.reload().await;
+            let (api_provider, api_auth) = provider.api_provider_and_auth().await.unwrap();
+            assert_eq!(api_provider.base_url, expected_base_url);
+            let headers = api_auth.to_auth_headers().unwrap();
+            assert_eq!(
+                headers[http::header::AUTHORIZATION].to_str().unwrap(),
+                format!("Bearer {api_key}")
+            );
+        }
+        assert_eq!(provider.info().base_url, None);
+
+        let rotating_auth = Arc::new(RotatingAuth(AtomicUsize::new(0)));
+        auth.set_external_auth(rotating_auth.clone()).await.unwrap();
+        for (api_key, expected_base_url, expected_fedramp_header) in [
+            ("commercial-key", "https://api.openai.com/v1", None),
+            (
+                "sk-proj-fedramp-synthetic-test-key",
+                "https://gov.api.openai.com/v1",
+                Some("true"),
+            ),
+            ("commercial-key", "https://api.openai.com/v1", None),
+        ] {
+            let reads_before = rotating_auth.0.load(Ordering::SeqCst);
+            let (api_provider, api_auth) = provider.api_provider_and_auth().await.unwrap();
+            assert_eq!(rotating_auth.0.load(Ordering::SeqCst), reads_before + 1);
+            let headers = api_auth.to_auth_headers().unwrap();
+            let expected_authorization = format!("Bearer {api_key}");
+            assert_eq!(
+                (
+                    api_provider.base_url.as_str(),
+                    headers
+                        .get(http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok()),
+                    headers
+                        .get("X-OpenAI-Fedramp")
+                        .and_then(|value| value.to_str().ok()),
+                ),
+                (
+                    expected_base_url,
+                    Some(expected_authorization.as_str()),
+                    expected_fedramp_header,
+                )
+            );
+        }
     }
 
     #[test]
@@ -1239,6 +1419,7 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
         assert_eq!(uncached_catalog, catalog);
         for slug in [
             "openai.gpt-6.1-sol",
+            "openai.gpt-6.1-terra",
             "openai.gpt-6-sol",
             "openai.gpt-6-luna",
             "openai.gpt-5.6-sol",
@@ -1271,6 +1452,7 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
             vec![
                 ("openai.gpt-6.1-sol", "GPT-6.1 Sol"),
                 ("openai.gpt-6-astra", "GPT-6-Astra"),
+                ("openai.gpt-6.1-terra", "GPT-6.1 Terra"),
                 ("openai.gpt-6-sol", "GPT-6 Sol"),
                 ("openai.gpt-6-luna", "GPT-6 Luna"),
                 ("openai.gpt-5.6-sol", "GPT-5.6 Sol"),
@@ -1294,6 +1476,7 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
             vec![
                 "openai.gpt-6.1-sol",
                 "openai.gpt-6-astra",
+                "openai.gpt-6.1-terra",
                 "openai.gpt-6-sol",
                 "openai.gpt-6-luna",
                 "openai.gpt-5.6-sol",

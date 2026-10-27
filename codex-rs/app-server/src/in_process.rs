@@ -80,7 +80,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Result;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
-use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadItemPayload;
 use codex_arg0::Arg0DispatchPaths;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
@@ -120,8 +120,11 @@ fn server_notification_requires_delivery(notification: &ServerNotification) -> b
             | ServerNotification::ThreadAttachmentUpdated(_)
             | ServerNotification::ExternalAgentConfigImportCompleted(_)
             | ServerNotification::ItemCompleted(ItemCompletedNotification {
-                item: ThreadItem::AgentMessage {
-                    delivery: Some(AgentMessageDelivery::Async),
+                item: codex_app_server_protocol::ThreadItem {
+                    payload: ThreadItemPayload::AgentMessage {
+                        delivery: Some(AgentMessageDelivery::Async),
+                        ..
+                    },
                     ..
                 },
                 ..
@@ -500,6 +503,7 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
         let processor_outgoing = Arc::clone(&outgoing_message_sender);
         let (processor_tx, mut processor_rx) = mpsc::channel::<ProcessorCommand>(channel_capacity);
         let mut processor_handle = tokio::spawn(async move {
+            let (startup_warnings_tx, mut startup_warnings_rx) = mpsc::unbounded_channel();
             let processor = Arc::new(MessageProcessor::new(MessageProcessorArgs {
                 cloud_skill_provider: None,
                 outgoing: Arc::clone(&processor_outgoing),
@@ -513,6 +517,7 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
                 log_db: args.log_db,
                 state_db: args.state_db,
                 config_warnings: args.config_warnings,
+                startup_warnings_tx,
                 session_source: args.session_source,
                 user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
                     &auth_manager,
@@ -573,6 +578,9 @@ async fn start_uninitialized(mut args: InProcessStartArgs) -> IoResult<InProcess
                                 break;
                             }
                         }
+                    }
+                    Some(message) = startup_warnings_rx.recv(), if session.initialized() => {
+                        crate::startup_warnings::send_warning(&processor_outgoing, message).await;
                     }
                     created = thread_created_rx.recv(), if listen_for_threads => {
                         match created {
@@ -1079,8 +1087,10 @@ mod tests {
             })
         ));
         assert!(server_notification_requires_delivery(
-            &ServerNotification::ItemCompleted(ItemCompletedNotification {
-                item: ThreadItem::AgentMessage {
+            &ServerNotification::ItemCompleted(ItemCompletedNotification::new(
+                "thread-1".to_string(),
+                "turn-1".to_string(),
+                ThreadItemPayload::AgentMessage {
                     id: "item-1".to_string(),
                     text: "Still working".to_string(),
                     phase: None,
@@ -1088,10 +1098,9 @@ mod tests {
                     delivery: Some(AgentMessageDelivery::Async),
                     questions: None,
                 },
-                thread_id: "thread-1".to_string(),
-                turn_id: "turn-1".to_string(),
-                completed_at_ms: 0,
-            })
+                /*started_at_ms*/ None,
+                /*completed_at_ms*/ 0
+            ))
         ));
     }
 

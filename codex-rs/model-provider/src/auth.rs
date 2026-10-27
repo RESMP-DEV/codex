@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -9,6 +10,7 @@ use codex_api::AuthError;
 use codex_api::AuthHeadersFuture;
 use codex_api::AuthProvider;
 use codex_api::SharedAuthProvider;
+use codex_http_client::CHATGPT_ACCOUNT_ID_HEADER;
 use codex_login::AuthHeaders;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -103,7 +105,7 @@ impl AuthProvider for AgentIdentityAuthProvider {
         }
 
         if let Ok(header) = HeaderValue::from_str(self.auth.account_id()) {
-            let _ = headers.insert("ChatGPT-Account-ID", header);
+            let _ = headers.insert(CHATGPT_ACCOUNT_ID_HEADER, header);
         }
 
         if self.auth.is_fedramp_account() {
@@ -155,7 +157,7 @@ impl AuthProvider for AuthManagerAuthProvider {
         auth_provider_from_auth(&auth).add_auth_headers(headers)
     }
 
-    fn resolve_auth_headers(&self) -> AuthHeadersFuture<'_> {
+    fn apply_auth_headers(&self, mut headers: HeaderMap) -> AuthHeadersFuture<'_> {
         Box::pin(async move {
             let auth = self
                 .auth_manager
@@ -165,7 +167,8 @@ impl AuthProvider for AuthManagerAuthProvider {
                 .ok_or_else(|| {
                     AuthError::Transient("managed authentication is unavailable".to_string())
                 })?;
-            auth_provider_from_auth(&auth).to_auth_headers()
+            headers.extend(auth_provider_from_auth(&auth).to_auth_headers()?);
+            Ok(headers)
         })
     }
 
@@ -238,7 +241,18 @@ pub(crate) fn auth_manager_for_provider(
     provider: &ModelProviderInfo,
 ) -> Option<Arc<AuthManager>> {
     match provider.auth.clone() {
-        Some(config) => Some(AuthManager::external_bearer_only(config)),
+        Some(config) => {
+            let mut env = HashMap::new();
+            if provider.is_gcp()
+                && let Some(credential_file) = &provider.credential_file
+            {
+                env.insert(
+                    "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
+                    credential_file.as_os_str().to_os_string(),
+                );
+            }
+            Some(AuthManager::external_bearer_only_with_env(config, env))
+        }
         None => auth_manager,
     }
 }
@@ -350,6 +364,23 @@ fn bearer_auth_for_provider(
     }
 
     Ok(None)
+}
+
+/// Whether the selected API key enables OpenAI's default FedRAMP endpoints.
+/// Command-backed providers retain their configured routing across token refreshes.
+pub(crate) fn uses_fedramp_api_key(
+    auth: Option<&CodexAuth>,
+    provider: &ModelProviderInfo,
+) -> codex_protocol::error::Result<bool> {
+    if !provider.is_openai() || provider.has_command_auth() {
+        return Ok(false);
+    }
+    if let Some(auth) = bearer_auth_for_provider(provider)? {
+        return Ok(auth.is_fedramp_account);
+    }
+    Ok(provider.requires_openai_auth
+        && matches!(auth, Some(CodexAuth::ApiKey(_)))
+        && auth.is_some_and(CodexAuth::is_fedramp_account))
 }
 
 /// Builds request-header auth for a first-party Codex auth snapshot.
@@ -543,12 +574,14 @@ mod tests {
             "ChatGPT-Account-ID",
             HeaderValue::from_static("account-123"),
         );
-        let ambient_auth = CodexAuth::Headers(AuthHeaders::new(ambient_headers));
-
-        let auth =
-            resolve_provider_auth(Some(&ambient_auth), &provider).expect("auth should resolve");
-
-        assert!(auth.to_auth_headers().unwrap().is_empty());
+        for ambient_auth in [
+            CodexAuth::Headers(AuthHeaders::new(ambient_headers)),
+            CodexAuth::from_api_key("sk-proj-fedramp-synthetic-test-key"),
+        ] {
+            let auth =
+                resolve_provider_auth(Some(&ambient_auth), &provider).expect("auth should resolve");
+            assert!(auth.to_auth_headers().unwrap().is_empty());
+        }
     }
 
     #[test]
@@ -586,6 +619,41 @@ mod tests {
             Some(&HeaderValue::from_static("Bearer provider-token"))
         );
         assert_eq!(headers.len(), 1);
+    }
+
+    #[test]
+    fn api_key_fedramp_routing_follows_the_selected_provider_credential() {
+        let project_key = "sk-proj-fedramp-synthetic-test-key";
+        let service_account_key = "sk-svcacct-fedramp-synthetic-test-key";
+        let legacy_key = "sk-proj-synthetic-test-key";
+
+        for (ambient_key, provider_key, expected_fedramp) in [
+            (project_key, None, true),
+            (service_account_key, None, true),
+            (legacy_key, None, false),
+            (project_key, Some(legacy_key), false),
+            (legacy_key, Some(project_key), true),
+            (legacy_key, Some(service_account_key), true),
+        ] {
+            let mut provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+            provider.experimental_bearer_token = provider_key.map(Into::into);
+            let ambient_auth = CodexAuth::from_api_key(ambient_key);
+
+            let headers = resolve_provider_auth(Some(&ambient_auth), &provider)
+                .expect("auth should resolve")
+                .to_auth_headers()
+                .unwrap();
+
+            let key = provider_key.unwrap_or(ambient_key);
+            let mut expected_headers = HeaderMap::from_iter([(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {key}")).unwrap(),
+            )]);
+            if expected_fedramp {
+                expected_headers.insert("X-OpenAI-Fedramp", HeaderValue::from_static("true"));
+            }
+            assert_eq!(headers, expected_headers);
+        }
     }
 
     #[test]
@@ -696,7 +764,7 @@ mod tests {
             .expect("initial auth should be cached");
         let provider = auth_provider_from_auth_manager(Arc::clone(&auth_manager), &expected_auth);
         let initial_headers = provider
-            .resolve_auth_headers()
+            .apply_auth_headers(HeaderMap::new())
             .await
             .expect("initial auth headers");
 
@@ -716,7 +784,7 @@ mod tests {
         // Ordinary requests retain the manager's cache until refresh or recovery runs.
         assert_eq!(
             provider
-                .resolve_auth_headers()
+                .apply_auth_headers(HeaderMap::new())
                 .await
                 .expect("cached auth headers"),
             initial_headers
@@ -730,7 +798,7 @@ mod tests {
         );
 
         let resolved_headers = provider
-            .resolve_auth_headers()
+            .apply_auth_headers(HeaderMap::new())
             .await
             .expect("managed auth headers should resolve");
         assert_eq!(
@@ -753,7 +821,7 @@ mod tests {
             Err(AuthError::Transient(_))
         ));
         assert!(matches!(
-            provider.resolve_auth_headers().await,
+            provider.apply_auth_headers(HeaderMap::new()).await,
             Err(AuthError::Transient(_))
         ));
     }

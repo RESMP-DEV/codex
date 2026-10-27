@@ -2,7 +2,7 @@
 //!
 //! Both Guardian consumers receive the same role and tool-source attribution,
 //! with generated compaction summaries attributed to the assistant, complete user
-//! messages and capped non-user entries, except sync tool and assistant entries prepared later. Resolved context profiles
+//! messages and capped non-user entries, with sync entry caps deferred to request preparation. Resolved context profiles
 //! apply aggregate retention after the host selects its full/delta slice. Tool outputs with a
 //! call ID retain their generic label when the call is unavailable. Outputs
 //! without a call ID require an explicit name.
@@ -217,7 +217,7 @@ fn collect_transcript_for_target(
                         TranscriptContent::AgentMessage(Box::new(item.clone()))
                     } else {
                         let limit = codex_protocol::protocol::TruncationPolicy::Tokens(
-                            config.entry_limits.message_tokens.min(9_000),
+                            config.entry_limits.message_tokens,
                         )
                         .byte_budget();
                         if bytes <= limit {
@@ -431,6 +431,11 @@ fn collect_transcript_for_target(
             | ConversationTranscriptEntryKind::ToolOutput(_) => {
                 truncate_text(&text, config.entry_limits.tool_tokens)
             }
+            ConversationTranscriptEntryKind::NodeReplToolOutput(_)
+                if target == crate::ContextTarget::Sync =>
+            {
+                text
+            }
             ConversationTranscriptEntryKind::NodeReplToolOutput(_) => {
                 truncate_text(&text, config.entry_limits.node_repl_output_tokens)
             }
@@ -457,12 +462,14 @@ fn collect_transcript_for_target(
                             "Retained source order: {order}\n{}",
                             crate::GuardianRootMessage::User(message.text.clone()).render()
                         );
-                        (rendered.len()
-                            <= TruncationPolicy::Tokens(
-                                crate::retained_instructions::MAX_INSTRUCTION_TOKENS,
-                            )
-                            .byte_budget())
+                        (target == crate::ContextTarget::Sync
+                            || rendered.len()
+                                <= TruncationPolicy::Tokens(
+                                    crate::retained_instructions::MAX_INSTRUCTION_TOKENS,
+                                )
+                                .byte_budget())
                         .then(|| crate::RetainedTranscriptSource {
+                            rendered_bytes: rendered.len(),
                             order,
                             source: source.clone(),
                         })

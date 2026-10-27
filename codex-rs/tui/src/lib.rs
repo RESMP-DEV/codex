@@ -47,7 +47,7 @@ use codex_app_server_protocol::ThreadListCwdFilter;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadSortKey as AppServerThreadSortKey;
 use codex_app_server_protocol::ThreadSourceKind;
-use codex_cloud_config::cloud_config_bundle_loader_for_storage;
+use codex_cloud_config::managed_config_bundle_loader_for_storage;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLoadError;
 use codex_config::LoaderOverrides;
@@ -337,6 +337,13 @@ pub(crate) enum AppServerTarget {
 }
 
 impl AppServerTarget {
+    fn supports_command_center(&self) -> bool {
+        match self {
+            Self::Embedded => false,
+            Self::LocalDaemon { .. } | Self::Remote { .. } => true,
+        }
+    }
+
     fn preserve_selected_backend(&mut self, selection: &resume_picker::SessionSelection) {
         if matches!(
             selection,
@@ -1098,11 +1105,12 @@ async fn cloud_config_bundle_for_app_server_target(
     codex_home: &Path,
     embedded_network_policy: &codex_app_server_client::EmbeddedNetworkPolicy,
 ) -> std::io::Result<CloudConfigBundleLoader> {
-    cloud_config_bundle_loader_for_storage(
+    managed_config_bundle_loader_for_storage(
         embedded_network_policy
             .bind_bootstrap_auth(app_server_target.auth_config_for_cloud_loader(
                 bootstrap_auth_config(codex_home, bootstrap_config)?,
             )),
+        bootstrap_config.config_layer_stack.requirements_toml(),
         /*enable_codex_api_key_env*/ false,
     )
     .await
@@ -1415,8 +1423,9 @@ async fn run_ratatui_app(
                 // bundle and rebuild config. This avoids missing newly available cloud-managed
                 // policy due to login status detection edge cases.
                 if show_login_screen && !uses_remote_workspace && !workload_identity_selected {
-                    cloud_config_bundle = cloud_config_bundle_loader_for_storage(
+                    cloud_config_bundle = managed_config_bundle_loader_for_storage(
                         embedded_network_policy.bind_bootstrap_auth(initial_config.auth_config()),
+                        initial_config.config_layer_stack.requirements_toml(),
                         /*enable_codex_api_key_env*/ false,
                     )
                     .await?;
@@ -1897,7 +1906,7 @@ async fn run_ratatui_app(
     if (!matches!(
         session_selection,
         resume_picker::SessionSelection::AgentsOverview
-    ) || matches!(app_server_target, AppServerTarget::Embedded))
+    ) || !app_server_target.supports_command_center())
         && (!uses_remote_workspace || remote_cwd_override.is_some())
     {
         let resumed_thread = if matches!(app_server_target, AppServerTarget::LocalDaemon { .. })
@@ -1977,7 +1986,7 @@ async fn run_ratatui_app(
                 trust_decision_was_made = true;
             }
         } else if consent.should_exit {
-            if matches!(app_server_target, AppServerTarget::Embedded) {
+            if !app_server_target.supports_command_center() {
                 shutdown_startup_session(Some(app_server), &mut terminal_restore_guard).await;
                 return Ok(AppExitInfo {
                     token_usage: crate::token_usage::TokenUsage::default(),

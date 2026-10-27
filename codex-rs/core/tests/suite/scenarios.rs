@@ -1,5 +1,6 @@
 //! Multi-turn Astra scenarios snapshot the model-visible request history of shipped features.
 
+use super::permissions_messages::PermissionPathScenario;
 use codex_protocol_test_support::ContentItemTestExt;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -49,6 +50,8 @@ use codex_protocol::openai_models::CodeModeToolMessages;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ToolMessage;
 use codex_protocol::openai_models::ToolMode;
+use codex_protocol::protocol::AdditionalContextEntry;
+use codex_protocol::protocol::AdditionalContextKind;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 #[cfg(not(target_os = "windows"))]
@@ -152,6 +155,9 @@ mod mcp_resource_messages;
 #[path = "scenarios_mcp_ema.rs"]
 mod mcp_ema;
 
+#[path = "scenarios_mcp_sharing.rs"]
+mod mcp_sharing;
+
 #[path = "scenarios_guardian_agent_messages_tests.rs"]
 mod guardian_agent_messages;
 
@@ -193,10 +199,14 @@ mod frozen_cloud_skills;
 #[path = "scenarios_compaction_tests.rs"]
 mod compaction;
 
+#[path = "scenarios_world_state_prefix_tests.rs"]
+mod world_state_prefix;
+
 fn skills_extensions() -> Arc<ExtensionRegistry<Config>> {
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
     install(&mut extensions, |config: &Config| SkillsExtensionConfig {
         include_instructions: config.include_skill_instructions,
+        catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
         max_context_tokens: config.skill_max_context_tokens,
         bundled_skills_enabled: config.bundled_skills_enabled(),
         cloud_skill_enabled: config.cloud_skill_enabled,
@@ -307,6 +317,131 @@ fn configure_scenario_catalog(config: &mut Config) {
     .with_cloud_config_binding(stack.cloud_config_binding().cloned());
     config.model_catalog = Some(bundled_models_response().expect("bundled model catalog"));
     config.cloud_skill_enabled = false;
+}
+
+#[test_case::test_case(false; "messages")]
+#[test_case::test_case(true; "tool_outputs")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn additional_context_tool_outputs(tool_outputs: bool) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_config(move |config| {
+            configure_scenario_catalog(config);
+            config.include_environment_context = false;
+            config
+                .features
+                .set_enabled(Feature::UntrustedAsToolOutput, tool_outputs)
+                .expect("test config should allow feature update");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let mock = mount_sse_sequence(
+        &server,
+        (0..4)
+            .map(|index| sse(vec![ev_completed(&format!("response-{index}"))]))
+            .collect(),
+    )
+    .await;
+
+    for (prompt, name, value) in [
+        (
+            "Summarize the selected document.",
+            Some("browser"),
+            "The launch is on Monday.",
+        ),
+        (
+            "The same document is now open in the editor.",
+            Some("editor"),
+            "The launch is on Monday.",
+        ),
+        (
+            "Check the date again.",
+            Some("editor"),
+            "The launch is on Monday.",
+        ),
+        (
+            "Summarize the updated document.",
+            None,
+            "The launch is on Tuesday.",
+        ),
+    ] {
+        test.codex
+            .start_or_steer_turn(
+                TurnInputRequest::user_input(vec![text(prompt)]).with_additional_context(
+                    std::collections::BTreeMap::from([
+                        (
+                            "selection".to_owned(),
+                            AdditionalContextEntry {
+                                value: value.to_owned(),
+                                kind: AdditionalContextKind::Untrusted,
+                                name: name.map(str::to_owned),
+                            },
+                        ),
+                        (
+                            "application".to_owned(),
+                            AdditionalContextEntry::new(
+                                "Keep the answer brief.".to_owned(),
+                                AdditionalContextKind::Application,
+                            ),
+                        ),
+                    ]),
+                ),
+            )
+            .await?;
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await;
+    }
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 4);
+    if tool_outputs {
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.inputs_of_type("function_call_output").len())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 2, 3]
+        );
+        assert_eq!(requests[3].message_input_texts("user").len(), 4);
+        let input = requests[0].input();
+        let context_index = input
+            .iter()
+            .position(|item| item["type"] == "function_call_output")
+            .expect("context output");
+        let user_index = input
+            .iter()
+            .position(|item| item["role"] == "user")
+            .expect("user message");
+        assert!(context_index < user_index);
+    } else {
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.inputs_of_type("function_call_output").is_empty())
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.message_input_texts("user").len())
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4, 6]
+        );
+    }
+    insta::assert_snapshot!(
+        if tool_outputs {
+            "additional_context_tool_outputs"
+        } else {
+            "additional_context_legacy_messages"
+        },
+        context_snapshot::format_request_history_snapshot(
+            "Named context changes are appended before the user; unchanged values are deduplicated.",
+            &requests,
+            &ContextSnapshotOptions::default().rewrite_known_segments(),
+        )
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -986,6 +1121,7 @@ async fn astra_omits_disabled_executor_and_plugin_skills_from_model_context(
         SkillProviders::new().with_executor_provider(Arc::new(provider)),
         |config: &Config| SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
             cloud_skill_enabled: false,
@@ -1409,7 +1545,8 @@ async fn skill_read_recovers_omitted_installation_and_reads_selected_environment
         }
     }
 
-    let executor = core_test_support::exec_server::ExecServerProcess::start().await?;
+    let executor =
+        core_test_support::exec_server::ExecServerProcess::start_with_version("0.164.0").await?;
     // Keep byte-budget decisions stable across host temporary-directory lengths.
     let temp_root = fs::canonicalize(std::env::temp_dir())?;
     let workspace = tempfile::Builder::new()
@@ -1472,6 +1609,7 @@ async fn skill_read_recovers_omitted_installation_and_reads_selected_environment
             )),
         |config: &Config| SkillsExtensionConfig {
             include_instructions: config.include_skill_instructions,
+            catalog_deltas_enabled: config.features.enabled(Feature::SkillCatalogDeltas),
             max_context_tokens: config.skill_max_context_tokens,
             bundled_skills_enabled: false,
             cloud_skill_enabled: true,
@@ -2677,17 +2815,65 @@ async fn model_catalog_refresh_preserves_tools_and_history() -> Result<()> {
     Ok(())
 }
 
+#[test_case::test_case(PermissionPathScenario::OmittedPaths; "omitted_paths")]
+#[test_case::test_case(PermissionPathScenario::DeniedReads; "denied_reads")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn catalog_writable_roots_follow_selected_model() -> Result<()> {
+async fn catalog_permission_paths_follow_selected_model(
+    scenario: PermissionPathScenario,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
+    if matches!(scenario, PermissionPathScenario::DeniedReads) {
+        core_test_support::skip_if_target_windows!(
+            Ok(()),
+            "Windows restricted-token sandbox cannot enforce deny-read policies"
+        );
+    }
     let requests =
-        super::permissions_messages::catalog_writable_roots_model_change_requests().await?;
-    let snapshot = context_snapshot::format_request_history_snapshot(
-        "Catalog writable-root wording follows the selected model, appending changed permissions once while preserving prior input.",
-        &requests,
-        &ContextSnapshotOptions::default().include_request_settings(),
+        super::permissions_messages::catalog_permission_paths_model_change_requests(scenario)
+            .await?;
+    let mut bodies = requests
+        .iter()
+        .map(core_test_support::responses::ResponsesRequest::body_json)
+        .collect::<Vec<_>>();
+    // Keep the complete history, but collapse the large platform-specific fixture path lists
+    // before snapshot hashing. The helper verifies selected roots, denial facts, and omission.
+    let roots = regex_lite::Regex::new(r"(?m)^(Model [AB] roots: ).*$")?;
+    let filesystem = regex_lite::Regex::new(r"<filesystem>.*</filesystem>")?;
+    for body in &mut bodies {
+        for item in body["input"].as_array_mut().expect("request input") {
+            for content in item["content"].as_array_mut().into_iter().flatten() {
+                if let Some(text) = content["text"].as_str() {
+                    let text = roots.replace_all(text, "${1}<BOUNDED_ROOT_LIST>.");
+                    content["text"] = filesystem
+                        .replace_all(
+                            &text,
+                            "<filesystem><LARGE_PERMISSION_PATH_FIXTURE/></filesystem>",
+                        )
+                        .into_owned()
+                        .into();
+                }
+            }
+        }
+    }
+    let entries = bodies.iter().map(SnapshotEntry::body).collect::<Vec<_>>();
+    let (snapshot_name, description) = match scenario {
+        PermissionPathScenario::OmittedPaths => (
+            "catalog_writable_roots_follow_selected_model",
+            "Catalog root and omitted-path wording follows the selected model, appending changed permissions once while preserving prior input and the mandatory omission warning.",
+        ),
+        PermissionPathScenario::DeniedReads => (
+            "catalog_denied_reads_follow_selected_model",
+            "Catalog denied-read wording follows the selected model, appending changed permissions once while preserving prior input, denial facts, and mandatory policy warnings.",
+        ),
+    };
+    insta::assert_snapshot!(
+        snapshot_name,
+        context_snapshot::format_context_snapshot(
+            description,
+            &entries,
+            &ContextSnapshotOptions::default().include_request_settings(),
+        )
     );
-    insta::assert_snapshot!(snapshot);
     Ok(())
 }
 

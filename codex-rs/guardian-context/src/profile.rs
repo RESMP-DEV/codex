@@ -143,10 +143,15 @@ impl ContextProfile {
                     ContextTarget::Sync => "",
                     ContextTarget::Async => "\n",
                 };
-                let retained_source = entry
-                    .retained_source
-                    .as_ref()
-                    .filter(|_| entry.kind == ConversationTranscriptEntryKind::User);
+                let retained_source = entry.retained_source.as_ref().filter(|source| {
+                    entry.kind == ConversationTranscriptEntryKind::User
+                        && (self.target == ContextTarget::Async
+                            || source.rendered_bytes
+                                <= TruncationPolicy::Tokens(
+                                    crate::retained_instructions::MAX_INSTRUCTION_TOKENS,
+                                )
+                                .byte_budget())
+                });
                 let prepare_text = |text: &str| {
                     let record = TranscriptRecord::new(
                         &entry.kind,
@@ -316,10 +321,8 @@ fn prepare_sync_content<'a>(
         TranscriptContent::Record(record) => record.text(),
         TranscriptContent::AgentMessage(_) => {
             // Native ciphertext stays whole, or leaves an omission at the same position.
-            let limit = codex_protocol::protocol::TruncationPolicy::Tokens(
-                limits.message_tokens.min(/*other*/ 9_000),
-            )
-            .byte_budget();
+            let limit = codex_protocol::protocol::TruncationPolicy::Tokens(limits.message_tokens)
+                .byte_budget();
             return if entry.original_bytes > limit {
                 std::borrow::Cow::Owned(TranscriptContent::Text(
                     crate::transcript::TRANSCRIPT_OMISSION_NOTICE.to_owned(),
@@ -335,9 +338,8 @@ fn prepare_sync_content<'a>(
         ConversationTranscriptEntryKind::Assistant
         | ConversationTranscriptEntryKind::ProtectedAssistant
         | ConversationTranscriptEntryKind::Reasoning => limits.message_tokens,
-        ConversationTranscriptEntryKind::User
-        | ConversationTranscriptEntryKind::Developer
-        | ConversationTranscriptEntryKind::NodeReplToolOutput(_) => {
+        ConversationTranscriptEntryKind::NodeReplToolOutput(_) => limits.node_repl_output_tokens,
+        ConversationTranscriptEntryKind::User | ConversationTranscriptEntryKind::Developer => {
             return std::borrow::Cow::Borrowed(&entry.content);
         }
     };

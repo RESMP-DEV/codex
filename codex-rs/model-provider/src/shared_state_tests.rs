@@ -105,7 +105,7 @@ async fn gateway_credentials_accompany_primary_auth_in_models_and_responses() {
         models
             .raw_model_catalog(RefreshStrategy::Online, factory.clone())
             .await;
-        let auth = provider.api_auth().await.unwrap();
+        let (api, auth) = provider.api_provider_and_auth().await.unwrap();
         let scoped = provider
             .api_auth_for_scope(ProviderAuthScope {
                 agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
@@ -134,10 +134,12 @@ async fn gateway_credentials_accompany_primary_auth_in_models_and_responses() {
         );
         // WebSocket handshakes use the synchronous header interface.
         assert_eq!(auth.to_auth_headers().unwrap(), expected);
-        assert_eq!(auth.resolve_auth_headers().await.unwrap(), expected);
+        assert_eq!(
+            auth.apply_auth_headers(HeaderMap::new()).await.unwrap(),
+            expected
+        );
         assert_eq!(scoped.auth.to_auth_headers().unwrap(), expected);
         assert!(auth.to_auth_headers().unwrap()[name].is_sensitive());
-        let api = info.to_api_provider(/*auth_mode*/ None).unwrap();
         let transport = ReqwestTransport::from_http_client(
             create_client_for_route(
                 &factory,

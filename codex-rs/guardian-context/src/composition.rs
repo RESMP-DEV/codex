@@ -153,8 +153,25 @@ impl CollectedContext {
             .unwrap_or_default()
     }
 
-    /// Applies consumer caps and frames the selected transcript before request admission.
+    /// Compatibility entrypoint for existing synchronous and asynchronous callers.
     pub fn compose(
+        mut self,
+        presentation: ContextPresentation<'_>,
+        transcript: PreparedTranscript,
+    ) -> Result<ComposedContext, SectionError> {
+        match presentation {
+            ContextPresentation::SyncFull { .. } | ContextPresentation::SyncDelta { .. } => {
+                crate::preparation::prepare_sync_sections(&mut self);
+                self.compose_prepared(presentation, transcript)
+            }
+            ContextPresentation::Async | ContextPresentation::AsyncDelta => {
+                self.compose_prepared(presentation, transcript)
+            }
+        }
+    }
+
+    /// Frames prepared sections in their existing delivery order.
+    pub(crate) fn compose_prepared(
         mut self,
         presentation: ContextPresentation<'_>,
         mut transcript: PreparedTranscript,
@@ -284,9 +301,11 @@ impl CollectedContext {
                             .collect(),
                     ),
                 ),
-                ContextSection::TrustedUserAnswers { items } => {
-                    (3, "trusted_user_answers", text_content(items))
-                }
+                ContextSection::TrustedUserAnswers { items } => (
+                    3,
+                    "trusted_user_answers",
+                    text_content(items.into_iter().map(|item| item.text).collect()),
+                ),
                 ContextSection::ConversationTranscript { .. } => {
                     let transcript =
                         transcript.take().ok_or(SectionError::UnsupportedDelivery {
@@ -378,8 +397,14 @@ impl CollectedContext {
                     )
                 }
                 ContextSection::NodeReplEvidence(evidence) => {
-                    let items = evidence
-                        .items
+                    let crate::node_repl::NodeReplEvidenceContent::Prepared(items) =
+                        evidence.content
+                    else {
+                        return Err(SectionError::UnsupportedDelivery {
+                            section: "node_repl_evidence",
+                        });
+                    };
+                    let items = items
                         .into_iter()
                         .filter_map(|item| match item {
                             UserInput::Text { text, .. } => {

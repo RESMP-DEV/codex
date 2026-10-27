@@ -19,7 +19,6 @@ use codex_guardian_context::default_registry;
 use codex_protocol::models::ResponseItem;
 
 use crate::context::GuardianPermissionContext;
-use crate::context::GuardianReviewEvidence;
 use crate::context::GuardianToolDescriptions;
 use crate::context::NodeReplReviewEvidence;
 use crate::context::NodeReplReviewEvidenceMode;
@@ -115,12 +114,10 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
         .get_guardian_package(session.thread_id)
         .await
         .map(|snapshot| snapshot.messages);
-    let trusted_user_inputs = session
-        .services
-        .thread_extension_data
-        .get_or_init(GuardianReviewEvidence::default)
-        .user_input_snapshot(history)
-        .fragments;
+    let trusted_user_inputs = history
+        .retained_context()
+        .map(codex_guardian_context::collect_verified_answer_candidates)
+        .unwrap_or_default();
     let planned_action_json = format_guardian_action_pretty(&request)?;
     let planned_action = PlannedAction {
         json: planned_action_json,
@@ -215,6 +212,7 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
         Some(context) => context.turn().config.guardian_transcript_mode,
         None => session.get_config().await.guardian_transcript_mode,
     };
+    profile.transcript.entry_limits.node_repl_output_tokens = node_repl_result_token_limit;
     let mut transcript = profile.prepare_transcript(transcript_entries, offset);
     if transcript_entries.is_empty() {
         transcript.items.push(Budgeted::required(
@@ -233,9 +231,11 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
 #[cfg(test)]
 pub(crate) fn render_guardian_transcript_entries(
     entries: &[ConversationTranscriptEntry],
+    node_repl_result_token_limit: usize,
 ) -> (Vec<String>, Option<String>) {
-    let mut transcript =
-        ContextProfile::synchronous().prepare_transcript(entries, /*entry_number_offset*/ 0);
+    let mut profile = ContextProfile::synchronous();
+    profile.transcript.entry_limits.node_repl_output_tokens = node_repl_result_token_limit;
+    let mut transcript = profile.prepare_transcript(entries, /*entry_number_offset*/ 0);
     if entries.is_empty() {
         transcript.items.push(Budgeted::required(
             codex_guardian_context::TranscriptContent::Text(
@@ -267,13 +267,13 @@ pub(crate) fn render_guardian_transcript_entries(
 /// Keep both tool calls and tool results here. The reviewer often needs the
 /// agent's exact queried path / arguments as well as the returned evidence to
 /// decide whether the pending approval is justified.
-/// Tool-call and output truncation happen in sync preparation; other caps still apply
-/// during collection. The cursor counts every non-empty evidence entry.
+/// Per-entry truncation happens in sync preparation after cursor selection.
+/// The cursor counts every non-empty evidence entry.
 pub(super) fn collect_guardian_context(
     history: &dyn SectionHistory,
     node_repl_result_token_limit: usize,
     root_conversation: &[GuardianRootMessage],
-    trusted_user_answers: &[String],
+    trusted_user_answers: &[codex_guardian_context::TrustedUserAnswer],
     planned_action: Option<&PlannedAction>,
     permissions: Option<&GuardianPermissionContext>,
     node_repl: Option<&codex_guardian_context::NodeReplContext<'_>>,
@@ -323,6 +323,14 @@ impl SectionHistory for GuardianReviewHistory<'_> {
         }
     }
 
+    fn render_original_assistant(
+        &self,
+        message: &codex_history::RetainedUserMessage,
+    ) -> Option<GuardianRootMessage> {
+        crate::context::render_original_assistant_context(message)
+            .map(GuardianRootMessage::Assistant)
+    }
+
     fn render_retained_assistant(
         &self,
         message: &codex_history::RetainedUserMessage,
@@ -352,6 +360,13 @@ impl SectionHistory for FilteredGuardianHistory<'_> {
 
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
         Box::new(self.items_with_sources().map(|(item, _)| item))
+    }
+
+    fn render_original_assistant(
+        &self,
+        message: &codex_history::RetainedUserMessage,
+    ) -> Option<GuardianRootMessage> {
+        self.0.render_original_assistant(message)
     }
 
     fn render_retained_assistant(

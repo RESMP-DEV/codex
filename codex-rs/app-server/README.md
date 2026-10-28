@@ -179,6 +179,14 @@ discovery finds no project-root marker, Git checkout, or project-local `.codex`
 directory. Starting a task there does not preapprove project configuration added
 later. Existing trust decisions and permission checks for projects are unchanged.
 
+# Review delivery
+
+`review/start` runs the review on the supplied thread and returns that same
+`reviewThreadId`. Clients can omit `delivery`, send `null`, or specify `"inline"`.
+Clients that used `"detached"` should call `thread/start` and pass the new thread id
+to `review/start`. To keep the original conversation history with custom review
+instructions, use `thread/fork` followed by `turn/start`.
+
 # Thread removal
 
 `thread/archive` and `thread/delete` reject attempts to remove a live internal
@@ -702,3 +710,20 @@ Credential failures include `error.data.reason`.
 
 For personal sign-in, users can run `gcloud auth application-default login` on
 the app-server host and retry setup.
+
+## Managed OpenTelemetry configuration
+
+`configRequirements/read` exposes managed `otel` settings. `config/read` applies
+those settings to the effective configuration and omits ordinary origins for
+managed fields. Configuration writes that overlap managed settings are rejected.
+
+Exporter header values are redacted in effective config, source layers, managed
+requirements, and write-override metadata. Runtime exporters retain the original values.
+
+Managed span attributes and tracestate metadata are included in effective config
+and requirements reads. Unmanaged metadata remains writable.
+
+Tracestate requirements merge individual fields within each member. For example,
+requiring `otel.tracestate.vendor.tenant` preserves an ordinary `vendor.region`.
+Only required fields and edits to their ancestors are protected; sibling fields
+retain their origins and remain writable.

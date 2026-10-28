@@ -341,6 +341,109 @@ refresh_interval_ms = 12345
 }
 
 #[test]
+fn otel_requirements_compose_exact_values_atomic_exporters_and_metadata() {
+    let low_dir = tempdir().expect("low-priority requirements directory");
+    let high_dir = tempdir().expect("high-priority requirements directory");
+    let low_base = AbsolutePathBuf::from_absolute_path(low_dir.path()).expect("absolute low base");
+    let high_base =
+        AbsolutePathBuf::from_absolute_path(high_dir.path()).expect("absolute high base");
+
+    let low = layer(
+        "req_low",
+        "Low",
+        r#"
+[otel]
+tool_result = { max_bytes = 1024 }
+log_user_prompt = true
+environment = "low"
+exporter = { otlp-http = { endpoint = "https://low.example", protocol = "json", headers = { stale = "low" }, tls = { ca-certificate = "low-ca.pem" } } }
+trace_exporter = { otlp-grpc = { endpoint = "https://low.example", tls = { client-certificate = "low-client.pem" } } }
+metrics_exporter = "statsig"
+span_attributes = { shared = "low", lower = "preserved" }
+tracestate = { shared = { tenant = "low", region = "us" }, lower = { tenant = "preserved" }, empty = {} }
+"#,
+    )
+    .with_base_dir(low_base);
+    let high = layer(
+        "req_high",
+        "High",
+        r#"
+[otel]
+tool_result = { max_bytes = 4096 }
+log_user_prompt = false
+environment = "high"
+exporter = { otlp-http = { endpoint = "https://high.example", protocol = "binary", tls = { ca-certificate = "high-ca.pem" } } }
+metrics_exporter = "none"
+span_attributes = { shared = "high", higher = "added" }
+tracestate = { shared = { tenant = "replacement" }, lower = {}, higher = { tenant = "added" } }
+"#,
+    )
+    .with_base_dir(high_base);
+    let expected_source = RequirementSource::composite([high.source.clone(), low.source.clone()]);
+    let composed = compose_requirements_for_hostname(
+        vec![
+            low,
+            high,
+            layer(
+                "empty",
+                "Empty",
+                "[otel]\nspan_attributes = {}\ntracestate = { lower = {} }",
+            ),
+        ],
+        /*hostname*/ None,
+    )
+    .expect("compose OTEL requirements")
+    .expect("requirements present")
+    .otel
+    .expect("OTEL requirements present");
+    assert_eq!(composed.source, expected_source);
+
+    let expected = r#"
+[otel]
+tool_result = { max_bytes = 4096 }
+log_user_prompt = false
+environment = "high"
+exporter = { otlp-http = { endpoint = "https://high.example", protocol = "binary", tls = { ca-certificate = '$HIGH_CA' } } }
+trace_exporter = { otlp-grpc = { endpoint = "https://low.example", tls = { client-certificate = '$LOW_CLIENT' } } }
+metrics_exporter = "none"
+span_attributes = { shared = "high", lower = "preserved", higher = "added" }
+tracestate = { shared = { tenant = "replacement", region = "us" }, lower = { tenant = "preserved" }, higher = { tenant = "added" } }
+"#
+    .replace(
+        "$HIGH_CA",
+        &high_dir.path().join("high-ca.pem").display().to_string(),
+    )
+    .replace(
+        "$LOW_CLIENT",
+        &low_dir.path().join("low-client.pem").display().to_string(),
+    );
+    assert_eq!(
+        composed.value,
+        *expected_requirements(expected).otel.unwrap()
+    );
+    assert_eq!(
+        compose(vec![layer(
+            "mixed",
+            "Mixed",
+            "[otel]\nexporter = 'none'\nspan_attributes = {}\ntracestate = { empty = {} }",
+        )]),
+        Ok(Some(expected_requirements("[otel]\nexporter = 'none'"))),
+    );
+
+    for empty in [
+        "[otel]",
+        "[otel.span_attributes]",
+        "[otel.tracestate.empty]",
+    ] {
+        assert_eq!(
+            compose(vec![layer("empty", "Empty", empty)]),
+            Ok(None),
+            "{empty}",
+        );
+    }
+}
+
+#[test]
 fn provider_auth_missing_command_is_rejected_after_composition() {
     let err = compose(vec![
         layer("low", "Name", "[model_providers.gateway]\nname = 'Gateway'"),

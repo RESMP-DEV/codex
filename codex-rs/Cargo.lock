@@ -2065,7 +2065,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
- "codex-agent-extension",
  "codex-analytics",
  "codex-app-server-daemon",
  "codex-app-server-protocol",
@@ -2856,6 +2855,7 @@ dependencies = [
  "serde_path_to_error",
  "sha2 0.10.9",
  "tempfile",
+ "test-case",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -3649,19 +3649,28 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "codex-analytics",
+ "codex-context-fragments",
  "codex-extension-api",
+ "codex-features",
  "codex-feedback",
  "codex-guardian-context",
+ "codex-history",
  "codex-mcp",
+ "codex-models-manager",
  "codex-otel",
  "codex-prompts",
  "codex-protocol",
+ "codex-protocol-test-support",
+ "codex-rmcp-client",
  "codex-shell-command",
+ "codex-utils-output-truncation",
  "codex-utils-path-uri",
+ "codex-utils-string",
  "opentelemetry",
  "opentelemetry_sdk",
  "pretty_assertions",
  "rand 0.9.3",
+ "rmcp",
  "serde",
  "serde_json",
  "test-case",
@@ -4393,11 +4402,13 @@ dependencies = [
  "opentelemetry_sdk",
  "os_info",
  "pretty_assertions",
+ "rcgen",
  "reqwest 0.12.28",
  "seccompiler",
  "serde",
  "serde_json",
  "strum_macros 0.28.0",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
@@ -16600,8 +16611,7 @@ dependencies = [
 [[package]]
 name = "v8"
 version = "152.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a10fe1a92da5c32c7c7f838ce36c0ccfcfd5edf0865b58bdde820aa64cea9888"
+source = "git+https://github.com/seanh-oai/rusty_v8.git?rev=350c5a859a9b3c84ab8701b3ad51e3b7699b30c0#350c5a859a9b3c84ab8701b3ad51e3b7699b30c0"
 dependencies = [
  "bindgen",
  "bitflags 2.13.1",

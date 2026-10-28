@@ -2977,6 +2977,32 @@ class NullableGetAccountTokenUsageParams(RootModel[GetAccountTokenUsageParams | 
     ]
 
 
+class OtelExporterValue(Enum):
+    none = "none"
+    statsig = "statsig"
+
+
+class OtelHttpProtocol(Enum):
+    binary = "binary"
+    json = "json"
+
+
+class OtelTlsConfig(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    ca_certificate: Annotated[str | None, Field(alias="ca-certificate")] = None
+    client_certificate: Annotated[str | None, Field(alias="client-certificate")] = None
+    client_private_key: Annotated[str | None, Field(alias="client-private-key")] = None
+
+
+class OtelToolResultLogConfig(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    max_bytes: Annotated[int, Field(ge=0)]
+
+
 class PatchApplyStatus(Enum):
     in_progress = "inProgress"
     completed = "completed"
@@ -4109,7 +4135,6 @@ class ResponsesApiWebSearchAction(
 
 class ReviewDelivery(Enum):
     inline = "inline"
-    detached = "detached"
 
 
 class UncommittedChangesReviewTarget(BaseModel):
@@ -9126,6 +9151,67 @@ class NewThreadModelDefaults(BaseModel):
     service_tier: Annotated[str | None, Field(alias="serviceTier")] = None
 
 
+class OtlpHttp(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    endpoint: str
+    headers: Annotated[
+        dict[str, str],
+        Field(description="Header names are retained; values are redacted by the server."),
+    ]
+    protocol: OtelHttpProtocol
+    tls: OtelTlsConfig | None = None
+
+
+class OtlpHttpOtelExporter(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    otlp_http: Annotated[OtlpHttp, Field(alias="otlp-http")]
+
+
+class OtlpGrpc(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    endpoint: str
+    headers: Annotated[
+        dict[str, str],
+        Field(description="Header names are retained; values are redacted by the server."),
+    ]
+    tls: OtelTlsConfig | None = None
+
+
+class OtlpGrpcOtelExporter(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        populate_by_name=True,
+    )
+    otlp_grpc: Annotated[OtlpGrpc, Field(alias="otlp-grpc")]
+
+
+class OtelExporter(RootModel[OtelExporterValue | OtlpHttpOtelExporter | OtlpGrpcOtelExporter]):
+    root: OtelExporterValue | OtlpHttpOtelExporter | OtlpGrpcOtelExporter
+
+
+class OtelRequirements(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    environment: str | None = None
+    exporter: OtelExporter | None = None
+    log_agent_responses: bool | None = None
+    log_guardian_assessments: bool | None = None
+    log_user_prompt: bool | None = None
+    metrics_exporter: OtelExporter | None = None
+    span_attributes: dict[str, Any] | None = None
+    tool_result: OtelToolResultLogConfig | None = None
+    trace_exporter: OtelExporter | None = None
+    tracestate: dict[str, Any] | None = None
+
+
 class OverriddenMetadata(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -9373,7 +9459,7 @@ class ReviewStartParams(BaseModel):
     delivery: Annotated[
         ReviewDelivery | None,
         Field(
-            description="Where to run the review: inline (default) on the current thread or detached on a new thread (returned in `reviewThreadId`). Detached delivery is deprecated and emits `deprecationNotice`. Use `thread/start` followed by an inline review for a separate review thread."
+            description="Reviews run inline on the supplied thread. Omit this field or pass `inline`. To review on a separate thread, start a thread first and use its id."
         ),
     ] = None
     target: ReviewTarget
@@ -12264,6 +12350,7 @@ class ConfigRequirements(BaseModel):
         ),
     ] = None
     models: ModelsRequirements | None = None
+    otel: OtelRequirements | None = None
     sqlite_home: Annotated[str | None, Field(alias="sqliteHome")] = None
 
 
@@ -12477,11 +12564,7 @@ class ReviewStartResponse(BaseModel):
         populate_by_name=True,
     )
     review_thread_id: Annotated[
-        str,
-        Field(
-            alias="reviewThreadId",
-            description="Identifies the thread where the review runs.\n\nFor inline reviews, this is the original thread id. For detached reviews, this is the id of the new review thread.",
-        ),
+        str, Field(alias="reviewThreadId", description="The thread id supplied to `review/start`.")
     ]
     turn: Turn
 

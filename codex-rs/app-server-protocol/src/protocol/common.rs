@@ -1338,6 +1338,13 @@ client_request_definitions! {
         response: v2::BedrockSetupResponse,
     },
 
+    #[experimental("account/gcp/setup")]
+    GcpSetup => "account/gcp/setup" {
+        params: v2::GcpSetupParams,
+        serialization: global("account-auth"),
+        response: v2::GcpSetupResponse,
+    },
+
     #[experimental("account/bedrock/checkGovCloudRequirements")]
     BedrockCheckGovCloudRequirements => "account/bedrock/checkGovCloudRequirements" {
         params: v2::BedrockCheckGovCloudRequirementsParams,
@@ -1349,6 +1356,22 @@ client_request_definitions! {
         params: v2::CancelLoginAccountParams,
         serialization: global("account-auth"),
         response: v2::CancelLoginAccountResponse,
+    },
+
+    #[experimental("accountSession/list")]
+    AccountSessionsList => "accountSession/list" {
+        params: v2::AccountSessionsListParams,
+        serialization: global("account-auth"),
+        manual_payload_conversion: manual,
+        response: v2::AccountSessionsResponse,
+    },
+
+    #[experimental("accountSession/switch")]
+    AccountSessionsSwitch => "accountSession/switch" {
+        params: v2::AccountSessionsSwitchParams,
+        serialization: global("account-auth"),
+        manual_payload_conversion: manual,
+        response: v2::AccountSessionsSwitchResponse,
     },
 
     LogoutAccount => "account/logout" {
@@ -3654,12 +3677,14 @@ mod tests {
         let chatgpt = v2::Account::Chatgpt {
             email: Some("user@example.com".to_string()),
             plan_type: PlanType::Plus,
+            workspace_name: None,
         };
         assert_eq!(
             json!({
                 "type": "chatgpt",
                 "email": "user@example.com",
                 "planType": "plus",
+                "workspaceName": null,
             }),
             serde_json::to_value(&chatgpt)?,
         );
@@ -3667,12 +3692,14 @@ mod tests {
         let chatgpt_without_email = v2::Account::Chatgpt {
             email: None,
             plan_type: PlanType::Pro,
+            workspace_name: None,
         };
         assert_eq!(
             json!({
                 "type": "chatgpt",
                 "email": null,
                 "planType": "pro",
+                "workspaceName": null,
             }),
             serde_json::to_value(&chatgpt_without_email)?,
         );

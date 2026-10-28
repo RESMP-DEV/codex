@@ -62,6 +62,11 @@ pub use codex_tools::ToolExposure;
 /// Implementers provide the shared `ToolExecutor` behavior plus optional
 /// core-owned metadata for hooks, telemetry, tool search, and argument diffs.
 pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
+    /// Opts this invocation into synchronous native-call review before the handler runs.
+    fn requires_guardian_review(&self, _invocation: &ToolInvocation) -> bool {
+        false
+    }
+
     /// The handler observes its cancellation token and must finish before dispatch is aborted.
     fn finishes_on_cancellation(&self) -> bool {
         false
@@ -79,11 +84,10 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
 
     /// Returns lazily cached, augmented Code Mode definitions owned by this runtime.
     /// Input and output schemas must be cleared after rendering their declarations.
-    /// Return None when the requested rendering inputs differ from the cached inputs.
+    /// Return None when the requested schema budget differs from the cached budget.
     fn cached_code_mode_definitions(
         &self,
         _code_mode_input_schema_max_bytes: Option<usize>,
-        _tool_description_first: bool,
     ) -> Option<&[codex_code_mode::ToolDefinition]> {
         None
     }
@@ -707,6 +711,15 @@ impl ToolRegistry {
         mut invocation: ToolInvocation,
         call_state: Option<Arc<ToolCallState>>,
     ) -> Result<AnyToolResult, FunctionCallError> {
+        // Standalone dispatch has no outer task to reserve the ID for it.
+        let standalone;
+        let reservation = if let Some(state) = &call_state {
+            &state.invocation
+        } else {
+            standalone = crate::agent::host::InvocationReservation::default();
+            standalone.reserve(&invocation.session, &invocation.turn, &invocation.call_id)?;
+            &standalone
+        };
         let cancellation_token = invocation.cancellation_token.clone();
         let tool_name = invocation.tool_name.clone();
         let call_id_owned = invocation.call_id.clone();
@@ -869,6 +882,13 @@ impl ToolRegistry {
             }
         }
 
+        if tool.requires_guardian_review(&invocation)
+            && let Err(err) = super::review_native_tool_call(&invocation).await
+        {
+            return Err(fail_before_execution(&invocation, err).await);
+        }
+
+        let invocation_guard = reservation.activate(&invocation);
         if tool.mcp_server_name().is_none() {
             notify_tool_start(&invocation, /*mcp_tool*/ None)
                 .or_cancel_tool(&cancellation_token)
@@ -968,6 +988,7 @@ impl ToolRegistry {
                 handler_executed: true,
             },
         };
+        drop(invocation_guard);
         notify_tool_finish_if_unclaimed(&invocation, call_state.as_deref(), lifecycle_outcome)
             .await;
 

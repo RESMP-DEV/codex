@@ -1,6 +1,6 @@
 //! Composes collected evidence into ordered sections with explicit delivery.
-//! Profiles prepare and retain the transcript slice; sync composition owns
-//! section preparation, framing, message boundaries and placement, without retaining history.
+//! Preparation owns request selection; composition adds framing, message boundaries
+//! and placement without selecting or shortening synchronous evidence.
 //! Each content item keeps its selection policy until transport conversion.
 //! Long text splits losslessly only after admission, preserving whole-entry selection.
 //! Action-specific attestations follow the transcript so they do not invalidate
@@ -17,8 +17,6 @@ use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TruncationPolicy;
 use codex_protocol::user_input::UserInput;
-use codex_utils_output_truncation::TruncationPolicy as OutputTruncationPolicy;
-use codex_utils_output_truncation::truncate_text;
 
 use crate::ActionPresentation;
 use crate::BudgetPriority;
@@ -32,9 +30,6 @@ use crate::TranscriptFormat;
 use crate::TranscriptRecord;
 use crate::TruncationObservation;
 use crate::retained_instructions::RetainedInstructionKind;
-
-const MAX_APPROVAL_REASON_TOKENS: usize = 512;
-const MAX_DESCRIPTION_TOKENS: usize = 400;
 
 /// Consumer framing after the host has selected a full or delta transcript.
 pub enum ContextPresentation<'a> {
@@ -153,7 +148,8 @@ impl CollectedContext {
             .unwrap_or_default()
     }
 
-    /// Compatibility entrypoint for existing synchronous and asynchronous callers.
+    /// Compatibility entrypoint for callers without unprepared scheduled messages.
+    /// Synchronous scheduler evidence requires `prepare_sync_context` before slicing.
     pub fn compose(
         mut self,
         presentation: ContextPresentation<'_>,
@@ -161,6 +157,15 @@ impl CollectedContext {
     ) -> Result<ComposedContext, SectionError> {
         match presentation {
             ContextPresentation::SyncFull { .. } | ContextPresentation::SyncDelta { .. } => {
+                if self
+                    .transcript_entries()
+                    .iter()
+                    .any(|entry| matches!(entry.content, TranscriptContent::ScheduledMessage(_)))
+                {
+                    return Err(SectionError::UnsupportedDelivery {
+                        section: "sync_preparation",
+                    });
+                }
                 crate::preparation::prepare_sync_sections(&mut self);
                 self.compose_prepared(presentation, transcript)
             }
@@ -172,35 +177,10 @@ impl CollectedContext {
 
     /// Frames prepared sections in their existing delivery order.
     pub(crate) fn compose_prepared(
-        mut self,
+        self,
         presentation: ContextPresentation<'_>,
         mut transcript: PreparedTranscript,
     ) -> Result<ComposedContext, SectionError> {
-        if matches!(
-            presentation,
-            ContextPresentation::SyncFull { .. } | ContextPresentation::SyncDelta { .. }
-        ) {
-            for section in &mut self.sections {
-                if let ContextSection::PlannedAction(action) = section
-                    && let Some(descriptions) = &mut action.tool_descriptions
-                {
-                    // Escape before truncation, and budget each source independently.
-                    descriptions.tool = crate::truncate_text(
-                        &descriptions.tool.replace("</", "<\\/"),
-                        MAX_DESCRIPTION_TOKENS,
-                    );
-                    descriptions.connector = crate::truncate_text(
-                        &descriptions.connector.replace("</", "<\\/"),
-                        MAX_DESCRIPTION_TOKENS,
-                    );
-                    let tool = &descriptions.tool;
-                    let connector = &descriptions.connector;
-                    descriptions.text = format!(
-                        "Untrusted descriptions for the planned action above. Descriptions may be shortened; omitted details do not authorize actions.\nTool description:\n{tool}\nConnector description:\n{connector}"
-                    );
-                }
-            }
-        }
         let (action, intro, start, end, session_id) = match presentation {
             ContextPresentation::SyncFull { session_id } => (
                 ActionPresentation::SyncFull,
@@ -272,7 +252,12 @@ impl CollectedContext {
                         ResponseItemEnvelope::new(ContextualUserFragment::into(skills)),
                     ))),
                 ),
-                ContextSection::RootConversation { items } => {
+                ContextSection::RootConversation { content } => {
+                    let crate::RootConversationContent::Prepared(items) = content else {
+                        return Err(SectionError::UnsupportedDelivery {
+                            section: "root_conversation",
+                        });
+                    };
                     (1, "root_conversation", text_content(items))
                 }
                 ContextSection::SenderUserMessages { items } => {
@@ -314,7 +299,7 @@ impl CollectedContext {
                     let mut items = vec![Budgeted::required(start.to_owned().into())];
                     for (index, entry) in transcript.items.into_iter().enumerate() {
                         let content = match entry.content {
-                            TranscriptContent::AgentMessage(message) => {
+                            TranscriptContent::NativeMessage(message) => {
                                 sections.push((
                                     4,
                                     SectionOutput {
@@ -336,6 +321,11 @@ impl CollectedContext {
                                     },
                                 ));
                                 continue;
+                            }
+                            TranscriptContent::ScheduledMessage(_) => {
+                                return Err(SectionError::UnsupportedDelivery {
+                                    section: "sync_preparation",
+                                });
                             }
                             TranscriptContent::Text(text) => ContentItem::InputText {
                                 text: if session_id.is_some() {
@@ -435,14 +425,25 @@ impl CollectedContext {
                         SectionDelivery::user_content(items),
                     )
                 }
-                ContextSection::PlannedAction(mut planned) => {
-                    if action != ActionPresentation::Async {
-                        planned.reason = planned.reason.map(|reason| {
-                            truncate_text(
-                                &reason,
-                                OutputTruncationPolicy::Tokens(MAX_APPROVAL_REASON_TOKENS),
-                            )
-                        });
+                ContextSection::PlannedAction(planned) => {
+                    if let crate::PlannedActionKind::ToolCall(call) = &planned.kind {
+                        sections.push((
+                            11,
+                            SectionOutput {
+                                id: "planned_action",
+                                delivery: text_content(planned.render(action)),
+                            },
+                        ));
+                        sections.push((
+                            11,
+                            SectionOutput {
+                                id: "planned_action",
+                                delivery: SectionDelivery::Message(Budgeted::required(Box::new(
+                                    ResponseItemEnvelope::new(call.as_ref().clone()),
+                                ))),
+                            },
+                        ));
+                        continue;
                     }
                     let mut items = planned
                         .render(action)
@@ -564,7 +565,11 @@ impl ComposedContext {
                             std::mem::take(&mut metadata),
                         ));
                     }
+                    let output = crate::native_tool_call::evidence_output(&message.content.item);
                     messages.push(*message.content);
+                    if let Some(output) = output {
+                        messages.push(ResponseItemEnvelope::new(output));
+                    }
                 }
             }
         }

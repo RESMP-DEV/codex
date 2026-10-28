@@ -152,6 +152,16 @@ pub struct ModelProviderInfo {
     pub base_url: Option<String>,
     /// Optional full URL for a Codex-native model catalog. When unset, OpenAI discovery
     /// uses the Codex backend unless `base_url` overrides the inference endpoint.
+    /// The endpoint must serve the Codex catalog format, not the public `/v1/models` API.
+    ///
+    /// For built-in OpenAI, set this under `[model_providers.openai]`; other non-default
+    /// provider overrides are rejected. The URL must use HTTPS and an allowed ChatGPT
+    /// host. Other hosts require a custom provider. Inference still uses `openai_base_url`.
+    ///
+    /// Catalog requests use the provider's credentials, including an API key or ChatGPT
+    /// access token. Only configure an endpoint you trust with those credentials.
+    /// Setting this URL does not grant catalog access or guarantee that the endpoint
+    /// accepts a regional API key. Existing discovery gates and entitlement checks apply.
     pub model_catalog_url: Option<RedactedString>,
     /// Environment variable that stores the user's API key for this provider.
     pub env_key: Option<String>,
@@ -424,7 +434,8 @@ other non-default provider fields are not supported"
         }
     }
 
-    fn build_header_map(&self) -> CodexResult<HeaderMap> {
+    /// Resolve configured request headers before choosing credentials or a runtime.
+    pub fn build_header_map(&self) -> CodexResult<HeaderMap> {
         let capacity = self.http_headers.as_ref().map_or(0, HashMap::len)
             + self.env_http_headers.as_ref().map_or(0, HashMap::len);
         let mut headers = HeaderMap::with_capacity(capacity);
@@ -768,14 +779,35 @@ pub fn built_in_model_providers(
 /// Merge configured providers into the built-in provider catalog.
 ///
 /// Configured providers extend the built-in set. Built-in providers are not
-/// generally overridable, but the cloud-hosted OpenAI providers allow a limited
+/// generally overridable. OpenAI allows a catalog URL override, while the
+/// cloud-hosted OpenAI providers allow a limited
 /// set of endpoint, authentication, header, and cloud-specific overrides.
 pub fn merge_configured_model_providers(
     mut model_providers: HashMap<String, ModelProviderInfo>,
     configured_model_providers: HashMap<String, ModelProviderInfo>,
 ) -> Result<HashMap<String, ModelProviderInfo>, String> {
     for (key, mut provider) in configured_model_providers {
-        if matches!(
+        if key == "openai" {
+            // Keep the built-in identity, inference routing, and authentication.
+            // Only catalog routing is configurable through this provider entry.
+            if let Some(catalog_url) = provider.model_catalog_url.take()
+                && let Some(built_in_provider) = model_providers.get_mut(&key)
+            {
+                let allowed = catalog_url.parse::<http::Uri>().ok().is_some_and(|uri| {
+                    uri.scheme_str() == Some("https")
+                        && uri.host().is_some_and(|host| {
+                            codex_http_client::is_allowed_chatgpt_host(&host.to_ascii_lowercase())
+                        })
+                        && uri
+                            .authority()
+                            .is_some_and(|authority| !authority.as_str().contains('@'))
+                });
+                if !allowed {
+                    return Err("model_providers.openai.model_catalog_url must use an allowed ChatGPT host. If you need to use a 3rd party host, configure a custom model_provider".to_string());
+                }
+                built_in_provider.model_catalog_url = Some(catalog_url);
+            }
+        } else if matches!(
             key.as_str(),
             AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
         ) {
@@ -800,46 +832,55 @@ pub fn merge_configured_model_providers(
                 }
             }
         } else if key == GCP_PROVIDER_ID {
-            provider
-                .validate_gcp_credential_file()
-                .and_then(|()| provider.validate())
-                .map_err(|message| format!("model_providers.{GCP_PROVIDER_ID} {message}"))?;
-            let base_url_override = provider.base_url.take();
-            let auth_override = provider.auth.take();
-            let credential_file_override = provider.credential_file.take();
-            let http_headers_override = provider.http_headers.take();
-            let project_id_override = provider.project_id.take();
-            let location_override = provider.location.take();
-            if provider != ModelProviderInfo::default() {
-                return Err(format!(
-                    "model_providers.{GCP_PROVIDER_ID} only supports changing \
-`base_url`, `auth`, `http_headers`, `project_id`, `location`, and `credential_file`; other non-default provider fields are not supported"
-                ));
-            }
-
-            if let Some(built_in_provider) = model_providers.get_mut(GCP_PROVIDER_ID) {
-                built_in_provider.project_id = project_id_override;
-                built_in_provider.location = location_override;
-                built_in_provider.credential_file = credential_file_override;
-                if let Some(base_url_override) = base_url_override {
-                    built_in_provider.base_url = Some(base_url_override);
-                }
-                if let Some(auth_override) = auth_override {
-                    built_in_provider.auth = Some(auth_override);
-                }
-                if let Some(http_headers_override) = http_headers_override {
-                    built_in_provider
-                        .http_headers
-                        .get_or_insert_default()
-                        .extend(http_headers_override);
-                }
-            }
+            merge_gcp_provider_overrides(model_providers.get_mut(&key), provider)?;
         } else {
             model_providers.entry(key).or_insert(provider);
         }
     }
 
     Ok(model_providers)
+}
+
+/// Validates GCP overrides and applies them when the built-in provider is present.
+pub fn merge_gcp_provider_overrides(
+    built_in: Option<&mut ModelProviderInfo>,
+    mut overrides: ModelProviderInfo,
+) -> Result<(), String> {
+    overrides
+        .validate_gcp_credential_file()
+        .and_then(|()| overrides.validate())
+        .map_err(|message| format!("model_providers.{GCP_PROVIDER_ID} {message}"))?;
+    let base_url = overrides.base_url.take();
+    let auth = overrides.auth.take();
+    let credential_file = overrides.credential_file.take();
+    let http_headers = overrides.http_headers.take();
+    let project_id = overrides.project_id.take();
+    let location = overrides.location.take();
+    if overrides != ModelProviderInfo::default() {
+        return Err(format!(
+            "model_providers.{GCP_PROVIDER_ID} only supports changing \
+`base_url`, `auth`, `http_headers`, `project_id`, `location`, and `credential_file`; other non-default provider fields are not supported"
+        ));
+    }
+
+    if let Some(provider) = built_in {
+        provider.project_id = project_id;
+        provider.location = location;
+        provider.credential_file = credential_file;
+        if let Some(base_url) = base_url {
+            provider.base_url = Some(base_url);
+        }
+        if let Some(auth) = auth {
+            provider.auth = Some(auth);
+        }
+        if let Some(http_headers) = http_headers {
+            provider
+                .http_headers
+                .get_or_insert_default()
+                .extend(http_headers);
+        }
+    }
+    Ok(())
 }
 
 pub fn create_oss_provider(default_provider_port: u16, wire_api: WireApi) -> ModelProviderInfo {

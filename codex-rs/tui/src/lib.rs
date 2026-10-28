@@ -2215,8 +2215,8 @@ async fn run_ratatui_app(
     clippy::print_stderr,
     reason = "TUI should no longer be displayed, so we can write to stderr."
 )]
-fn restore() {
-    if let Err(err) = tui::restore_after_exit() {
+fn report_restore_error(result: color_eyre::Result<()>) {
+    if let Err(err) = result {
         eprintln!(
             "failed to restore terminal. Run `reset` or restart your terminal to recover: {err}"
         );
@@ -2225,27 +2225,28 @@ fn restore() {
 
 struct TerminalRestoreGuard {
     active: bool,
+    events: Option<Arc<tui::EventBroker>>,
 }
 
 impl TerminalRestoreGuard {
     fn new() -> Self {
-        Self { active: true }
+        Self {
+            active: true,
+            events: None,
+        }
     }
 
-    #[cfg_attr(debug_assertions, allow(dead_code))]
     fn restore(&mut self) -> color_eyre::Result<()> {
         if self.active {
-            crate::tui::restore_after_exit()?;
+            tui::restore_after_exit_with_events(self.events.take().as_deref())?;
             self.active = false;
         }
         Ok(())
     }
 
     fn restore_silently(&mut self) {
-        if self.active {
-            restore();
-            self.active = false;
-        }
+        report_restore_error(self.restore());
+        self.active = false;
     }
 }
 
@@ -2459,11 +2460,6 @@ fn should_show_bedrock_setup_wizard(
         && should_show_login_screen(login_status, requires_openai_auth)
         && config.features.enabled(Feature::BedrockSetupWizard)
         && config.model_provider_id == "openai"
-        && config
-            .config_layer_stack
-            .effective_config()
-            .get("model_provider")
-            .is_none()
         && config
             .auth_config()
             .is_login_method_allowed(ForcedLoginMethod::Api)

@@ -152,7 +152,7 @@ pub enum Feature {
     CodeModePrewarm,
     /// Terminate active code mode cells when their turn is interrupted.
     CodeModeInterrupt,
-    /// Put each tool's description before its namespace description in Code Mode.
+    /// Removed compatibility flag for Code Mode tool description ordering.
     CodeModeToolDescriptionFirst,
     /// Restrict model-visible tools to code mode entrypoints (`exec`, `wait`).
     CodeModeOnly,
@@ -297,6 +297,8 @@ pub enum Feature {
     RecommendedPlugins,
     /// Enable plugins.
     Plugins,
+    /// Use concise developer hints for explicitly selected plugins.
+    SimplifiedSelectionHints,
     /// Discover selected-root plugin and skill manifests through one high-level exec-server RPC.
     ExecutorCapabilityDiscovery,
     /// Acquire V2 executor inventories without publishing or activating their capabilities.
@@ -378,6 +380,8 @@ pub enum Feature {
     OutputTokenReplay,
     /// Allow prompting and installing missing MCP dependencies.
     SkillMcpDependencyInstall,
+    /// Omit descriptions from the model-visible available-skills catalog.
+    OmitSkillDescriptions,
     /// Run cheap skill-search methods in shadow mode and emit experiment metrics.
     SkillSearch,
     /// Append skill additions and edits within a cumulative context budget.
@@ -403,6 +407,8 @@ pub enum Feature {
     GuardianReuseParentCompaction,
     /// Limit worker Guardian root evidence to preceding root communication windows.
     GuardianRootHandoffContext,
+    /// Review state-changing MAv2 calls and preserve native calls in Guardian history.
+    GuardianNativeMultiAgentHistory,
     /// Include completed node_repl or cua_repl Code Mode responses in Guardian reviews.
     GuardianEnhancedNodeReplTranscripts,
     /// Include completed node_repl or cua_repl Code Mode response images in Guardian reviews.
@@ -1276,7 +1282,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::CodeModeToolDescriptionFirst,
         key: "code_mode_tool_description_first",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Removed,
         default_enabled: false,
     },
     FeatureSpec {
@@ -1734,6 +1740,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::SimplifiedSelectionHints,
+        key: "simplified_selection_hints",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::ExecutorCapabilityDiscovery,
         key: "executor_capability_discovery",
         stage: Stage::UnderDevelopment,
@@ -1902,6 +1914,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::OmitSkillDescriptions,
+        key: "omit_skill_descriptions",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::SkillSearch,
         key: "skill_search",
         stage: Stage::Stable,
@@ -1982,6 +2000,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GuardianRootHandoffContext,
         key: "guardian_root_handoff_context",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::GuardianNativeMultiAgentHistory,
+        key: "guardian_native_multi_agent_history",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

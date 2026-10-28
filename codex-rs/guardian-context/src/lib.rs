@@ -23,13 +23,19 @@ use retained_instructions::RetainedUserInstructionsSection;
 use sender_user_messages::SenderUserMessagesSection;
 use transcript::ConversationTranscriptSection;
 
+mod native_tool_call;
+
 pub use action::ActionPresentation;
 pub use action::PlannedAction;
 pub use action::PlannedActionKind;
 pub use action::action_for_review;
 pub use authorization::GuardianRootMessage;
+pub use authorization::RootConversationContent;
 pub use preparation::root::RootAssistantCandidate;
 pub use preparation::root::RootAssistantContent;
+pub use preparation::root::RootConversationCandidates;
+pub use preparation::root::RootConversationInput;
+pub use preparation::root::RootConversationSource;
 pub use preparation::root::RootDeliveredMessage;
 pub use preparation::root::RootMessageCandidate;
 pub use preparation::root::RootRetainedAssistant;
@@ -86,26 +92,25 @@ pub use cursor::TranscriptCursor;
 pub use cursor::TranscriptMode;
 pub use cursor::TranscriptSelection;
 mod preparation;
-mod profile;
 pub use codex_protocol::TranscriptFormat;
 pub use composition::CollectedContext;
 pub use composition::ComposedContext;
 pub use composition::ContextPresentation;
 pub use composition::PreparedTranscript;
-pub use preparation::root::PreparedRootAssistants;
-pub use preparation::root::prepare_root_assistant_messages;
-pub use preparation::root::prepare_root_user_messages;
-pub use preparation::root::select_root_handoff_indices;
-pub use profile::ContextProfile;
+pub use preparation::ContextProfile;
+pub use preparation::prepare_sync_context;
+pub use preparation::prepare_sync_images;
+pub use preparation::root::PreparedRootContext;
+pub use preparation::root::prepare_root_context;
 mod authorization;
 mod entry;
 mod history;
 mod images;
-mod node_repl;
 pub use node_repl::NodeReplContext;
 pub use node_repl::NodeReplResponse;
 pub use node_repl::NodeReplReviewEvidenceMode;
 pub use node_repl::RenderedNodeReplEvidence;
+use preparation::repl as node_repl;
 mod permissions;
 pub use images::TranscriptImageInput;
 pub use images::TranscriptImages;
@@ -174,6 +179,8 @@ pub struct SectionInput<'a> {
     pub transcript: &'a ConversationTranscriptConfig,
     /// Bounded root evidence resolved by the host; empty when not applicable.
     pub root_conversation: &'a [GuardianRootMessage],
+    /// Sync originals retained until request preparation; preferred over the bounded view.
+    pub root_conversation_candidates: Option<&'a RootConversationInput>,
     /// Role-labeled sync answer candidates or already-bounded answers from other consumers.
     pub trusted_user_answers: &'a [TrustedUserAnswer],
     /// Exact action JSON; sync composition bounds the reason and descriptions.
@@ -272,8 +279,8 @@ pub trait SectionContributor: Send + Sync {
 /// A section could not provide the evidence needed for a valid review context.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SectionError {
-    /// One native agent-message ID identifies different authors, recipients or content.
-    ConflictingAgentMessage,
+    /// One native message or tool-call ID identifies different evidence.
+    ConflictingNativeMessage,
     /// Evidence required by this contributor for the current input is missing.
     MissingRequiredEvidence { section: &'static str },
     /// A section cannot be delivered by the requested consumer.
@@ -285,8 +292,8 @@ pub enum SectionError {
 impl std::fmt::Display for SectionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ConflictingAgentMessage => {
-                formatter.write_str("conflicting native agent messages share an ID")
+            Self::ConflictingNativeMessage => {
+                formatter.write_str("conflicting native messages or tool calls share an ID")
             }
             Self::MissingRequiredEvidence { section } => {
                 write!(formatter, "missing required evidence for section {section}")
@@ -328,7 +335,8 @@ pub fn default_registry() -> &'static SectionRegistry {
         registry.register(images::TranscriptImagesSection);
         registry.register(node_repl::NodeReplEvidenceSection);
         registry.register(permissions::PermissionContextSection);
-        registry.register(action::PlannedActionSection);
+        registry.register(action::PlannedActionSection(SectionScope::Shared));
+        registry.register(action::PlannedActionSection(SectionScope::SyncOnly));
         registry
     });
     &REGISTRY

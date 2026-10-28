@@ -507,42 +507,6 @@ async fn encrypted_parent_compaction_requires_original_item_id(mode: GuardianCon
 }
 
 #[tokio::test]
-async fn guardian_prompt_cache_key_is_scoped_to_parent_thread() {
-    let session_source =
-        SessionSource::SubAgent(SubAgentSource::Other(GUARDIAN_REVIEWER_NAME.to_string()));
-    let parent_thread_id = ThreadId::new();
-    let key = prompt_cache_key_override_for_review_session(&session_source, Some(parent_thread_id))
-        .expect("guardian prompt cache key");
-
-    assert_eq!(key, format!("guardian:{parent_thread_id}"));
-    assert!(
-        key.len() <= 64,
-        "guardian prompt cache key should fit the Responses API limit"
-    );
-    assert_eq!(
-        key,
-        prompt_cache_key_override_for_review_session(&session_source, Some(parent_thread_id))
-            .expect("same guardian prompt cache key")
-    );
-    assert_ne!(
-        key,
-        prompt_cache_key_override_for_review_session(&session_source, Some(ThreadId::new()))
-            .expect("different parent guardian prompt cache key")
-    );
-    assert_eq!(
-        None,
-        prompt_cache_key_override_for_review_session(&SessionSource::Cli, Some(parent_thread_id))
-    );
-    assert_eq!(
-        None,
-        prompt_cache_key_override_for_review_session(
-            &session_source,
-            /*parent_thread_id*/ None
-        )
-    );
-}
-
-#[tokio::test]
 async fn guardian_review_session_compact_scope_change_invalidates_cached_session() {
     let parent_config = crate::config::test_config().await;
     let cached_spawn_config = build_guardian_review_session_config(
@@ -670,41 +634,6 @@ async fn guardian_review_session_config_resolves_policy_and_template(
             .render()
             .expect_text()
         )
-    );
-}
-
-#[test]
-fn token_usage_delta_never_reports_negative_usage() {
-    let start = TokenUsage {
-        input_tokens: 10,
-        cached_input_tokens: 8,
-        cache_write_input_tokens: 8,
-        output_tokens: 6,
-        reasoning_output_tokens: 4,
-        total_tokens: 28,
-        codex_rollout_budget_units: None,
-    };
-    let end = TokenUsage {
-        input_tokens: 15,
-        cached_input_tokens: 7,
-        cache_write_input_tokens: 7,
-        output_tokens: 10,
-        reasoning_output_tokens: 2,
-        total_tokens: 34,
-        codex_rollout_budget_units: None,
-    };
-
-    assert_eq!(
-        token_usage_delta(&start, &end),
-        TokenUsage {
-            input_tokens: 5,
-            cached_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 4,
-            reasoning_output_tokens: 0,
-            total_tokens: 6,
-            codex_rollout_budget_units: None,
-        }
     );
 }
 

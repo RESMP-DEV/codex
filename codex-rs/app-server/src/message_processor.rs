@@ -866,8 +866,16 @@ impl MessageProcessor {
         thread_id: ThreadId,
         connection_ids: Vec<ConnectionId>,
     ) {
+        let Ok(thread) = self
+            .thread_processor
+            .thread_manager
+            .get_thread(thread_id)
+            .await
+        else {
+            return;
+        };
         self.thread_processor
-            .try_attach_thread_listener(thread_id, connection_ids)
+            .try_attach_thread_listener(thread_id, thread, connection_ids)
             .await;
     }
 
@@ -1715,8 +1723,9 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::ThreadRealtimeStart { params, .. } => {
+                let sideband_base_url = None;
                 self.turn_processor
-                    .thread_realtime_start(&request_id, params)
+                    .thread_realtime_start(&request_id, params, sideband_base_url)
                     .await
             }
             ClientRequest::ThreadRealtimeAppendAudio { params, .. } => {

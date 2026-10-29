@@ -49,7 +49,7 @@ struct ToolCallTimingGuard {
 pub(crate) struct ToolCallRuntime {
     session: Arc<Session>,
     // Tool calls may run later, so retain the step whose tool list advertised them.
-    step_context: Arc<StepContext>,
+    pub(crate) step_context: Arc<StepContext>,
     tracker: SharedTurnDiffTracker,
     parallel_execution: Arc<RwLock<()>>,
     timing: Option<DirectToolTiming>,
@@ -682,6 +682,7 @@ mod tests {
                     arguments: "{}".to_string(),
                 },
                 encrypted_function_args: None,
+                native_call: None,
             };
             let direct_guard = ToolCallTimingGuard::capture(
                 Instant::now(),
@@ -734,6 +735,7 @@ mod tests {
                     input: "text('ready')".to_string(),
                 },
                 encrypted_function_args: None,
+                native_call: None,
             };
             let started_at = Instant::now() - Duration::from_secs(/*secs*/ 5);
             let mut timing = ToolCallTimingGuard::capture(
@@ -847,6 +849,7 @@ mod tests {
                 arguments: "{}".to_string(),
             },
             encrypted_function_args: None,
+            native_call: None,
         };
         let response_task =
             tokio::spawn(runtime.handle_tool_call(call, cancellation_token.clone()));
@@ -1020,6 +1023,7 @@ mod tests {
                 arguments: "{}".to_string(),
             },
             encrypted_function_args: None,
+            native_call: None,
         };
 
         let response_task =

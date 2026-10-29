@@ -1,3 +1,20 @@
+# Managed human command checkpoints (experimental)
+
+A matching managed `requirements.toml` prefix rule with `decision = "prompt-user"`
+requires a fresh human decision, including when the thread uses automatic review.
+Prefix matching, exact-path precedence, and executable mappings stay unchanged. Clients
+supporting this workflow must initialize with `experimentalApi: true` and
+`requiredHumanApproval: true`.
+
+The server sends `item/commandExecution/requestApproval` with `kind: "humanCommand"`,
+a unique `approvalId`, and the command to display. Only `accept`, `decline`, and
+`cancel` are valid responses. Session and persistent approvals cannot satisfy the
+checkpoint. Only capable clients receive or answer these requests. Pending prompts
+use the normal approval replay flow when a capable client reconnects. With no capable
+connection when approval is requested, the command is rejected. The prompt itself
+does not start an execution item; normal command execution events report execution
+after approval.
+
 # Thread memory summary (experimental)
 
 `thread/memory/read` takes `{threadId}` for a loaded thread and returns
@@ -295,7 +312,7 @@ any files were compressed; failures are reported through existing logs and metri
 There are no progress notifications or cancellation API. Clients sharing this
 Codex home must support compressed rollout files, including shared histories.
 
-## Managed model provider requirements
+## Model provider admission
 
 `configRequirements/read` reports `supportsIndependentSpeedModes: true` when
 `features.fast_mode` and `features.ultrafast_mode` independently control Fast and
@@ -307,8 +324,18 @@ Existing threads retain their provider configuration. Input RPCs reject requests
 `model_provider` or `model_providers` requirements no longer match that configuration, or cannot
 be loaded. This covers turn start/steer, review, compaction, manual queue start, and active goal
 updates. Realtime connections use separate routing configuration and are not checked here.
-Interrupt, realtime stop, and goal pause/clear remain available. User and project
-configuration changes alone do not invalidate existing threads.
+Interrupt, realtime stop, and goal pause/clear remain available.
+
+Resume and input RPCs also reject a thread whose saved provider differs from the current
+configured provider, including profile and app-server launch overrides. The JSON-RPC error's
+`data` contains `ModelProviderError`: `modelProviderMismatch` has `modelProvider` and
+`currentModelProvider`, `modelProviderNotConfigured` identifies a missing provider, and
+`modelProviderPolicyConflict` identifies a mandatory-policy conflict. Clients can still use
+`thread/read` to display history and disable the composer with the error's explanation.
+Changing the resume request's provider does not bypass validation of the saved provider;
+switch the configured provider back to continue the chat. Input is also rejected when the
+current provider configuration cannot be loaded. Older clients retain their normal error
+fallback for unrecognized structured error variants.
 
 ## Managed network requirements
 

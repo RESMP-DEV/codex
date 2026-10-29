@@ -858,6 +858,11 @@ impl CodexThread {
         self.io.agent_status().await
     }
 
+    /// Returns whether the runtime has published its shutdown status.
+    pub fn has_shutdown_status(&self) -> bool {
+        matches!(*self.io.agent_status.borrow(), AgentStatus::Shutdown)
+    }
+
     pub async fn list_background_terminals(&self) -> Vec<BackgroundTerminalInfo> {
         self.session.list_background_terminals().await
     }
@@ -896,6 +901,21 @@ impl CodexThread {
     ) -> CodexResult<()> {
         self.session.record_user_goal_update(update).await?;
         Ok(())
+    }
+
+    /// Review the final injected exec call if approval is required, without executing it.
+    pub async fn guardian_review(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> CodexResult<crate::guardian_review::GuardianReviewResult> {
+        if self.session.active_turn.lock().await.is_some() {
+            return Err(CodexErr::InvalidRequest("thread has an active turn".into()));
+        }
+        let history = self.session.clone_history().await;
+        let tool_call = history.raw_items().next_back().cloned().ok_or_else(|| {
+            CodexErr::InvalidRequest("expected a final plaintext exec_command call".into())
+        })?;
+        crate::guardian::review_tool_call(&self.session, history, &tool_call, cancellation).await
     }
 
     /// Record raw Responses API items without starting a new turn.
@@ -1183,7 +1203,9 @@ impl CodexThread {
         self.session.disable_mcp_enterprise_auth().await;
     }
 
-    /// Refresh MCP configuration and managed requirements without reloading unrelated settings.
+    /// Refresh MCP configuration, managed requirements, and explicit session plugin overrides.
+    /// Omitted session plugins preserve current overrides; an empty map restores inheritance.
+    /// Other session overrides and user settings remain unchanged.
     /// A stale owner requires reloading from the current config before retrying.
     pub async fn refresh_mcp_config(
         &self,

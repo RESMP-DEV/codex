@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use std::time::Instant;
 
 use crate::client::ModelClientSession;
@@ -2758,10 +2759,22 @@ async fn try_run_sampling_request(
         run_model_request_hooks(&sess, &step_context, &hooks, PreModelRequest).await;
     }
     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
+    let mut response_id_for_assessment = None;
+    let mut pending_assessment: Option<codex_api::GuardianAssessment> = None;
     let mut response_completed = false;
     let mut request_token_usage = None;
-    sess.set_server_reasoning_included(step_context.settings.model_info.use_responses_lite)
-        .await;
+    let mut includes_reasoning = step_context.settings.model_info.use_responses_lite;
+    // Catalog policies can enable adaptive review independently of the legacy scorer flag.
+    // Capture evidence whenever Guardian is available; the reviewer resolves the policy.
+    let assessment_authorization = if turn_context
+        .config
+        .features
+        .enabled(Feature::GuardianApproval)
+    {
+        Some(crate::guardian::ScoreAuthorization::for_session(&sess, &Default::default()).await)
+    } else {
+        None
+    };
     let stream = client_session
         .stream(
             &prompt,
@@ -2791,7 +2804,13 @@ async fn try_run_sampling_request(
             return Err(error);
         }
     };
-    if cancellation_token.is_cancelled() {
+    let can_interrupt = turn_context
+        .config
+        .features
+        .enabled(Feature::InterruptOnCancel)
+        && step_context.settings.model_info.use_responses_lite
+        && stream.interrupt.is_some();
+    if cancellation_token.is_cancelled() && !can_interrupt {
         return Err(CodexErr::TurnAborted);
     }
     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
@@ -2871,7 +2890,6 @@ async fn try_run_sampling_request(
                     continue;
                 }
                 // TODO: Reconcile any response item already being presented to the client.
-                drop(stream);
                 break Ok(SamplingRequestResult {
                     needs_follow_up: true,
                     last_agent_message,
@@ -2923,6 +2941,7 @@ async fn try_run_sampling_request(
 
         match event {
             ResponseEvent::Created { response_id } => {
+                response_id_for_assessment.clone_from(&response_id);
                 if let Some(response_id) = response_id {
                     turn_context
                         .extension_data
@@ -2936,6 +2955,18 @@ async fn try_run_sampling_request(
                 }
             }
             ResponseEvent::OutputItemDone(mut item) => {
+                // Serving emits one final value immediately before this item's completion.
+                // After this handoff, the invocation/cell owns it independently of the stream.
+                let assessment = pending_assessment
+                    .take()
+                    .filter(|value| item.id().is_some_and(|id| id.as_str() == value.item_id))
+                    .zip(assessment_authorization.as_ref())
+                    .map(|(value, authorization)| {
+                        Arc::new(crate::guardian::ServingAssessment {
+                            requires_review: value.requires_review,
+                            authorization: authorization.clone(),
+                        })
+                    });
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 sess.reserve_assistant_message_order(&turn_context, &item)
                     .await;
@@ -2995,11 +3026,15 @@ async fn try_run_sampling_request(
                     continue;
                 }
 
+                let mut tool_runtime = tool_runtime.clone();
+                if assessment.is_some() {
+                    Arc::make_mut(&mut tool_runtime.step_context).serving_assessment = assessment;
+                }
                 let mut ctx = HandleOutputCtx {
                     sess: sess.clone(),
                     step_context: Arc::clone(&step_context),
                     turn_store: Arc::clone(&turn_store),
-                    tool_runtime: tool_runtime.clone(),
+                    tool_runtime,
                     defer_tool_dispatch: defer_tool_dispatch || *draining_for_mailbox,
                     cancellation_token: cancellation_token.child_token(),
                 };
@@ -3197,6 +3232,11 @@ async fn try_run_sampling_request(
                 sess.emit_turn_moderation_metadata(&turn_context, metadata)
                     .await;
             }
+            ResponseEvent::GuardianAssessment(assessment) => {
+                if response_id_for_assessment.as_deref() == Some(assessment.response_id.as_str()) {
+                    pending_assessment = Some(assessment);
+                }
+            }
             ResponseEvent::SafetyBuffering(buffering) => {
                 sess.send_event(
                     &turn_context,
@@ -3211,7 +3251,7 @@ async fn try_run_sampling_request(
                 .await;
             }
             ResponseEvent::ServerReasoningIncluded(included) => {
-                sess.set_server_reasoning_included(included).await;
+                includes_reasoning = included;
             }
             ResponseEvent::RateLimits(snapshot) => {
                 // Update internal state with latest rate limits, but defer sending until
@@ -3263,7 +3303,7 @@ async fn try_run_sampling_request(
                         &turn_context,
                         &step_context.settings,
                         token_usage.as_ref(),
-                        super::TokenUsageContext::Sampling,
+                        super::TokenUsageContext::Sampling { includes_reasoning },
                     )
                     .await;
                 should_emit_token_count = true;
@@ -3428,6 +3468,13 @@ async fn try_run_sampling_request(
             }
         }
     };
+    if cancellation_token.is_cancelled() && !response_completed && can_interrupt {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        if let Some(interrupt) = stream.interrupt.take() {
+            let _ = interrupt.send(codex_api::ResponseInterrupt::Cancel { deadline });
+        }
+    }
+    drop(stream);
     drop(sampling_span);
     drop(sampling_timing_guard);
     if let Some(finish_post_request) = finish_post_request {

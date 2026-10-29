@@ -338,54 +338,70 @@ impl ResponsesWebsocketConnection {
                 if tx_event.is_closed() {
                     return;
                 }
+                let Some(mut ws_stream) = guard.take() else {
+                    let _ = tx_event
+                        .send(Err(ApiError::Stream(
+                            "websocket connection is closed".to_string(),
+                        )))
+                        .await;
+                    return;
+                };
                 let mut completion = None;
                 let result = {
-                    let Some(ws_stream) = guard.as_mut() else {
-                        let _ = tx_event
-                            .send(Err(ApiError::Stream(
-                                "websocket connection is closed".to_string(),
-                            )))
-                            .await;
-                        return;
-                    };
+                    let response = run_websocket_response_stream(
+                        &mut ws_stream,
+                        tx_event.clone(),
+                        request_text,
+                        idle_timeout,
+                        telemetry,
+                        turn_state.as_deref(),
+                        &timing_log_context,
+                        interrupt.clone(),
+                        &mut completion,
+                    );
+                    tokio::pin!(response);
 
                     tokio::select! {
                         biased;
-                        result = run_websocket_response_stream(
-                            ws_stream,
-                            tx_event.clone(),
-                            request_text,
-                            idle_timeout,
-                            telemetry,
-                            turn_state.as_deref(),
-                            &timing_log_context,
-                            interrupt.clone(),
-                            &mut completion,
-                        ) => result,
+                        result = &mut response => result,
                         () = &mut interrupt_timeout => Err(ApiError::Stream(
                             "timed out draining interrupted response".into(),
                         )),
-                        _ = tx_event.closed() => Err(ApiError::Stream(
-                            "response event consumer dropped".to_string(),
-                        )),
+                        () = tx_event.closed() => {
+                            // Release the lock so later requests can open a new connection
+                            // while this task finishes cleanup on the detached socket.
+                            drop(guard);
+                            if matches!(
+                                interrupt.clone().now_or_never(),
+                                Some(ResponseInterrupt::Cancel { .. })
+                            ) {
+                                tokio::select! {
+                                    _ = &mut response => {}
+                                    () = &mut interrupt_timeout => {}
+                                }
+                            }
+                            return;
+                        }
                     }
                 };
 
                 if let Err(err) = result {
                     // A terminal stream error should reach the caller immediately. Waiting for a
                     // graceful close handshake here can stall indefinitely and mask the error.
-                    let failed_stream = guard.take();
                     drop(guard);
-                    drop(failed_stream);
+                    drop(ws_stream);
                     // Failed cancellation retires the socket while preserving any received
                     // completion and its usage for the abandoned classifier's cleanup.
                     let event = completion.map_or_else(|| Err(err), Ok);
                     let _ = tx_event.send(event).await;
-                } else if let Some(completed) = completion {
-                    // The handshake is finished. Consumer backpressure must not let the
-                    // interruption deadline discard completion or its usage accounting.
-                    drop(guard);
-                    let _ = tx_event.send(Ok(completed)).await;
+                } else {
+                    *guard = Some(ws_stream);
+                    if let Some(completed) = completion {
+                        // The handshake is finished. Consumer backpressure must not let the
+                        // interruption deadline discard completion or its usage accounting.
+                        drop(guard);
+                        let _ = tx_event.send(Ok(completed)).await;
+                    }
                 }
             }
             .instrument(current_span),
@@ -898,10 +914,9 @@ async fn run_websocket_response_stream(
                 {
                     let _ = turn_state.set(response_turn_state);
                 }
-                let model_verifications = event.model_verifications();
-                let turn_moderation_metadata = event.turn_moderation_metadata();
                 let safety_buffering =
                     safety_buffering_for_event(&event, &mut safety_buffering_treatment);
+                let metadata_events = event.metadata_events(safety_buffering);
                 if event.kind() == "codex.rate_limits" {
                     if let Some(snapshot) = parse_rate_limit_event(&text) {
                         let _ = tx_event.send(Ok(ResponseEvent::RateLimits(snapshot))).await;
@@ -925,35 +940,8 @@ async fn run_websocket_response_stream(
                         .await;
                     last_server_model = Some(model);
                 }
-                if let Some(verifications) = model_verifications
-                    && tx_event
-                        .send(Ok(ResponseEvent::ModelVerifications(verifications)))
-                        .await
-                        .is_err()
-                {
-                    return Err(ApiError::Stream(
-                        "response event consumer dropped".to_string(),
-                    ));
-                }
-                if let Some(metadata) = turn_moderation_metadata
-                    && tx_event
-                        .send(Ok(ResponseEvent::TurnModerationMetadata(metadata)))
-                        .await
-                        .is_err()
-                {
-                    return Err(ApiError::Stream(
-                        "response event consumer dropped".to_string(),
-                    ));
-                }
-                if let Some(buffering) = safety_buffering
-                    && tx_event
-                        .send(Ok(ResponseEvent::SafetyBuffering(buffering)))
-                        .await
-                        .is_err()
-                {
-                    return Err(ApiError::Stream(
-                        "response event consumer dropped".to_string(),
-                    ));
+                for metadata_event in metadata_events {
+                    let _ = tx_event.send(Ok(metadata_event)).await;
                 }
                 match event {
                     Ok(Some(event)) => {

@@ -2126,6 +2126,13 @@ class InitializeCapabilities(BaseModel):
             description="Opt into `attestation/generate` requests for upstream `x-oai-attestation`.",
         ),
     ] = False
+    required_human_approval: Annotated[
+        bool | None,
+        Field(
+            alias="requiredHumanApproval",
+            description="Present `humanCommand` approvals to a person and return only a one-time decision. Requires `experimentalApi`. Pending requests can be replayed to compatible clients.",
+        ),
+    ] = None
 
 
 class InitializeParams(BaseModel):
@@ -2784,6 +2791,59 @@ class ModelProviderCapabilitiesReadResponse(BaseModel):
     )
     image_generation: Annotated[bool, Field(alias="imageGeneration")]
     web_search: Annotated[bool, Field(alias="webSearch")]
+
+
+class ModelProviderMismatchModelProviderError(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    current_model_provider: Annotated[str, Field(alias="currentModelProvider")]
+    model_provider: Annotated[str, Field(alias="modelProvider")]
+    type: Annotated[
+        Literal["modelProviderMismatch"],
+        Field(title="ModelProviderMismatchv2::ModelProviderErrorType"),
+    ]
+
+
+class ModelProviderNotConfiguredModelProviderError(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    model_provider: Annotated[str, Field(alias="modelProvider")]
+    type: Annotated[
+        Literal["modelProviderNotConfigured"],
+        Field(title="ModelProviderNotConfiguredv2::ModelProviderErrorType"),
+    ]
+
+
+class ModelProviderPolicyConflictModelProviderError(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    model_provider: Annotated[str, Field(alias="modelProvider")]
+    required_model_provider: Annotated[str, Field(alias="requiredModelProvider")]
+    type: Annotated[
+        Literal["modelProviderPolicyConflict"],
+        Field(title="ModelProviderPolicyConflictv2::ModelProviderErrorType"),
+    ]
+
+
+class ModelProviderError(
+    RootModel[
+        ModelProviderMismatchModelProviderError
+        | ModelProviderNotConfiguredModelProviderError
+        | ModelProviderPolicyConflictModelProviderError
+    ]
+):
+    root: Annotated[
+        ModelProviderMismatchModelProviderError
+        | ModelProviderNotConfiguredModelProviderError
+        | ModelProviderPolicyConflictModelProviderError,
+        Field(
+            description="Structured JSON-RPC error data. Unknown errors must retain the client's normal fallback.",
+            title="ModelProviderError",
+        ),
+    ]
 
 
 class ModelRerouteReason(RootModel[Literal["highRiskCyberActivity"]]):
@@ -9204,6 +9264,7 @@ class OtelRequirements(BaseModel):
     exporter: OtelExporter | None = None
     log_agent_responses: bool | None = None
     log_guardian_assessments: bool | None = None
+    log_sse_deltas: bool | None = None
     log_user_prompt: bool | None = None
     metrics_exporter: OtelExporter | None = None
     span_attributes: dict[str, Any] | None = None

@@ -303,7 +303,8 @@ impl StepContext {
             inherited_environments: environments.clone(),
             environments,
             executor_hook_sources: Vec::new(),
-            extension_data: codex_extension_api::ExtensionData::new(turn.sub_id.clone()),
+            serving_assessment: None,
+            extension_data: Arc::new(codex_extension_api::ExtensionData::new(turn.sub_id.clone())),
             mcp: Arc::new(codex_mcp::McpBinding::empty(mcp_config_for_test(
                 &turn.config,
             ))),
@@ -2387,6 +2388,10 @@ async fn refresh_config_rejects_stale_owner_without_effects(scope: RuntimeConfig
     let (session, _turn_context) = make_session_and_context().await;
     let stale_owner = session.get_config().await;
     let mut stale_config = stale_owner.as_ref().clone();
+    stale_config.config_layer_stack = stale_config
+        .config_layer_stack
+        .with_session_plugins(toml::from_str("[browser]\nenabled = false").unwrap())
+        .unwrap();
     stale_config
         .features
         .set_enabled(
@@ -3420,6 +3425,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
             total_tokens: 30,
             codex_rollout_budget_units: None,
         },
+        last_usage_includes_reasoning: None,
         last_token_usage: TokenUsage {
             input_tokens: 3,
             cached_input_tokens: 0,
@@ -3441,6 +3447,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
             total_tokens: 375,
             codex_rollout_budget_units: None,
         },
+        last_usage_includes_reasoning: None,
         last_token_usage: TokenUsage {
             input_tokens: 10,
             cached_input_tokens: 0,
@@ -3590,6 +3597,7 @@ async fn recompute_token_usage_updates_model_context_window() {
         let mut state = session.state.lock().await;
         state.set_token_info(Some(TokenUsageInfo {
             total_token_usage: TokenUsage::default(),
+            last_usage_includes_reasoning: None,
             last_token_usage: TokenUsage::default(),
             model_context_window: Some(258_400),
         }));
@@ -3606,7 +3614,7 @@ async fn recompute_token_usage_updates_model_context_window() {
     assert_eq!(actual.model_context_window, Some(128_000));
 }
 
-#[test_case(crate::session::TokenUsageContext::Sampling; "sampling")]
+#[test_case(crate::session::TokenUsageContext::Sampling { includes_reasoning: false }; "sampling")]
 #[test_case(crate::session::TokenUsageContext::SpendingOnly; "spending_only")]
 #[tokio::test]
 async fn record_token_usage_info_notifies_extension_contributors(
@@ -3693,7 +3701,9 @@ async fn record_token_usage_info_notifies_extension_contributors(
             &turn_context,
             &turn_context.initial_settings,
             Some(&first_usage),
-            crate::session::TokenUsageContext::Sampling,
+            crate::session::TokenUsageContext::Sampling {
+                includes_reasoning: true,
+            },
         )
         .await
         .expect("first usage should be recorded");
@@ -3711,8 +3721,12 @@ async fn record_token_usage_info_notifies_extension_contributors(
     expected_total_usage.add_assign(&second_usage);
     let expected_session_info = TokenUsageInfo {
         total_token_usage: expected_total_usage.clone(),
+        last_usage_includes_reasoning: Some(matches!(
+            context,
+            crate::session::TokenUsageContext::SpendingOnly
+        )),
         last_token_usage: match context {
-            crate::session::TokenUsageContext::Sampling => second_usage.clone(),
+            crate::session::TokenUsageContext::Sampling { .. } => second_usage.clone(),
             crate::session::TokenUsageContext::SpendingOnly => first_usage.clone(),
         },
         model_context_window: turn_context.model_context_window(),
@@ -3724,6 +3738,7 @@ async fn record_token_usage_info_notifies_extension_contributors(
             turn_level_id: turn_context.sub_id.clone(),
             token_usage: TokenUsageInfo {
                 total_token_usage: first_usage.clone(),
+                last_usage_includes_reasoning: Some(true),
                 last_token_usage: first_usage,
                 model_context_window: turn_context.model_context_window(),
             },
@@ -3736,6 +3751,12 @@ async fn record_token_usage_info_notifies_extension_contributors(
             turn_level_id: turn_context.sub_id.clone(),
             token_usage: TokenUsageInfo {
                 total_token_usage: expected_total_usage,
+                last_usage_includes_reasoning: match context {
+                    crate::session::TokenUsageContext::Sampling { includes_reasoning } => {
+                        Some(includes_reasoning)
+                    }
+                    crate::session::TokenUsageContext::SpendingOnly => None,
+                },
                 last_token_usage: second_usage,
                 model_context_window: turn_context.model_context_window(),
             },
@@ -7966,6 +7987,7 @@ async fn request_permissions_tool_resolves_legacy_paths_against_selected_environ
                 call_id,
                 tool_name: codex_tools::ToolName::plain("request_permissions"),
                 source: ToolCallSource::Direct,
+                native_call: None,
                 environments: Default::default(),
                 payload: ToolPayload::Function { arguments },
             };
@@ -8051,6 +8073,7 @@ async fn request_permissions_tool_rejects_invalid_requests(
         call_id: "call-1".to_string(),
         tool_name: codex_tools::ToolName::plain("request_permissions"),
         source: ToolCallSource::Direct,
+        native_call: None,
         environments: Default::default(),
         payload: ToolPayload::Function {
             arguments: json!({
@@ -12972,6 +12995,7 @@ async fn set_total_token_usage(sess: &Session, total_token_usage: TokenUsage) {
     let mut state = sess.state.lock().await;
     state.set_token_info(Some(TokenUsageInfo {
         total_token_usage,
+        last_usage_includes_reasoning: None,
         last_token_usage: TokenUsage::default(),
         model_context_window: None,
     }));
@@ -13411,7 +13435,8 @@ async fn fatal_tool_error_stops_turn_and_reports_error() {
         internal_chat_message_metadata_passthrough: None,
     };
 
-    let call = ToolRouter::build_tool_call(item.clone())
+    let call = router
+        .build_tool_call(item.clone())
         .expect("build tool call")
         .expect("tool call present");
     let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
@@ -13572,6 +13597,7 @@ async fn unified_exec_rejects_escalated_permissions_when_policy_not_on_request()
             call_id: "exec-call".to_string(),
             tool_name: codex_tools::ToolName::plain("exec_command"),
             source: crate::tools::context::ToolCallSource::Direct,
+            native_call: None,
             environments: Default::default(),
             payload: ToolPayload::Function {
                 arguments: serde_json::json!({

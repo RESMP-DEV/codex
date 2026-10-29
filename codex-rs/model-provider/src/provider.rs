@@ -101,11 +101,11 @@ const FEDRAMP_API_BASE_URL: &str = "https://gov.api.openai.com/v1";
 
 /// Default model used for memory extraction when a provider does not require a
 /// backend-specific model ID.
-pub const DEFAULT_MEMORY_EXTRACTION_PREFERRED_MODEL: &str = "gpt-5.6-luna";
+pub const DEFAULT_MEMORY_EXTRACTION_PREFERRED_MODEL: &str = "gpt-6-luna";
 
 /// Default model used for memory consolidation when a provider does not require
 /// a backend-specific model ID.
-pub const DEFAULT_MEMORY_CONSOLIDATION_PREFERRED_MODEL: &str = "gpt-5.6-terra";
+pub const DEFAULT_MEMORY_CONSOLIDATION_PREFERRED_MODEL: &str = "gpt-6.1-terra";
 
 /// Runtime provider abstraction used by model execution.
 ///
@@ -370,10 +370,19 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         &self,
         config_model_catalog: Option<ModelsResponse>,
     ) -> SharedModelsManager {
+        let origin = if config_model_catalog.is_some() {
+            codex_models_manager::ModelOrigin::ExplicitConfig
+        } else {
+            codex_models_manager::ModelOrigin::Bundled
+        };
         let model_catalog = config_model_catalog
             .or_else(|| codex_models_manager::bundled_models_response().ok())
             .unwrap_or_default();
-        Arc::new(StaticModelsManager::new(self.auth_manager(), model_catalog))
+        Arc::new(StaticModelsManager::new(
+            self.auth_manager(),
+            model_catalog,
+            origin,
+        ))
     }
 
     /// Creates a model manager that can use a caller-provided cache for remote catalogs.
@@ -546,6 +555,7 @@ impl ConfiguredModelProvider {
             return Arc::new(StaticModelsManager::new(
                 self.auth_manager.clone(),
                 model_catalog,
+                codex_models_manager::ModelOrigin::ExplicitConfig,
             ));
         }
         let endpoint = Arc::new(

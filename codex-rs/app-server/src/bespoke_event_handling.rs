@@ -751,7 +751,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                         Some(shlex_join(&command)),
                         Some(completion_item.cwd.clone()),
                         Some(command_actions),
-                        Some(completion_item),
+                        (kind != codex_protocol::approvals::ExecApprovalKind::HumanCommand)
+                            .then_some(completion_item),
                     ),
                 };
             if approval_starts_command && let Some(completion_item) = completion_item.as_ref() {
@@ -3721,6 +3722,7 @@ mod tests {
                 total_tokens: 200,
                 codex_rollout_budget_units: None,
             },
+            last_usage_includes_reasoning: None,
             last_token_usage: TokenUsage {
                 input_tokens: 10,
                 cached_input_tokens: 5,

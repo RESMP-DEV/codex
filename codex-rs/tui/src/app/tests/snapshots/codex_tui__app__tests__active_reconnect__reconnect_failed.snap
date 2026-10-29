@@ -1,8 +1,9 @@
 ---
 source: tui/src/app/tests/active_reconnect_tests.rs
-assertion_line: 655
-expression: "crate::chatwidget::tests::helpers::strip_racy_status_lines(render_bottom_popup(&app.chat_widget,\n80))"
+expression: "format!(\"{error}\\n{}\", crate::chatwidget::tests::helpers::strip_racy_status_lines(render_bottom_popup(&app.chat_widget, 80)))"
 ---
+Automatic reconnect timed out while connecting to the server.
+• Reconnect failed — check the endpoint, then relaunch (0s)
 
 
 › Ask Codex to do anything

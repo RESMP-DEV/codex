@@ -123,6 +123,9 @@ mod model_instructions;
 #[path = "scenarios_catalog_approval_instructions_tests.rs"]
 mod catalog_approval_instructions;
 
+#[path = "scenarios_managed_human_approval_tests.rs"]
+mod managed_human_approval;
+
 #[path = "scenarios_context_management_tools.rs"]
 mod context_management_tools;
 
@@ -149,6 +152,9 @@ mod partial_answers;
 
 #[path = "scenarios_guardian_sender_context.rs"]
 mod guardian_sender_context;
+
+#[path = "scenarios_guardian_direct_review.rs"]
+mod guardian_direct_review;
 
 #[path = "scenarios_guardian_extra_policy.rs"]
 mod guardian_extra_policy;

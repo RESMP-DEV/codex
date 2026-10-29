@@ -248,6 +248,7 @@ mod transcript_view;
 mod tui;
 mod turn_tip;
 mod ui_consts;
+mod ui_tree;
 mod unarchive_prompt;
 pub(crate) mod update_action;
 mod worktree_startup;
@@ -526,6 +527,7 @@ async fn connect_remote_app_server(
     endpoint: RemoteAppServerEndpoint,
 ) -> color_eyre::Result<AppServerClient> {
     let app_server = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
+        required_human_approval: true,
         endpoint,
         client_name: "codex-tui".to_string(),
         client_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -740,6 +742,7 @@ where
         })
         .collect();
     let client = start_client(InProcessClientStartArgs {
+        required_human_approval: true,
         arg0_paths,
         config: Arc::new(config),
         cli_overrides: cli_kv_overrides,
@@ -1366,16 +1369,25 @@ async fn run_ratatui_app(
         // Authentication can change while any interactive onboarding screen is open.
         startup_account = None;
         let show_login_screen = should_show_login_screen(login_status, requires_openai_auth);
-        let bedrock_setup_enabled = should_show_bedrock_setup_wizard(
+        let bedrock_setup_enabled = should_show_provider_setup_wizard(
             login_status,
             requires_openai_auth,
             &initial_config,
             &app_server_target,
+            Feature::BedrockSetupWizard,
+        );
+        let gcp_setup_enabled = should_show_provider_setup_wizard(
+            login_status,
+            requires_openai_auth,
+            &initial_config,
+            &app_server_target,
+            Feature::GcpSetupWizard,
         );
         let onboarding_result = run_onboarding_app(
             OnboardingScreenArgs {
                 show_login_screen,
                 bedrock_setup_enabled,
+                gcp_setup_enabled,
                 show_trust_screen: should_show_trust_screen_flag,
                 remote_project_trust: None,
                 login_status,
@@ -2450,15 +2462,16 @@ fn should_show_login_screen(login_status: LoginStatus, requires_openai_auth: boo
     login_status == LoginStatus::NotAuthenticated
 }
 
-fn should_show_bedrock_setup_wizard(
+fn should_show_provider_setup_wizard(
     login_status: LoginStatus,
     requires_openai_auth: bool,
     config: &Config,
     app_server_target: &AppServerTarget,
+    feature: Feature,
 ) -> bool {
     matches!(app_server_target, AppServerTarget::Embedded)
         && should_show_login_screen(login_status, requires_openai_auth)
-        && config.features.enabled(Feature::BedrockSetupWizard)
+        && config.features.enabled(feature)
         && config.model_provider_id == "openai"
         && config
             .auth_config()

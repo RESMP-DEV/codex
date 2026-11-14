@@ -1,4 +1,5 @@
-//! Prepares a supplied exec call and reviews it against captured history when approval is required.
+//! Prepares a recorded tool call for review against captured history and current policy.
+//! Preparation never executes the tool or grants permissions.
 
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ use codex_guardian_reviewer::ReviewDeadline;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AskForApproval;
 use codex_tools::FunctionCallError;
 use codex_tools::ToolName;
 use tokio_util::sync::CancellationToken;
@@ -18,14 +20,21 @@ use super::from_approval_action;
 use super::review::ReviewInput;
 use crate::context_manager::ContextManager;
 use crate::guardian_review::GuardianReviewResult;
+use crate::mcp_tool_call;
 use crate::session::session::Session;
-use crate::session::step_context::StepContext;
+use crate::tools::context::ToolInvocation;
+use crate::tools::context::ToolPayload;
+use crate::tools::handlers::PreparedPermissionRequest;
 use crate::tools::handlers::ToolEnvironmentArgs;
+use crate::tools::handlers::apply_patch::prepare_intercepted_patch;
+use crate::tools::handlers::apply_patch::prepare_patch_request;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::resolve_tool_environment;
+use crate::tools::handlers::selected_executor;
 use crate::tools::handlers::unified_exec::preparation::ExecCommandLifetime;
 use crate::tools::handlers::unified_exec::preparation::ParsedExecCommand;
-use crate::tools::handlers::unified_exec::preparation::PreparedExecCommand;
+use crate::tools::registry::PreToolUseError;
+use crate::tools::registry::apply_pre_tool_use;
 use crate::tools::sandboxing::ExecApprovalRequirement;
 
 pub(crate) async fn review_tool_call(
@@ -34,8 +43,41 @@ pub(crate) async fn review_tool_call(
     tool_call: &ResponseItem,
     cancellation: &CancellationToken,
 ) -> Result<GuardianReviewResult> {
-    let call = RecordedExecCall::from_item(tool_call)?;
-    if history.raw_items().any(|item| {
+    let is_supported_builtin = match tool_call {
+        ResponseItem::FunctionCall {
+            call_id,
+            name,
+            namespace,
+            status,
+            encrypted_function_args,
+            ..
+        } if encrypted_function_args.as_ref().is_none_or(Vec::is_empty)
+            && !call_id.trim().is_empty()
+            && matches!(status.as_deref(), None | Some("completed")) =>
+        {
+            matches!(name.as_str(), "exec_command" | "request_permissions")
+                && ToolName::new(namespace.clone(), name).is_default_namespace()
+        }
+        ResponseItem::CustomToolCall {
+            call_id,
+            name,
+            namespace,
+            status,
+            ..
+        } if name == "apply_patch"
+            && ToolName::new(namespace.clone(), name).is_default_namespace()
+            && !call_id.trim().is_empty()
+            && matches!(status.as_deref(), None | Some("completed")) =>
+        {
+            true
+        }
+        _ => {
+            return Err(CodexErr::InvalidRequest(
+                "expected a completed plaintext exec_command, apply_patch, request_permissions, or MCP call with a nonempty call ID".into(),
+            ));
+        }
+    };
+    if history.raw_items().rev().skip(1).any(|item| {
         matches!(item, ResponseItem::FunctionCall { name, namespace, .. }
             if name == "request_permissions"
                 && ToolName::new(namespace.clone(), name).is_default_namespace())
@@ -53,22 +95,167 @@ pub(crate) async fn review_tool_call(
         let step = session
             .capture_speculative_step_context(turn, cancellation)
             .await?;
-        let prepared = call.prepare(session, &step)?;
-        let requirement = prepared.approval_requirement(session, &step).await;
+        let parsed_call = step
+            .tool_router
+            .build_tool_call(tool_call.clone())
+            .map_err(tool_error)?
+            .ok_or_else(|| {
+                CodexErr::InvalidRequest(
+                    "expected an exec_command, apply_patch, request_permissions, or MCP call"
+                        .into(),
+                )
+            })?;
+        let tool = step
+            .tool_router
+            .registered_tool(&parsed_call.tool_name)
+            .filter(|_| step.tool_router.exposes_tool(&parsed_call.tool_name))
+            .ok_or_else(|| {
+                CodexErr::InvalidRequest("the requested tool is unavailable on this thread".into())
+            })?;
+        let advertised_mcp_tool = tool.runtime.mcp_tool_info();
+        if !is_supported_builtin && advertised_mcp_tool.is_none() {
+            return Err(CodexErr::InvalidRequest(
+                "unsupported tool for direct review".into(),
+            ));
+        }
+        let source = parsed_call.direct_source();
+        let mut invocation = ToolInvocation {
+            session: Arc::clone(session),
+            turn: Arc::clone(&step.turn),
+            step_context: Arc::clone(&step),
+            cancellation_token: cancellation.clone(),
+            tracker: Default::default(),
+            call_id: parsed_call.call_id,
+            tool_name: parsed_call.tool_name,
+            source,
+            payload: parsed_call.payload,
+            native_call: parsed_call.native_call,
+            environments: Default::default(),
+        };
+        invocation.environments = tool
+            .runtime
+            .environments_for_input(&invocation)
+            .map_err(tool_error)?;
+        apply_pre_tool_use(tool.runtime.as_ref(), &mut invocation)
+            .await
+            .map_err(|err| match err {
+                PreToolUseError::Blocked(reason) => CodexErr::InvalidRequest(reason),
+                PreToolUseError::Failed(err) => tool_error(err),
+                PreToolUseError::Cancelled(_) => CodexErr::TurnAborted,
+            })?;
+        let step = &invocation.step_context;
+        let (requirement, action) = if let Some(tool_info) = advertised_mcp_tool {
+            let prepared = mcp_tool_call::recorded::prepare_approval_action(&invocation, tool_info)
+                .await
+                .map_err(tool_error)?;
+            let Some(action) = prepared else {
+                return Ok(GuardianReviewResult {
+                    call_id: invocation.call_id,
+                    assessment: None,
+                });
+            };
+            (None, action)
+        } else {
+            match (invocation.tool_name.name.as_str(), &invocation.payload) {
+                ("exec_command", ToolPayload::Function { arguments }) => {
+                    let args: ToolEnvironmentArgs =
+                        parse_arguments(arguments).map_err(tool_error)?;
+                    let environment = resolve_tool_environment(
+                        &step.environments,
+                        args.environment_id.as_deref(),
+                    )
+                    .map_err(tool_error)?;
+                    let parsed = ParsedExecCommand::parse(arguments, session, step, environment)
+                        .map_err(tool_error)?;
+                    let lifetime = if step.turn.config.features.enabled(Feature::UnifiedExec) {
+                        ExecCommandLifetime::Interactive
+                    } else {
+                        ExecCommandLifetime::OneShot
+                    };
+                    let prepared = parsed.prepare(lifetime).map_err(tool_error)?;
+                    let fs = prepared.turn_environment.environment().get_filesystem();
+                    if let Some(patch) = prepare_intercepted_patch(
+                        &prepared.resolved.command,
+                        &prepared.cwd,
+                        fs.as_ref(),
+                        &prepared.turn_environment,
+                        step,
+                    )
+                    .await
+                    .map_err(tool_error)?
+                    {
+                        let action = patch.approval_action(&invocation.call_id);
+                        (Some(patch.exec_approval_requirement), action)
+                    } else {
+                        let requirement = prepared.approval_requirement(session, step).await;
+                        let action = prepared.approval_action(&invocation.call_id, &requirement);
+                        (Some(requirement), action)
+                    }
+                }
+                ("apply_patch", ToolPayload::Custom { input }) => {
+                    let environment =
+                        selected_executor(&invocation.environments, &step.environments)
+                            .map_err(tool_error)?;
+                    let prepared = prepare_patch_request(input, environment, step)
+                        .await
+                        .map_err(tool_error)?;
+                    let action = prepared.approval_action(&invocation.call_id);
+                    (Some(prepared.exec_approval_requirement), action)
+                }
+                ("request_permissions", ToolPayload::Function { arguments }) => {
+                    let environment =
+                        selected_executor(&invocation.environments, &step.environments)
+                            .map_err(tool_error)?;
+                    let prepared = PreparedPermissionRequest::parse(arguments, environment)
+                        .map_err(tool_error)?;
+                    match step.settings.approval_policy() {
+                        AskForApproval::Never => {
+                            return Ok(GuardianReviewResult {
+                                call_id: invocation.call_id,
+                                assessment: None,
+                            });
+                        }
+                        AskForApproval::Granular(policy)
+                            if !policy.allows_request_permissions() =>
+                        {
+                            return Ok(GuardianReviewResult {
+                                call_id: invocation.call_id,
+                                assessment: None,
+                            });
+                        }
+                        AskForApproval::OnRequest
+                        | AskForApproval::UnlessTrusted
+                        | AskForApproval::Granular(_) => {}
+                    }
+                    let action = prepared.approval_action(&invocation.call_id, &step.turn.sub_id);
+                    (None, action)
+                }
+                _ => {
+                    return Err(CodexErr::Fatal(
+                        "unsupported tool or payload for direct review".into(),
+                    ));
+                }
+            }
+        };
         let approval = match &requirement {
-            ExecApprovalRequirement::Skip { .. } => return Ok(None),
-            ExecApprovalRequirement::NeedsApproval { reason, .. } => reason.clone(),
-            ExecApprovalRequirement::NeedsHumanApproval { .. } => {
+            None => None,
+            Some(ExecApprovalRequirement::Skip { .. }) => {
+                return Ok(GuardianReviewResult {
+                    call_id: invocation.call_id,
+                    assessment: None,
+                });
+            }
+            Some(ExecApprovalRequirement::NeedsApproval { reason, .. }) => reason.clone(),
+            Some(ExecApprovalRequirement::NeedsHumanApproval { .. }) => {
                 return Err(CodexErr::InvalidRequest(
                     "Managed command policy requires human approval.".into(),
                 ));
             }
-            ExecApprovalRequirement::Forbidden { reason } => {
+            Some(ExecApprovalRequirement::Forbidden { reason }) => {
                 return Err(CodexErr::InvalidRequest(reason.clone()));
             }
         };
-        let action = prepared.approval_action(call.call_id, &requirement);
-        let context = GuardianReviewContext::from(&step);
+        let context = GuardianReviewContext::from(step);
         let request = from_approval_action(action, &context)
             .request
             .map_err(CodexErr::InvalidRequest)?;
@@ -90,79 +277,15 @@ pub(crate) async fn review_tool_call(
                 GuardianReviewError::Timeout => CodexErr::RequestTimeout,
                 other => CodexErr::Fatal(format!("Guardian assessment failed: {other:?}")),
             })?;
-        Ok(Some(assessment))
+        Ok(GuardianReviewResult {
+            call_id: invocation.call_id,
+            assessment: Some(assessment),
+        })
     };
-    let assessment = tokio::select! {
-        _ = cancellation.cancelled() => return Err(CodexErr::TurnAborted),
-        _ = deadline.wait() => return Err(CodexErr::RequestTimeout),
-        result = review => result?,
-    };
-    Ok(GuardianReviewResult {
-        call_id: call.call_id.to_owned(),
-        assessment,
-    })
-}
-
-struct RecordedExecCall<'a> {
-    call_id: &'a str,
-    arguments: &'a str,
-}
-
-impl<'a> RecordedExecCall<'a> {
-    fn from_item(item: &'a ResponseItem) -> Result<Self> {
-        match item {
-            ResponseItem::FunctionCall {
-                call_id,
-                name,
-                namespace,
-                arguments,
-                status,
-                encrypted_function_args,
-                ..
-            } if name == "exec_command"
-                && encrypted_function_args.as_ref().is_none_or(Vec::is_empty)
-                && ToolName::new(namespace.clone(), name).is_default_namespace()
-                && !call_id.trim().is_empty()
-                && matches!(status.as_deref(), None | Some("completed")) =>
-            {
-                Ok(Self { call_id, arguments })
-            }
-            _ => Err(CodexErr::InvalidRequest(
-                "expected a completed plaintext exec_command call with a nonempty call ID".into(),
-            )),
-        }
-    }
-
-    fn prepare(&self, session: &Arc<Session>, step: &StepContext) -> Result<PreparedExecCommand> {
-        if !step
-            .tool_router
-            .exposes_tool(&ToolName::plain("exec_command"))
-        {
-            return Err(CodexErr::InvalidRequest(
-                "exec_command is unavailable on this thread".into(),
-            ));
-        }
-        let args: ToolEnvironmentArgs = parse_arguments(self.arguments).map_err(tool_error)?;
-        let environment =
-            resolve_tool_environment(&step.environments, args.environment_id.as_deref())
-                .map_err(tool_error)?;
-        let parsed = ParsedExecCommand::parse(self.arguments, session, step, environment)
-            .map_err(tool_error)?;
-        let lifetime = if step.turn.config.features.enabled(Feature::UnifiedExec) {
-            ExecCommandLifetime::Interactive
-        } else {
-            ExecCommandLifetime::OneShot
-        };
-        let prepared_exec = parsed.prepare(lifetime).map_err(tool_error)?;
-        if codex_apply_patch::MaybeApplyPatch::intercepts_command(
-            &prepared_exec.resolved.command,
-            &prepared_exec.cwd,
-        ) {
-            return Err(CodexErr::InvalidRequest(
-                "the recorded exec_command would be handled by apply_patch; direct review only supports ordinary commands".into(),
-            ));
-        }
-        Ok(prepared_exec)
+    tokio::select! {
+        _ = cancellation.cancelled() => Err(CodexErr::TurnAborted),
+        _ = deadline.wait() => Err(CodexErr::RequestTimeout),
+        result = review => result,
     }
 }
 

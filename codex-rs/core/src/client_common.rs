@@ -18,10 +18,12 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-/// API request payload for a single model turn
-#[derive(Debug, Clone)]
+/// Core inputs to provider request formatting for a single model turn.
+/// The rollout trace serializes this shape before transport-specific rewrites.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Prompt {
     /// Conversation context input items.
+    #[serde(serialize_with = "codex_rollout_trace::serialize_trace_items")]
     pub input: Vec<ResponseItem>,
 
     /// Tool definitions to inject into this request, empty when supplied by history.
@@ -38,6 +40,8 @@ pub struct Prompt {
     /// Whether the Responses API should strictly validate `output_schema`.
     pub output_schema_strict: bool,
 
+    pub(crate) prompt_cache_ttl: Option<crate::PromptCacheTtl>,
+
     pub(crate) cyber_access_program: Option<codex_protocol::turn_input::CyberAccessProgram>,
 }
 
@@ -50,6 +54,7 @@ impl Default for Prompt {
             base_instructions: BaseInstructions::default(),
             output_schema: None,
             output_schema_strict: true,
+            prompt_cache_ttl: None,
             cyber_access_program: None,
         }
     }

@@ -2,10 +2,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as SyncMutex;
+use std::sync::PoisonError;
+use std::sync::Weak;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 
 use codex_diagnostics::GaugeGuard;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
@@ -18,11 +22,14 @@ use tokio::sync::oneshot;
 
 use super::TurnTokenUsage;
 use crate::agent::types::AgentExecutionGuard;
+use crate::session::TurnInput;
 use crate::session::TurnInputQueue;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
 use crate::tasks::AnySessionTask;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::TokenUsage;
 
@@ -80,6 +87,10 @@ pub(crate) struct RunningTask {
     pub(crate) handle: AbortOnDropHandle<()>,
     pub(crate) turn_context: Arc<TurnContext>,
     pub(crate) _agent_execution_guard: Option<AgentExecutionGuard>,
+    /// Follows the task into whichever finalizer claims its terminal event.
+    pub(crate) outcome_handoff: Option<TaskTrackerToken>,
+    /// Unrecorded input retained during host admission or preparation that can wait on the roster.
+    pub(crate) pending_initial_input: Option<Vec<TurnInput>>,
     pub(crate) _diagnostics_guard: GaugeGuard,
     // Timer recorded when the task drops to capture the full turn duration.
     pub(crate) _timer: Option<codex_otel::Timer>,
@@ -88,7 +99,7 @@ pub(crate) struct RunningTask {
 /// Mutable state for a single turn.
 #[derive(Default)]
 pub(crate) struct TurnState {
-    pending_approvals: HashMap<String, PendingApproval>,
+    pending_approvals: Arc<PendingApprovals>,
     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
     pending_user_input: HashMap<String, oneshot::Sender<AcceptedUserInputResponse>>,
     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
@@ -107,6 +118,7 @@ pub(crate) struct TurnState {
 pub(crate) struct PendingApproval {
     pub(crate) sender: oneshot::Sender<ReviewDecision>,
     pub(crate) kind: codex_protocol::approvals::ExecApprovalKind,
+    // A yielded cell can emit a prompt for its original turn while a later turn services it.
     pub(crate) turn_id: String,
 }
 
@@ -140,7 +152,49 @@ pub(crate) struct PendingRequestPermissions {
     pub(crate) turn_context: Arc<TurnContext>,
 }
 
+type PendingApprovals = SyncMutex<HashMap<String, PendingApproval>>;
+
+/// The originating turn and its unique prompt ID stay valid even if the active turn changes.
+pub(crate) struct NetworkApprovalPrompt<'a> {
+    approvals: Weak<PendingApprovals>,
+    events: &'a async_channel::Sender<Event>,
+    turn_id: &'a str,
+    approval_id: &'a str,
+}
+
+impl Drop for NetworkApprovalPrompt<'_> {
+    fn drop(&mut self) {
+        if let Some(approvals) = self.approvals.upgrade() {
+            approvals
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(self.approval_id);
+        }
+        // The session channel is unbounded. Enqueue resolution before a same-host waiter can prompt.
+        let _ = self.events.try_send(Event {
+            id: self.turn_id.to_owned(),
+            msg: EventMsg::NetworkApprovalResolved {
+                approval_id: self.approval_id.to_owned(),
+            },
+        });
+    }
+}
+
 impl TurnState {
+    pub(crate) fn track_network_prompt<'a>(
+        &self,
+        events: &'a async_channel::Sender<Event>,
+        turn_id: &'a str,
+        approval_id: &'a str,
+    ) -> NetworkApprovalPrompt<'a> {
+        NetworkApprovalPrompt {
+            approvals: Arc::downgrade(&self.pending_approvals),
+            events,
+            turn_id,
+            approval_id,
+        }
+    }
+
     pub(crate) fn insert_pending_approval(
         &mut self,
         key: String,
@@ -148,26 +202,41 @@ impl TurnState {
         kind: codex_protocol::approvals::ExecApprovalKind,
         turn_id: String,
     ) -> Option<PendingApproval> {
-        self.pending_approvals.insert(
-            key,
-            PendingApproval {
-                sender: tx,
-                kind,
-                turn_id,
-            },
-        )
+        self.pending_approvals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(
+                key,
+                PendingApproval {
+                    sender: tx,
+                    kind,
+                    turn_id,
+                },
+            )
     }
 
-    pub(crate) fn pending_approval(&self, key: &str) -> Option<&PendingApproval> {
-        self.pending_approvals.get(key)
-    }
-
-    pub(crate) fn remove_pending_approval(&mut self, key: &str) -> Option<PendingApproval> {
-        self.pending_approvals.remove(key)
+    pub(crate) fn remove_pending_approval(
+        &mut self,
+        key: &str,
+        expected_turn_id: Option<&str>,
+    ) -> Option<PendingApproval> {
+        let mut approvals = self
+            .pending_approvals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(expected) = expected_turn_id
+            && approvals.get(key)?.turn_id != expected
+        {
+            return None;
+        }
+        approvals.remove(key)
     }
 
     pub(crate) fn clear_pending_waiters(&mut self) {
-        self.pending_approvals.clear();
+        self.pending_approvals
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         self.pending_request_permissions.clear();
         self.pending_user_input.clear();
         self.pending_elicitations.clear();

@@ -41,6 +41,7 @@ fn identical_text_from_a_discarded_attempt_does_not_gain_acceptance() -> anyhow:
         trace_context("turn-1"),
         RawTraceEventPayload::HistoryItemAccepted {
             item_id: "accepted".into(),
+            agent_message_payload: None,
         },
     )?;
     let response = writer.write_json_payload(
@@ -218,22 +219,42 @@ fn inherited_output_is_child_prefill_without_copying_parent_sampling_provenance(
         trace.threads["thread-root"].conversation_item_ids,
         parent.request_item_ids
     );
+    let accepted = RawTraceEventPayload::HistoryItemAccepted {
+        item_id: "msg-parent".into(),
+        agent_message_payload: None,
+    };
+    let context = trace_context("turn-parent");
+    let first = writer.append_with_context(context.clone(), accepted.clone())?;
+    let mut duplicate = writer.append_with_context(context, accepted)?;
+    drop(writer);
+    // Give the later event an earlier clock reading: sequence determines which pair wins.
+    let path = temp.path().join("trace.jsonl");
+    let original = serde_json::to_string(&duplicate)?;
+    duplicate.wall_time_unix_ms = first.wall_time_unix_ms - 1;
+    let events = std::fs::read_to_string(&path)?;
+    assert!(events.contains(&original));
+    std::fs::write(
+        path,
+        events.replace(&original, &serde_json::to_string(&duplicate)?),
+    )?;
+    let replayed = replay_bundle(temp.path())?;
+    let local = &replayed.conversation_items[&parent.response_item_ids[0]];
+    let inherited = &replayed.conversation_items[&child.request_item_ids[0]];
+    assert_eq!(
+        (local.accepted_at_unix_ms, local.accepted_seq),
+        (Some(first.wall_time_unix_ms), Some(first.seq))
+    );
+    assert_eq!(
+        (inherited.accepted_at_unix_ms, inherited.accepted_seq),
+        (None, None)
+    );
     Ok(())
 }
 
 #[test]
-fn legacy_bundles_cannot_claim_accepted_history() -> anyhow::Result<()> {
+fn replay_rejects_a_mismatched_manifest_schema() -> anyhow::Result<()> {
     let temp = TempDir::new()?;
-    let writer = create_started_writer(&temp)?;
-    start_turn(&writer, "turn-1")?;
-    append_completed_inference(
-        &writer,
-        "thread-root",
-        "turn-1",
-        "call",
-        vec![message("user", "answer")],
-        vec![message("assistant", "unproven")],
-    )?;
+    create_started_writer(&temp)?;
     let manifest_path = temp.path().join("manifest.json");
     let mut manifest: serde_json::Value =
         serde_json::from_reader(std::fs::File::open(&manifest_path)?)?;
@@ -243,7 +264,7 @@ fn legacy_bundles_cannot_claim_accepted_history() -> anyhow::Result<()> {
         replay_bundle(temp.path())
             .unwrap_err()
             .to_string()
-            .contains("cannot establish accepted history")
+            .contains("unsupported manifest schema")
     );
     Ok(())
 }

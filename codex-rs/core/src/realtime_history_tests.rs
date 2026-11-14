@@ -66,6 +66,7 @@ fn assistant_delta(item_id: &str, delta: &str) -> EventMsg {
 
 fn completed_item(item: TurnItem) -> EventMsg {
     EventMsg::ItemCompleted(ItemCompletedEvent {
+        content_token_count: None,
         thread_id: ThreadId::new(),
         turn_id: "turn-1".to_string(),
         item,
@@ -92,6 +93,7 @@ fn mcp_tool_call(id: &str, server: &str, status: McpToolCallStatus) -> TurnItem 
     TurnItem::McpToolCall(McpToolCallItem {
         id: id.to_string(),
         server: server.to_string(),
+        environment_id: None,
         tool: "create_thread".to_string(),
         arguments: serde_json::Value::Null,
         connector_id: None,
@@ -224,6 +226,7 @@ fn promotes_backing_agent_artifacts_once_without_a_client_request() {
     );
 
     let completed = completed_item(TurnItem::AgentMessage(AgentMessageItem {
+        moderation: None,
         id: "message-1".to_string(),
         content: vec![AgentMessageContent::Text {
             text: "[analysis] ::codex-realtime-inline{}\nVisible explanation".to_string(),
@@ -303,6 +306,7 @@ fn promotes_distinct_visualizations_once_and_ignores_markdown_fences() {
     );
 
     let completed = completed_item(TurnItem::AgentMessage(AgentMessageItem {
+        moderation: None,
         id: "message-1".to_string(),
         content: vec![AgentMessageContent::Text {
             text: text.to_string(),

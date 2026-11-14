@@ -2,6 +2,7 @@ use super::*;
 use crate::async_scorer::authorization::ScoreAuthorization;
 use crate::async_scorer::conversation::ConversationBackend;
 use crate::async_scorer::conversation::ConversationRequest;
+use crate::async_scorer::decisions::DecisionsCredential;
 use crate::async_scorer::sampler::LunaSampler;
 use crate::async_scorer::sampler::LunaSamplerError;
 use crate::async_scorer::sampler::LunaSamplingRequest;
@@ -11,6 +12,7 @@ use crate::async_scorer::sampler::tests::sampler_config;
 use crate::async_scorer::score::PendingScore;
 use crate::async_scorer::transcript::ContextInput;
 use codex_extension_api::ThreadStopInput;
+use codex_guardian_context::ContextBudgeting;
 use codex_guardian_context::ContextTarget;
 use core_test_support::context_snapshot::ContextSnapshotOptions;
 use core_test_support::context_snapshot::SnapshotEntry;
@@ -39,6 +41,7 @@ async fn pending_request(
         target: ContextTarget::Async,
         history: history.as_ref(),
         root_conversation: &[],
+        root_conversation_candidates: None,
         trusted_user_answers: &[],
         planned_action: None,
         permissions: None,
@@ -77,16 +80,23 @@ async fn pending_request(
     ))
 }
 
+#[test_case::test_case(ContextBudgeting::Fixed; "fixed")]
+#[test_case::test_case(ContextBudgeting::Elastic; "elastic")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn configured_reset_limit_rebuilds_history_without_rejecting_fresh_evidence() -> Result<()> {
+async fn configured_reset_limit_rebuilds_history_without_rejecting_fresh_evidence(
+    budgeting: ContextBudgeting,
+) -> Result<()> {
     use crate::async_scorer::decisions::DecisionsSampler;
-    use codex_http_client::HttpClientBuilder;
+    use codex_http_client::HttpClientFactory;
+    use codex_http_client::OutboundProxyPolicy;
 
     skip_if_no_network!(Ok(()));
+    let elastic = budgeting == ContextBudgeting::Elastic;
     for (limit, reused) in [(1, false), (100_000, true)] {
         let server = responses::start_mock_server().await;
         let fixture = GuardianFailureFixture::with_config(&format!(
-            "[features]\nguardianv2_decisions_comparison = true\n[features.guardianv2]\nasync_classifier_mode = 'conversation'\nasync_classifier_conversation_token_limit = {limit}"
+            "[features]\nguardianv2_decisions_comparison = true\n[features.guardianv2]\nasync_classifier_mode = 'conversation'\nasync_classifier_conversation_token_limit = {limit}\nasync_elastic_budgeting = {elastic}\n{}",
+            core_test_support::guardian::async_elastic_sections_toml(),
         ))
         .await?;
         let store = fixture.test.codex.thread_extension_data();
@@ -112,9 +122,10 @@ async fn configured_reset_limit_rebuilds_history_without_rejecting_fresh_evidenc
         }]])
         .await;
         store.insert(DecisionsSampler::new(
-            HttpClientBuilder::new().build_direct()?,
-            "synthetic-key".into(),
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+            DecisionsCredential::ApiKey("synthetic-key".into()),
             format!("{}/v1/responses", decisions_server.uri()),
+            /*auth_context*/ None,
         )?);
         let (mut request, score) = pending_request(&fixture, "parent").await?;
         request.metrics = Some(metrics.clone());
@@ -301,6 +312,8 @@ async fn delayed_preparation_does_not_block_newer_requests_and_capacity_is_bound
         .get::<ConversationBackend>()
         .unwrap();
     let store = fixture.test.codex.thread_extension_data();
+    let turn_store = ExtensionData::new("approval-turn");
+    turn_store.insert_arc(store.get::<Config>().expect("captured test config"));
     let progress = store.get::<GuardianV2ScoreProgress>().unwrap();
     let mut reservations = (0..16)
         .map(|index| backend.reserve(|| index).1.unwrap())
@@ -323,6 +336,7 @@ async fn delayed_preparation_does_not_block_newer_requests_and_capacity_is_bound
         cached_approval(
             &fixture.registry,
             store,
+            &turn_store,
             "review action",
             /*metrics*/ None
         )
@@ -532,6 +546,8 @@ async fn preflight_skips_only_after_score_and_history_are_superseded() -> Result
         )
         .await?;
         let store = fixture.test.codex.thread_extension_data();
+        let turn_store = ExtensionData::new("approval-turn");
+        turn_store.insert_arc(store.get::<Config>().expect("captured test config"));
         let mut cached = cached_score(store).unwrap();
         cached.scores.insert("action_risk".to_owned(), risk);
         set_cached_score(store, cached);
@@ -578,6 +594,7 @@ async fn preflight_skips_only_after_score_and_history_are_superseded() -> Result
         let approval_before = cached_approval(
             &fixture.registry,
             store,
+            &turn_store,
             r#"{"tool":"mcp_tool_call","server":"node_repl"}"#,
             /*metrics*/ None,
         )
@@ -609,6 +626,7 @@ async fn preflight_skips_only_after_score_and_history_are_superseded() -> Result
             cached_approval(
                 &fixture.registry,
                 store,
+                &turn_store,
                 r#"{"tool":"mcp_tool_call","server":"node_repl"}"#,
                 /*metrics*/ None
             )
@@ -652,6 +670,7 @@ async fn delayed_classification_skips_after_newer_score_and_history_complete() -
     let mut updates = progress.updates.subscribe();
     let metrics = store.get::<RecordingMetrics>().unwrap();
     let turn_store = ExtensionData::new("turn-1");
+    turn_store.insert_arc(store.get::<Config>().expect("captured test config"));
     let tool_name = ToolName::plain("read_file");
     let payload = ToolPayload::Function {
         arguments: r#"{"path":"README.md"}"#.to_owned(),

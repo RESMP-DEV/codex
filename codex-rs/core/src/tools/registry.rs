@@ -35,6 +35,7 @@ use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::EventMsg;
 use codex_rollout::state_db;
@@ -111,9 +112,14 @@ pub(crate) trait CoreToolRuntime: ToolExecutor<ToolInvocation> {
         None
     }
 
+    /// Returns the MCP tool advertised by this runtime.
+    fn mcp_tool_info(&self) -> Option<&codex_mcp::ToolInfo> {
+        None
+    }
+
     /// Returns the owning server only for MCP-backed tool runtimes.
     fn mcp_server_name(&self) -> Option<&str> {
-        None
+        self.mcp_tool_info().map(codex_mcp::ToolInfo::server_name)
     }
 
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
@@ -208,7 +214,7 @@ pub(super) fn with_updated_function_input(
     invocation: ToolInvocation,
     mut updated_input: Value,
 ) -> Result<ToolInvocation, FunctionCallError> {
-    let ToolPayload::Function { .. } = &invocation.payload else {
+    let ToolPayload::Function { arguments } = &invocation.payload else {
         return Err(FunctionCallError::RespondToModel(
             "hook input rewrite received unsupported function tool payload".to_string(),
         ));
@@ -225,13 +231,36 @@ pub(super) fn with_updated_function_input(
             }
         }
         ToolEnvironments::Mcp { server, .. } => {
-            if let Some(Value::String(value)) = updated_input.get_mut("server") {
-                *value = value.trim().to_owned();
-                if value.is_empty() {
-                    updated_input["server"] = Value::Null;
+            for field in ["server", "environment_id"] {
+                if let Some(Value::String(value)) = updated_input.get_mut(field) {
+                    *value = value.trim().to_owned();
+                    if value.is_empty() {
+                        updated_input[field] = Value::Null;
+                    }
                 }
             }
             preserve_hook_selector(&mut updated_input, "server", serde_json::json!(server))?;
+            if invocation
+                .step_context
+                .mcp
+                .config()
+                .mcp_server_catalog
+                .exposure()
+                == codex_mcp::McpServerExposure::EnvironmentQualified
+            {
+                // Resource hooks may edit the URI, but cannot switch to another computer's server.
+                let original = function_hook_tool_input(arguments);
+                let environment_id = original
+                    .get("environment_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                preserve_hook_selector(
+                    &mut updated_input,
+                    "environment_id",
+                    serde_json::json!(environment_id),
+                )?;
+            }
         }
         ToolEnvironments::Terminal(terminal) => {
             preserve_hook_selector(
@@ -299,7 +328,7 @@ pub(crate) struct AnyToolResult {
 }
 
 impl AnyToolResult {
-    pub(crate) fn into_response(self) -> ResponseItemEnvelope {
+    pub(crate) fn into_response(self, file_backed_tool_audio: bool) -> ResponseItemEnvelope {
         let Self {
             call_id,
             payload,
@@ -307,12 +336,19 @@ impl AnyToolResult {
             ..
         } = self;
         let history_truncation_token_limit = result.fallback_token_limit_override();
+        let item = result.to_response_item(&call_id, &payload).into();
+        let producer_bounded_tool_audio = file_backed_tool_audio
+            && result.output_budget_applied()
+            && matches!(&item, ResponseItem::FunctionCallOutput { output, .. }
+                 | ResponseItem::CustomToolCallOutput { output, .. } if output.contains_audio());
         ResponseItemEnvelope {
-            item: result.to_response_item(&call_id, &payload).into(),
-            metadata: history_truncation_token_limit.map(|limit| CodexHarnessMetadata {
-                history_truncation_token_limit: Some(limit),
-                ..Default::default()
-            }),
+            item,
+            metadata: (producer_bounded_tool_audio || history_truncation_token_limit.is_some())
+                .then_some(CodexHarnessMetadata {
+                    producer_bounded_tool_audio,
+                    history_truncation_token_limit,
+                    ..Default::default()
+                }),
         }
     }
 
@@ -817,89 +853,65 @@ impl ToolRegistry {
             return Err(err);
         }
 
-        let fail_before_execution = async |invocation: &ToolInvocation, err: FunctionCallError| {
-            let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
-            otel.tool_result_with_tags(
-                &tool_name,
-                &call_id_owned,
-                log_payload.as_ref(),
-                Duration::ZERO,
-                /*success*/ false,
-                &err.to_string(),
-                &tool_result_tags,
-                &extra_trace_fields,
-            );
-            if tool.is_builtin_control_tool() {
-                let mut analytics = ControlToolCallGuard::new(invocation);
-                analytics.finish(ControlToolCallStatus::Failed);
-            }
-            dispatch_trace.record_failed(&err);
-            notify_tool_finish_if_unclaimed(
-                invocation,
-                call_state.as_deref(),
-                ToolCallOutcome::Failed {
-                    handler_executed: false,
-                },
-            )
-            .await;
-            err
-        };
+        let fail_before_execution =
+            async |dispatch_trace: ToolDispatchTrace,
+                   invocation: &ToolInvocation,
+                   err: FunctionCallError| {
+                let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
+                otel.tool_result_with_tags(
+                    &tool_name,
+                    &call_id_owned,
+                    log_payload.as_ref(),
+                    Duration::ZERO,
+                    /*success*/ false,
+                    &err.to_string(),
+                    &tool_result_tags,
+                    &extra_trace_fields,
+                );
+                if tool.is_builtin_control_tool() {
+                    let mut analytics = ControlToolCallGuard::new(invocation);
+                    analytics.finish(ControlToolCallStatus::Failed);
+                }
+                dispatch_trace.record_failed(&err);
+                notify_tool_finish_if_unclaimed(
+                    invocation,
+                    call_state.as_deref(),
+                    ToolCallOutcome::Failed {
+                        handler_executed: false,
+                    },
+                )
+                .await;
+                err
+            };
         let environments = match tool.live_environment_resolver() {
             Some(resolve) => resolve(&invocation).await,
             None => tool.environments_for_input(&invocation),
         };
         invocation.environments = match environments {
             Ok(environments) => environments,
-            Err(err) => return Err(fail_before_execution(&invocation, err).await),
+            Err(err) => return Err(fail_before_execution(dispatch_trace, &invocation, err).await),
         };
-        if let Some(pre_tool_use_payload) = tool.pre_tool_use_payload(&invocation) {
-            let tool_cwd = match tool.pre_tool_use_cwd(&invocation) {
-                Ok(cwd) => cwd,
-                Err(err) => return Err(fail_before_execution(&invocation, err).await),
-            };
-            match run_pre_tool_use_hooks(
-                &invocation.session,
-                invocation.step_context.as_ref(),
-                invocation.call_id.clone(),
-                &pre_tool_use_payload.tool_name,
-                &pre_tool_use_payload.tool_input,
-                tool_cwd,
-                &invocation.environments.hook_ids(),
-            )
-            .or_cancel_tool(&cancellation_token)
-            .await?
-            {
-                PreToolUseHookResult::Blocked(message) => {
-                    if tool.is_builtin_control_tool() {
-                        let mut analytics = ControlToolCallGuard::new(&invocation);
-                        analytics.finish(ControlToolCallStatus::Rejected);
-                    }
-                    let err = FunctionCallError::RespondToModel(message);
-                    dispatch_trace.record_failed(&err);
-                    notify_tool_finish_if_unclaimed(
-                        &invocation,
-                        call_state.as_deref(),
-                        ToolCallOutcome::Blocked,
-                    )
-                    .await;
-                    return Err(err);
+        match apply_pre_tool_use(tool.as_ref(), &mut invocation).await {
+            Ok(()) => {}
+            Err(PreToolUseError::Blocked(message)) => {
+                if tool.is_builtin_control_tool() {
+                    let mut analytics = ControlToolCallGuard::new(&invocation);
+                    analytics.finish(ControlToolCallStatus::Rejected);
                 }
-                PreToolUseHookResult::Continue {
-                    updated_input: Some(updated_input),
-                } => match tool.with_updated_hook_input(invocation.clone(), updated_input) {
-                    Ok(mut updated_invocation) => {
-                        if updated_invocation.payload != invocation.payload {
-                            Arc::make_mut(&mut updated_invocation.step_context)
-                                .serving_assessment = None;
-                        }
-                        invocation = updated_invocation;
-                    }
-                    Err(err) => return Err(fail_before_execution(&invocation, err).await),
-                },
-                PreToolUseHookResult::Continue {
-                    updated_input: None,
-                } => {}
+                let err = FunctionCallError::RespondToModel(message);
+                dispatch_trace.record_failed(&err);
+                notify_tool_finish_if_unclaimed(
+                    &invocation,
+                    call_state.as_deref(),
+                    ToolCallOutcome::Blocked,
+                )
+                .await;
+                return Err(err);
             }
+            Err(PreToolUseError::Failed(err)) => {
+                return Err(fail_before_execution(dispatch_trace, &invocation, err).await);
+            }
+            Err(PreToolUseError::Cancelled(err)) => return Err(err),
         }
 
         if let Some(assessment) = &invocation.step_context.serving_assessment {
@@ -915,7 +927,7 @@ impl ToolRegistry {
         if registered_tool.native_review == NativeReview::Required
             && let Err(err) = super::review_native_tool_call(&invocation).await
         {
-            return Err(fail_before_execution(&invocation, err).await);
+            return Err(fail_before_execution(dispatch_trace, &invocation, err).await);
         }
 
         let invocation_guard = reservation.activate(&invocation);
@@ -1102,6 +1114,55 @@ async fn handle_any_tool(
         .await?;
     }
     Ok(result)
+}
+
+pub(crate) enum PreToolUseError {
+    Blocked(String),
+    Failed(FunctionCallError),
+    Cancelled(FunctionCallError),
+}
+
+pub(crate) async fn apply_pre_tool_use(
+    tool: &dyn CoreToolRuntime,
+    invocation: &mut ToolInvocation,
+) -> Result<(), PreToolUseError> {
+    let Some(payload) = tool.pre_tool_use_payload(invocation) else {
+        return Ok(());
+    };
+    let cwd = tool
+        .pre_tool_use_cwd(invocation)
+        .map_err(PreToolUseError::Failed)?;
+    let outcome = run_pre_tool_use_hooks(
+        &invocation.session,
+        &invocation.step_context,
+        invocation.call_id.clone(),
+        &payload.tool_name,
+        &payload.tool_input,
+        cwd,
+        &invocation.environments.hook_ids(),
+    )
+    .or_cancel_tool(&invocation.cancellation_token)
+    .await
+    .map_err(PreToolUseError::Cancelled)?;
+
+    match outcome {
+        PreToolUseHookResult::Blocked(reason) => Err(PreToolUseError::Blocked(reason)),
+        PreToolUseHookResult::Continue {
+            updated_input: None,
+        } => Ok(()),
+        PreToolUseHookResult::Continue {
+            updated_input: Some(input),
+        } => {
+            let mut updated = tool
+                .with_updated_hook_input(invocation.clone(), input)
+                .map_err(PreToolUseError::Failed)?;
+            if updated.payload != invocation.payload {
+                Arc::make_mut(&mut updated.step_context).serving_assessment = None;
+            }
+            *invocation = updated;
+            Ok(())
+        }
+    }
 }
 
 fn function_hook_tool_name(invocation: &ToolInvocation) -> HookToolName {

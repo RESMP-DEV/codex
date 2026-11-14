@@ -12,7 +12,6 @@ use codex_config::types::MemoriesConfig;
 use codex_core::Prompt;
 use codex_core::config::Config;
 use codex_protocol::MemoryVersion;
-use codex_protocol::ResponseItemId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -292,7 +291,7 @@ mod job {
             MemoryVersion::V1 => vec![ResponseItem::Message {
                 status: None,
                 encrypted_content: None,
-                id: Some(ResponseItemId::new("msg")),
+                id: Some(context.item_id_generator()("msg")),
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText { text: input_text }],
                 phase: None,
@@ -312,7 +311,7 @@ mod job {
         prompt.output_schema_strict = true;
 
         let (result, token_usage) = context
-            .stream_stage_one_prompt(config, &prompt, stage_one_context)
+            .stream_stage_one_prompt(config, prompt, stage_one_context)
             .await?;
 
         let output = StageOneOutput::parse(&result, config.memories.version)?;

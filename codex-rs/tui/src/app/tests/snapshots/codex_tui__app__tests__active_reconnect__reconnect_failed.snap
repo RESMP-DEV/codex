@@ -1,11 +1,11 @@
 ---
 source: tui/src/app/tests/active_reconnect_tests.rs
-expression: "format!(\"{error}\\n{}\", crate::chatwidget::tests::helpers::strip_racy_status_lines(render_bottom_popup(&app.chat_widget, 80)))"
+expression: "format!(\"{error}\\n{}\",\ncrate::chatwidget::tests::helpers::strip_racy_status_lines(super::disconnect::normalize_reconnect_status(&render_bottom_popup(&app.chat_widget,\n80))))"
 ---
 Automatic reconnect timed out while connecting to the server.
-• Reconnect failed — check the endpoint, then relaunch (0s)
 
 
 › Ask Codex to do anything
 
+  GPT-5.6-Sol default · /tmp/project
   ⌃c quit

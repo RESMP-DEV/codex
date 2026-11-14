@@ -1,5 +1,7 @@
 use crate::ApplicationRequirementsToml;
 use codex_features::FeatureToml;
+use codex_features::RuntimeAgentInstancesConfigToml;
+use codex_features::RuntimeAuthMode;
 use codex_model_provider_info::ModelProviderInfo;
 pub use codex_model_provider_info::ResidencyRequirement;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -388,6 +390,18 @@ pub enum NetworkDomainPermissionToml {
     Deny,
 }
 
+impl NetworkDomainPermissionToml {
+    /// Unsupported patterns retain their exact spelling. They can never compare equal
+    /// to a valid selector and disappear when two published declarations are combined.
+    pub(crate) fn pattern_identity(self, pattern: &str) -> Result<String, String> {
+        match self {
+            Self::Allow => codex_network_proxy::canonical_allow_pattern(pattern),
+            Self::Deny => codex_network_proxy::canonical_deny_pattern(pattern),
+        }
+        .map_err(|_| pattern.to_owned())
+    }
+}
+
 impl std::fmt::Display for NetworkDomainPermissionToml {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let permission = match self {
@@ -452,6 +466,45 @@ pub struct NetworkRequirementsToml {
     /// Requirements-only header injections. These annotate matching requests
     /// without changing whether non-matching requests are allowed.
     pub header_injections: Option<Vec<NetworkHeaderInjectionToml>>,
+}
+
+impl NetworkRequirementsToml {
+    /// Compare the selector identities used by the proxy without modifying the published
+    /// representation. Keep allow and deny contributions distinct, including shadowed grants.
+    pub(crate) fn describes_same_policy(&self, other: &Self) -> bool {
+        if self == other {
+            return true;
+        }
+        let domain_rules = |policy: &Self| {
+            policy.domains.as_ref().map(|domains| {
+                domains
+                    .entries
+                    .iter()
+                    .map(|(pattern, &rule)| (rule, rule.pattern_identity(pattern)))
+                    .collect::<BTreeSet<_>>()
+            })
+        };
+        let review_patterns = |policy: &Self| {
+            policy.review_domains.as_ref().map(|patterns| {
+                patterns
+                    .iter()
+                    .map(|pattern| {
+                        codex_network_proxy::canonical_review_pattern(pattern)
+                            .map_err(|_| pattern.to_owned())
+                    })
+                    .collect::<BTreeSet<_>>()
+            })
+        };
+        if domain_rules(self) != domain_rules(other)
+            || review_patterns(self) != review_patterns(other)
+        {
+            return false;
+        }
+        let mut comparable = other.clone();
+        comparable.domains.clone_from(&self.domains);
+        comparable.review_domains.clone_from(&self.review_domains);
+        self == &comparable
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -694,10 +747,55 @@ impl<'de> Deserialize<'de> for FilesystemRequirementsToml {
 #[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct PermissionsRequirementsToml {
     pub filesystem: Option<FilesystemRequirementsToml>,
-    // For legacy reasons, `filesystem` stays reserved for requirements-level
-    // filesystem constraints and cannot name a profile.
+    /// Shared network constraints. Policy publishers must use `experimental_network`
+    /// until all clients that can read the policy support the chosen replacement.
+    // Keep the optional raw payload out of config-loading futures' inline storage.
+    #[serde(default, deserialize_with = "deserialize_permissions_network")]
+    pub network: Option<Box<NetworkRequirementsToml>>,
+    // `filesystem` and `network` are reserved for requirements-level
+    // constraints and cannot name profiles.
     #[serde(default, flatten)]
     pub profiles: BTreeMap<String, PermissionProfileToml>,
+}
+
+impl PermissionsRequirementsToml {
+    /// Split out the independent network policy without leaving an empty profile table behind.
+    pub(crate) fn take_network(table: &mut Option<Self>) -> Option<Box<NetworkRequirementsToml>> {
+        let permissions = table.as_mut()?;
+        let network = permissions.network.take()?;
+        if permissions.filesystem.is_none() && permissions.profiles.is_empty() {
+            *table = None;
+        }
+        Some(network)
+    }
+}
+
+fn deserialize_permissions_network<'de, D>(
+    deserializer: D,
+) -> Result<Option<Box<NetworkRequirementsToml>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let table = toml::Table::deserialize(deserializer)?;
+    if table.is_empty()
+        || [
+            "description",
+            "extends",
+            "workspace_roots",
+            "filesystem",
+            "network",
+        ]
+        .iter()
+        .any(|key| table.contains_key(*key))
+    {
+        return Err(D::Error::custom(
+            "`permissions.network` in requirements.toml is reserved for shared network constraints; rename the managed profile (for example, to `network-access`) and update `default_permissions`, `allowed_permission_profiles`, and `extends`; check saved session profile references. Profiles named `network` in config.toml remain valid",
+        ));
+    }
+    toml::Value::Table(table)
+        .try_into()
+        .map(Some)
+        .map_err(D::Error::custom)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -909,14 +1007,46 @@ impl WindowsRequirementsToml {
 }
 
 #[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(from = "FeatureRequirementsInput")]
 pub struct FeatureRequirementsToml {
-    #[serde(flatten)]
     pub entries: BTreeMap<String, bool>,
+    pub runtime_auth_mode: Option<RuntimeAuthMode>,
+}
+
+// Keep boolean requirements unchanged while accepting the same typed runtime setting as config.
+#[derive(Deserialize)]
+struct FeatureRequirementsInput {
+    runtime_agent_instances: Option<FeatureToml<RuntimeAgentInstancesConfigToml>>,
+    #[serde(flatten)]
+    entries: BTreeMap<String, bool>,
+}
+
+impl From<FeatureRequirementsInput> for FeatureRequirementsToml {
+    fn from(input: FeatureRequirementsInput) -> Self {
+        let mut entries = input.entries;
+        if let Some(enabled) = input
+            .runtime_agent_instances
+            .as_ref()
+            .and_then(FeatureToml::enabled)
+        {
+            entries.insert("runtime_agent_instances".to_string(), enabled);
+        }
+        let runtime_auth_mode = input
+            .runtime_agent_instances
+            .and_then(|feature| match feature {
+                FeatureToml::Enabled(_) => None,
+                FeatureToml::Config(config) => config.mode,
+            });
+        Self {
+            entries,
+            runtime_auth_mode,
+        }
+    }
 }
 
 impl FeatureRequirementsToml {
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.runtime_auth_mode.is_none()
     }
 }
 
@@ -1254,6 +1384,8 @@ pub struct ConfigRequirementsWithSources {
     pub network: Option<Sourced<NetworkRequirementsToml>>,
     pub application: Option<Sourced<ApplicationRequirementsToml>>,
     pub permissions: Option<Sourced<PermissionsRequirementsToml>>,
+    /// Kept separate from profiles and filesystem so each retains its own precedence and source.
+    pub permissions_network: Option<Box<Sourced<NetworkRequirementsToml>>>,
     pub auto_review: Option<Sourced<AutoReviewRequirementsToml>>,
     pub models: Option<Sourced<ModelsRequirementsToml>>,
     pub additional_developer_instructions: Option<Sourced<String>>,
@@ -1262,6 +1394,23 @@ pub struct ConfigRequirementsWithSources {
 }
 
 impl ConfigRequirementsWithSources {
+    pub(crate) fn validate_network_spelling(&self) -> Result<(), ConstraintError> {
+        if let (Some(nested), Some(top_level)) = (&self.permissions_network, &self.network)
+            && !nested.value.describes_same_policy(&top_level.value)
+        {
+            return Err(ConstraintError::InvalidValue {
+                field_name: "permissions.network",
+                candidate: format!(
+                    "configured together with top-level network requirements from {}",
+                    top_level.source
+                ),
+                allowed: "legacy and permissions.network requirements must describe the same network policy".to_string(),
+                requirement_source: nested.source.clone(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn merge_unset_fields(&mut self, source: RequirementSource, other: ConfigRequirementsToml) {
         // For every field in `other` that is `Some`, if the corresponding field
         // in `self` is `None`, copy the value from `other` into `self`.
@@ -1329,6 +1478,11 @@ impl ConfigRequirementsWithSources {
         } = &other;
 
         let mut other = other;
+        if let Some(network) = PermissionsRequirementsToml::take_network(&mut other.permissions)
+            && self.permissions_network.is_none()
+        {
+            self.permissions_network = Some(Box::new(Sourced::new(*network, source.clone())));
+        }
         if other
             .guardian_policy_config
             .as_deref()
@@ -1440,6 +1594,8 @@ impl ConfigRequirementsWithSources {
         }
     }
 
+    /// Public loader view. Older runtime clients still read the top-level
+    /// network field when selecting an executor policy, including on resume.
     pub fn into_toml(self) -> ConfigRequirementsToml {
         let ConfigRequirementsWithSources {
             config_server,
@@ -1482,12 +1638,24 @@ impl ConfigRequirementsWithSources {
             network,
             application,
             permissions,
+            permissions_network,
             auto_review,
             models,
             additional_developer_instructions,
             guardian_policy_config,
             guardian_extra_policy,
         } = self;
+        let mut permissions = permissions.map(|sourced| sourced.value);
+        if let Some(network) = permissions_network {
+            permissions.get_or_insert_with(Default::default).network =
+                Some(Box::new(network.value));
+        }
+        let network = network.map(|sourced| sourced.value).or_else(|| {
+            permissions
+                .as_ref()
+                .and_then(|permissions| permissions.network.as_deref())
+                .cloned()
+        });
         ConfigRequirementsToml {
             config_server: config_server.map(|sourced| sourced.value),
             allowed_login_methods: allowed_login_methods.map(|sourced| sourced.value),
@@ -1529,9 +1697,9 @@ impl ConfigRequirementsWithSources {
             apps: apps.map(|sourced| sourced.value),
             rules: rules.map(|sourced| sourced.value),
             enforce_residency: enforce_residency.map(|sourced| sourced.value),
-            network: network.map(|sourced| sourced.value),
+            network,
             application: application.map(|sourced| sourced.value),
-            permissions: permissions.map(|sourced| sourced.value),
+            permissions,
             auto_review: auto_review.map(|sourced| sourced.value),
             models: models.map(|sourced| sourced.value),
             additional_developer_instructions: additional_developer_instructions
@@ -2025,6 +2193,7 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
     type Error = ConstraintError;
 
     fn try_from(toml: ConfigRequirementsWithSources) -> Result<Self, Self::Error> {
+        toml.validate_network_spelling()?;
         // Profile catalog selection remains on ConfigRequirementsToml for
         // config loading and requirements API projection. Managed new-thread
         // defaults also remain there because they are initialization values;
@@ -2070,6 +2239,7 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
             network,
             application,
             permissions,
+            permissions_network,
             auto_review,
             models: _,
             additional_developer_instructions,
@@ -2412,14 +2582,18 @@ impl TryFrom<ConfigRequirementsWithSources> for ConfigRequirements {
                 /*source*/ None,
             ),
         };
-        let network = network.map(|sourced_network| {
-            let Sourced { value, source } = sourced_network;
-            Sourced::new(NetworkConstraints::from(value), source)
-        });
-        let filesystem = permissions.map(|sourced_permissions| {
-            let Sourced { value, source } = sourced_permissions;
-            Sourced::new(FilesystemConstraints::from(value), source)
-        });
+        let network = match (permissions_network, network) {
+            // A dual-published source keeps its original selector text on older executors.
+            (Some(nested), Some(legacy)) if nested.source == legacy.source => Some(legacy),
+            (Some(nested), _) => Some(*nested),
+            (None, legacy) => legacy,
+        }
+        .map(|Sourced { value, source }| Sourced::new(NetworkConstraints::from(value), source));
+        let filesystem = permissions
+            .filter(|permissions| permissions.value.filesystem.is_some())
+            .map(|Sourced { value, source }| {
+                Sourced::new(FilesystemConstraints::from(value), source)
+            });
         let guardian_policy_config_source = guardian_policy_config.map(|sourced| sourced.source);
         let guardian_extra_policy_source = guardian_extra_policy.map(|sourced| sourced.source);
         Ok(ConfigRequirements {
@@ -2726,6 +2900,9 @@ tracestate = { managed = { tenant = "enterprise", region = "us" }, other = { kee
             guardian_policy_config,
             guardian_extra_policy,
         } = toml;
+        let mut permissions = permissions;
+        let permissions_network = PermissionsRequirementsToml::take_network(&mut permissions)
+            .map(|network| Box::new(Sourced::new(*network, RequirementSource::Unknown)));
         ConfigRequirementsWithSources {
             config_server: config_server
                 .map(|value| Sourced::new(value, RequirementSource::Unknown)),
@@ -2791,6 +2968,7 @@ tracestate = { managed = { tenant = "enterprise", region = "us" }, other = { kee
             network: network.map(|value| Sourced::new(value, RequirementSource::Unknown)),
             application: application.map(|value| Sourced::new(value, RequirementSource::Unknown)),
             permissions: permissions.map(|value| Sourced::new(value, RequirementSource::Unknown)),
+            permissions_network,
             auto_review: auto_review.map(|value| Sourced::new(value, RequirementSource::Unknown)),
             models: models.map(|value| Sourced::new(value, RequirementSource::Unknown)),
             additional_developer_instructions: additional_developer_instructions
@@ -2902,6 +3080,30 @@ tracestate = { managed = { tenant = "enterprise", region = "us" }, other = { kee
             ),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn network_requirements_table_cannot_define_a_permission_profile() {
+        for profile_field in [
+            "",
+            "description = 'network profile'",
+            "extends = ':workspace'",
+            "workspace_roots = {}",
+            "filesystem = {}",
+            "network = {}",
+        ] {
+            let err = from_str::<ConfigRequirementsToml>(&format!(
+                "[permissions.network]\n{profile_field}"
+            ))
+            .expect_err("network requirements cannot define a permission profile");
+
+            assert!(
+                err.to_string().contains(
+                    "`permissions.network` in requirements.toml is reserved for shared network constraints; rename the managed profile (for example, to `network-access`) and update `default_permissions`, `allowed_permission_profiles`, and `extends`; check saved session profile references. Profiles named `network` in config.toml remain valid"
+                ),
+                "{profile_field}: unexpected error: {err:#}"
+            );
+        }
     }
 
     #[test]
@@ -3214,6 +3416,7 @@ tracestate = { managed = { tenant = "enterprise", region = "us" }, other = { kee
         ];
         let feature_requirements = FeatureRequirementsToml {
             entries: BTreeMap::from([("personality".to_string(), true)]),
+            ..Default::default()
         };
         let browser_use = BrowserUseRequirementsToml {
             extension: None,
@@ -3410,6 +3613,7 @@ tracestate = { managed = { tenant = "enterprise", region = "us" }, other = { kee
                 network: None,
                 application: None,
                 permissions: None,
+                permissions_network: None,
                 auto_review: Some(Sourced::new(auto_review, source.clone())),
                 models: Some(Sourced::new(models, source.clone())),
                 additional_developer_instructions: Some(Sourced::new(
@@ -4718,6 +4922,7 @@ allowed_approvals_reviewers = ["user"]
                         ("apps".to_string(), false),
                         ("personality".to_string(), true),
                     ]),
+                    ..Default::default()
                 },
                 RequirementSource::Unknown,
             ))
@@ -4853,7 +5058,15 @@ command = "python3 /enterprise/hooks/pre.py"
             ))
         };
         assert_eq!(parse("network_proxy")?, parse("experimental_network")?);
-
+        for table in ["network_proxy", "experimental_network"] {
+            let dual: ConfigRequirementsToml = from_str(&format!(
+                "[{table}]\ndenied_domains = ['2001:db8::1']\n\
+                 [permissions.network]\ndenied_domains = ['2001:0db8:0:0:0:0:0:1']"
+            ))?;
+            let expected = dual.network.clone().map(NetworkConstraints::from);
+            let runtime = ConfigRequirements::try_from(with_unknown_source(dual))?;
+            assert_eq!(runtime.network.map(|network| network.value), expected);
+        }
         for values in ["", "enabled = true"] {
             let both = format!("[network_proxy]\n{values}\n[experimental_network]\n{values}");
             assert!(from_str::<ConfigRequirementsToml>(&both).is_err());
@@ -4862,45 +5075,31 @@ command = "python3 /enterprise/hooks/pre.py"
     }
 
     #[test]
-    fn network_proxy_does_not_reserve_the_managed_network_profile() -> Result<()> {
-        let requirements: ConfigRequirementsToml = from_str(
-            "[network_proxy]\nenabled = true\n[permissions.network]\nextends = ':workspace'",
-        )?;
-        assert!(
-            requirements
-                .permissions
-                .expect("managed permissions")
-                .profiles
-                .contains_key("network")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn network_requirements_are_preserved_as_constraints_with_source() -> Result<()> {
+    fn permissions_network_requirements_are_preserved_as_constraints_with_source() -> Result<()> {
         let toml_str = r#"
-            [experimental_network]
+            [permissions.network]
             enabled = true
             allow_upstream_proxy = false
             dangerously_allow_all_unix_sockets = true
             managed_allowed_domains_only = true
             allow_local_binding = false
+            future_setting = "ignored"
 
-            [experimental_network.domains]
+            [permissions.network.domains]
             "api.example.com" = "allow"
             "*.openai.com" = "allow"
             "blocked.example.com" = "deny"
 
-            [experimental_network.unix_sockets]
+            [permissions.network.unix_sockets]
             "/tmp/example.sock" = "allow"
             "/tmp/blocked.sock" = "deny"
 
-            [[experimental_network.header_injections]]
+            [[permissions.network.header_injections]]
             host = "api.example.com"
             methods = ["POST"]
             path_prefixes = ["/console/v1"]
 
-            [experimental_network.header_injections.headers]
+            [permissions.network.header_injections.headers]
             "x-statsig-change-source" = "codex"
         "#;
 
@@ -4983,6 +5182,7 @@ command = "python3 /enterprise/hooks/pre.py"
         let toml_str = r#"
             [experimental_network]
             enabled = true
+            description = "ignored legacy metadata"
             allow_upstream_proxy = false
             dangerously_allow_all_unix_sockets = true
             allowed_domains = ["api.example.com", "*.openai.com"]

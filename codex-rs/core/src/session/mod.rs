@@ -266,6 +266,7 @@ mod reasoning_effort;
 mod submission;
 pub(crate) use reasoning_effort::RequestEffortUsage;
 pub(crate) use submission::Submission;
+mod cloud_plugins;
 mod input_queue;
 mod mcp;
 mod mcp_prewarm;
@@ -4325,7 +4326,7 @@ impl Session {
 
     #[expect(
         clippy::await_holding_invalid_type,
-        reason = "step settings and both environment snapshots must be captured under active_turn then state"
+        reason = "step settings and environments require active_turn then state; cloud snapshots require the catalog publication lock"
     )]
     #[tracing::instrument(name = "step_context.capture", level = "info", skip_all)]
     async fn capture_step_context_inner(
@@ -4495,6 +4496,7 @@ impl Session {
             {
                 required_servers.push(codex_mcp::CODEX_APPS_MCP_SERVER_NAME.to_owned());
             }
+            let catalogs = self.lock_cloud_catalogs().await;
             let (mcp, prepared_recommendations) = tokio::join!(
                 // MCP refresh can be large; keep it off the sampling request's stack.
                 Box::pin(self.mcp_runtime_for_step(
@@ -4615,6 +4617,7 @@ impl Session {
                     .or_cancel(cancellation_token)
                     .await?;
             }
+            drop(catalogs);
             extension_data.insert(selected_plugins);
             let tool_router = turn::built_tools(
                 self.as_ref(),
@@ -5106,7 +5109,7 @@ impl Session {
         let turn_context = step_context.turn.as_ref();
         let mut developer_sections = Vec::<RenderedFragment>::with_capacity(8);
         let mut contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
-        let mut separate_developer_messages = Vec::<ResponseItem>::new();
+        let mut standalone_items = Vec::<ResponseItem>::new();
         let mut context_window_hints = Vec::new();
         let (session_source, auto_compact_window_ids) = {
             let state = self.state.lock().await;
@@ -5230,14 +5233,13 @@ impl Session {
                     ContentItemMetadata::tool(source_tool_namespace.map(Into::into)),
                 ));
             }
-            separate_developer_messages.push(
+            standalone_items.push(
                 crate::context::TokenBudgetContext::new(
                     session_source
                         .get_agent_path()
                         .unwrap_or_else(codex_protocol::AgentPath::root),
-                    auto_compact_window_ids.first_window_id,
-                    auto_compact_window_ids.previous_window_id,
-                    auto_compact_window_ids.window_id,
+                    auto_compact_window_ids,
+                    step_context.token_budget.as_ref(),
                 )
                 .render_with_hints(context_window_hints),
             );
@@ -5278,13 +5280,13 @@ impl Session {
                     "developer"
                         if fragment.markers().0 == MultiAgentRoleInstructions::type_markers().0 =>
                     {
-                        separate_developer_messages.push(fragment.render_fragment().into());
+                        standalone_items.push(fragment.render_fragment().into());
                     }
                     "developer"
                         if update.placement == Placement::Standalone
                             && fragment.markers().0.is_empty() =>
                     {
-                        separate_developer_messages.push(fragment.render_fragment().into());
+                        standalone_items.push(fragment.render_fragment().into());
                     }
                     "developer" => developer_sections.push(fragment.render_fragment()),
                     "user" => contextual_user_sections.push(fragment.render_fragment()),
@@ -5310,7 +5312,7 @@ impl Session {
             ) {
                 items.push(developer_message);
             }
-            items.append(&mut separate_developer_messages);
+            items.append(&mut standalone_items);
             if let Some(initial_multi_agent_mode) = initial_multi_agent_mode
                 && let Some(message) =
                     crate::context_manager::updates::build_rendered_message(vec![

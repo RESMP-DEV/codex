@@ -608,6 +608,14 @@ impl App {
                 }
                 tui.frame_requester().schedule_frame();
             }
+            AppEvent::ResumeUnarchivedThread(thread_id) => {
+                if self.current_displayed_thread_id() == Some(thread_id)
+                    && self.chat_widget.is_archived_view()
+                    && self.thread_event_channels.get(&thread_id).is_some_and(|channel| !channel.archived)
+                {
+                    archived_thread::resume_displayed_thread(self, tui, app_server, thread_id).await;
+                }
+            }
             AppEvent::ResumeSessionByIdOrName(id_or_name) => {
                 match crate::lookup_session_target_with_app_server(
                     crate::resume_picker::SessionPickerAction::Resume,
@@ -3274,9 +3282,11 @@ impl App {
                 }
             }
             AppEvent::OpenAgentsOverview => self.open_agents_overview(app_server),
-            AppEvent::SearchAgentsOverview(id, limit) => self.search_agents_overview(app_server.request_handle(), id, limit),
-            AppEvent::AgentsOverviewSearchPage { id, rows, cursor, ok } => {
-                self.apply_agents_overview_search_page(id, rows, cursor, ok);
+            AppEvent::SearchAgentsOverview(id, limit) => {
+                self.search_agents_overview(app_server, id, limit);
+            }
+            AppEvent::AgentsOverviewSearchPage { id, backend_id, rows, cursor, ok } => {
+                self.apply_agents_overview_search_page(id, backend_id, rows, cursor, ok);
             }
             AppEvent::ShowMoreAgentsOverview => self.show_more_agents_overview(app_server),
             AppEvent::RefreshViewedThread { backend_id, thread_id, revision } => {

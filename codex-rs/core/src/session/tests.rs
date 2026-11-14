@@ -2,9 +2,13 @@ use crate::McpRefreshReason;
 use crate::agent::LocalAgentControl;
 use codex_mcp::McpServerKey;
 use codex_protocol::ContextWindowId;
+use codex_protocol::RequestCountry;
 use codex_thread_store::ThreadPersistenceMetadata;
 #[path = "compaction_replay_tests.rs"]
 mod compaction_replay_tests;
+
+#[path = "mailbox_prewarm_tests.rs"]
+mod mailbox_prewarm_tests;
 
 #[path = "network_policy_tests.rs"]
 mod network_policy_tests;
@@ -2617,92 +2621,8 @@ async fn inter_agent_communication_waits_for_confirmed_delivery_persistence() {
     assert_eq!(messages, vec![message]);
 }
 
-#[tokio::test]
-async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
-    let (mut session, turn_context) = make_session_and_context().await;
-    let rollout_path = attach_thread_persistence(&mut session).await;
-    let communication = InterAgentCommunication::new(
-        AgentPath::root().join("worker").expect("worker path"),
-        AgentPath::root(),
-        Vec::new(),
-        "child done".to_string(),
-        /*trigger_turn*/ false,
-    );
-    let mut expected_item = communication.to_model_input_item();
-    let mut expected = serde_json::to_value(&expected_item).unwrap();
-    expected["internal_chat_message_metadata_passthrough"] = json!({
-        "content_item_metadata": [{"harness_injected": true, "source_tool_namespace": "collaboration"}],
-    });
-    expected_item = serde_json::from_value(expected).unwrap();
-    expected_item.set_turn_id_if_missing(&turn_context.sub_id);
-
-    session
-        .record_inter_agent_communication(&turn_context, turn_context.model_info(), communication)
-        .await;
-
-    let recorded_history = session.clone_history().await;
-    let recorded_items = raw_history_items(&recorded_history);
-    let create_time = recorded_items[0]
-        .executed_tool_call_metadata()
-        .and_then(|metadata| metadata.create_time.clone())
-        .expect("locally authored agent message should receive a creation timestamp");
-    assert!(create_time.as_f64().is_some_and(|seconds| seconds > 0.0));
-    expected_item.set_create_time_if_missing(create_time);
-
-    assert_eq!(
-        strip_response_item_ids(&recorded_items),
-        strip_response_item_ids(std::slice::from_ref(&expected_item))
-    );
-
-    session.flush_rollout().await.expect("rollout should flush");
-    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
-        .await
-        .expect("read rollout history")
-    else {
-        panic!("expected resumed rollout history");
-    };
-    let persisted_items = resumed
-        .history
-        .iter()
-        .filter(|item| {
-            matches!(
-                item,
-                RolloutItem::ResponseItem(_)
-                    | RolloutItem::InterAgentCommunication(_)
-                    | RolloutItem::InterAgentCommunicationMetadata { .. }
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let expected_persisted_items = vec![
-        RolloutItem::InterAgentCommunicationMetadata {
-            trigger_turn: false,
-        },
-        RolloutItem::ResponseItem(ResponseItemEnvelope {
-            item: expected_item.clone(),
-            metadata: Some(CodexHarnessMetadata {
-                user_input_order: Some(0),
-                history_sequence: Some(1),
-                sampled_through_sequence: Some(0),
-                ..Default::default()
-            }),
-        }),
-    ];
-    assert_eq!(
-        strip_response_item_ids_from_json(serde_json::to_value(persisted_items).unwrap()),
-        strip_response_item_ids_from_json(serde_json::to_value(expected_persisted_items).unwrap())
-    );
-
-    let (resumed_session, _resumed_turn_context) = make_session_and_context().await;
-    resumed_session
-        .record_initial_history(InitialHistory::Resumed(resumed))
-        .await;
-    assert_eq!(
-        strip_response_item_ids(&raw_history_items(&resumed_session.clone_history().await)),
-        strip_response_item_ids(std::slice::from_ref(&expected_item))
-    );
-    assert_eq!(resumed_session.reserve_user_input_order().await, 1);
-}
+#[path = "mail_publication_tests.rs"]
+mod mail_publication_tests;
 
 #[tokio::test]
 async fn record_inter_agent_communication_preserves_item_id_in_rollout_and_resume() {
@@ -4410,6 +4330,7 @@ async fn set_rate_limits_retains_previous_credits() {
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
         environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -4534,6 +4455,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
         environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -5160,6 +5082,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
         environments: Vec::new(),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -6261,6 +6184,7 @@ async fn compaction_persists_resume_metadata_and_companion_records() {
             thread_id: session.thread_id(),
             tools: Vec::new(),
         })),
+        observation_clock_floor_ms: None,
         multi_agent_version: Some(MultiAgentVersion::V2),
         last_started_turn_id: Some(turn_context.sub_id.clone()),
         turn_attribution: Some(codex_history::TurnAttribution {
@@ -6754,7 +6678,7 @@ async fn response_metadata_builders_capture_fresh_mcp_attribution() {
         .await;
     let compaction = session
         .compaction_responses_metadata(
-            &turn_context,
+            &step_context,
             CompactionTurnMetadata::new(
                 CompactionTrigger::Auto,
                 CompactionReason::ContextLimit,
@@ -6829,6 +6753,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             Some(Arc::clone(&auth_manager)),
         ),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -7167,6 +7092,7 @@ async fn make_session_with_config_and_rx(
             Some(Arc::clone(&auth_manager)),
         ),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -7306,6 +7232,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
             Some(Arc::clone(&auth_manager)),
         ),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
@@ -9178,6 +9105,7 @@ where
             Some(Arc::clone(&auth_manager)),
         ),
         step_settings: Arc::new(StepSettings {
+            request_country: RequestCountry::default(),
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,

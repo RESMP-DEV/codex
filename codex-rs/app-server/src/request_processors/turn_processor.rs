@@ -298,6 +298,7 @@ impl TurnRequestProcessor {
             Op::TurnSettings {
                 turn_id: params.turn_id,
                 update: TurnSettingsUpdate {
+                    request_country: None,
                     approvals_reviewer: params
                         .approvals_reviewer
                         .map(codex_app_server_protocol::ApprovalsReviewer::to_core),
@@ -959,6 +960,7 @@ impl TurnRequestProcessor {
         if has_any_overrides {
             thread
                 .preview_thread_settings_overrides(CodexThreadSettingsOverrides {
+                    request_country: None,
                     turn_extension_init: None,
                     disabled_plugin_ids: disabled_plugin_ids.clone(),
                     environments: environment_requests.clone(),
@@ -985,6 +987,7 @@ impl TurnRequestProcessor {
         }
 
         Ok(codex_protocol::protocol::ThreadSettingsOverrides {
+            request_country: None,
             disabled_plugin_ids,
             environments: environment_requests,
             runtime_workspace_roots,

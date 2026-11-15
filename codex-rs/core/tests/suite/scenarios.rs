@@ -4581,6 +4581,59 @@ async fn async_compaction_reuses_pending_work(
     let accounting =
         (outcome == PendingCompactionOutcome::Success).then(|| Arc::new(HostAccounting::default()));
     let mut builder = test_codex();
+    let observe_attempts = outcome == PendingCompactionOutcome::Success && !manual;
+    let timeout = Duration::from_secs(/*secs*/ 20);
+    let post_started = Arc::new(tokio::sync::Notify::new());
+    let (release_post, wait_for_release) = std::sync::mpsc::channel();
+    let (record, recorded) = std::sync::mpsc::channel();
+    // The harness owns the loopback MCP server. Hook inputs and waits do not
+    // depend on a shell or filesystem shared with the tool environment.
+    let _hook_server = if observe_attempts {
+        let server = start_mock_server().await;
+        core_test_support::hooks::mount_hook_mcp(
+            &server,
+            "compaction-observer",
+            &["pre", "post"],
+            {
+                let started = Arc::clone(&post_started);
+                let release = std::sync::Mutex::new(wait_for_release);
+                move |params| {
+                    record.send(params.clone()).expect("record hook call");
+                    if observe_attempts
+                        && params["name"] == "post"
+                        && params["arguments"]["kind"] == "background_compaction"
+                    {
+                        started.notify_one();
+                        release
+                            .lock()
+                            .expect("post-hook gate")
+                            .recv_timeout(timeout)
+                            .expect("release background post-hook");
+                    }
+                    json!({"content": []})
+                }
+            },
+        )
+        .await;
+        let url = format!("{}/repl", server.uri());
+        builder = builder.with_pre_build_hook(move |home| {
+            let hook = |tool, input| json!([{"hooks": [{
+                "type": "mcp_tool", "server": "compaction-observer", "tool": tool, "input": input
+            }]}]);
+            let hooks = json!({
+                "PreModelRequest": hook("pre", json!({"kind": "${kind}", "request_id": "${request_id}"})),
+                "PostModelRequest": hook("post", json!({"kind": "${kind}", "request_id": "${request_id}", "response_id": "${response_id}", "token_usage": "${token_usage}"})),
+            });
+            let config = json!({"hooks": hooks, "mcp_servers": {"compaction-observer": {
+                "url": url, "environment_id": super::rmcp_client::remote_aware_environment_id()
+            }}});
+            std::fs::write(home.join("config.toml"), toml::to_string(&config).expect("serialize hook config"))
+                .expect("install compaction hooks");
+        });
+        Some(server)
+    } else {
+        None
+    };
     if let Some(accounting) = &accounting {
         let mut extensions = ExtensionRegistryBuilder::new();
         extensions.thread_lifecycle_contributor(accounting.clone());
@@ -4597,6 +4650,11 @@ async fn async_compaction_reuses_pending_work(
         },
         env,
         move |config| {
+            if observe_attempts {
+                config.response_process_mode =
+                    codex_config::config_toml::ResponseProcessMode::AfterCompleteResponse;
+                core_test_support::hooks::trust_discovered_hooks(config);
+            }
             if over_budget {
                 config.async_compaction_threshold_percent = 1;
                 config.model_auto_compact_token_limit = Some(5_000);
@@ -4605,7 +4663,6 @@ async fn async_compaction_reuses_pending_work(
     )
     .await?;
     test.codex.ensure_rollout_materialized().await;
-    let timeout = Duration::from_secs(/*secs*/ 20);
     test.submit_text_turn("first").await?;
     if has_background {
         tokio::time::timeout(timeout, streaming.wait_for_request_count(/*count*/ 2)).await?;
@@ -4678,6 +4735,29 @@ async fn async_compaction_reuses_pending_work(
     if has_background && let Some(release_background) = release_background {
         release_background.send(()).expect("release pending result");
     }
+    if observe_attempts {
+        tokio::time::timeout(timeout, post_started.notified()).await?;
+        // The collector bills a background terminal event before returning its
+        // candidate. A blocked post-hook must still hold that event.
+        let billed_while_held = accounting
+            .as_ref()
+            .expect("successful background attempt")
+            .reports
+            .lock()
+            .expect("usage reports")
+            .iter()
+            .any(|report| {
+                report
+                    .usage
+                    .as_ref()
+                    .is_some_and(|usage| usage.total_tokens == BACKGROUND_TOKENS)
+            });
+        release_post.send(()).expect("release the compaction hook");
+        assert!(
+            !billed_while_held,
+            "background usage reached the collector before its post-hook finished"
+        );
+    }
     let EventMsg::ItemStarted(started) = started else {
         unreachable!();
     };
@@ -4727,12 +4807,50 @@ async fn async_compaction_reuses_pending_work(
         let reports = accounting.reports.lock().expect("usage reports");
         let charged_turns: Vec<_> = reports
             .iter()
-            .filter(|report| report.usage.total_tokens == BACKGROUND_TOKENS)
+            .filter(|report| {
+                report
+                    .usage
+                    .as_ref()
+                    .is_some_and(|usage| usage.total_tokens == BACKGROUND_TOKENS)
+            })
             .map(|report| &report.turn_id)
             .collect();
         assert_eq!(charged_turns, [&usage("seed").turn_id]);
     }
     let continuation = usage("continuation");
+    if observe_attempts {
+        let calls: Vec<_> = recorded.try_iter().collect();
+        let compactions = |tool: &str| {
+            calls
+                .iter()
+                .filter(|call| call["name"] == tool)
+                .map(|call| &call["arguments"])
+                .filter(|input| input["kind"] != "sampling")
+                .collect::<Vec<_>>()
+        };
+        let pre = compactions("pre");
+        let post = compactions("post");
+        assert_eq!(
+            (pre.len(), post.len()),
+            (1, 1),
+            "adopting the candidate must not run a second attempt"
+        );
+        let background_id = post[0]["request_id"]
+            .as_str()
+            .expect("background request ID");
+        assert_eq!(pre[0]["request_id"], background_id);
+        assert_eq!(pre[0]["kind"], "background_compaction");
+        assert_eq!(post[0]["kind"], pre[0]["kind"]);
+        assert_eq!(post[0]["response_id"], "background");
+        assert_eq!(post[0]["token_usage"]["total_tokens"], BACKGROUND_TOKENS);
+        let seed_id = calls
+            .iter()
+            .map(|call| &call["arguments"])
+            .find(|input| input["response_id"] == "seed")
+            .and_then(|input| input["request_id"].as_str())
+            .expect("ordinary seed request ID");
+        assert_ne!(seed_id, background_id);
+    }
     assert_eq!(
         (
             continuation.turn_token_usage.total_tokens,

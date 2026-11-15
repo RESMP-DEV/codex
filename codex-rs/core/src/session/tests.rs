@@ -305,6 +305,7 @@ impl StepContext {
         settings.service_tier = turn.config.service_tier.clone();
         Arc::new(Self {
             sampled_through_sequence: None,
+            turn_cancellation: tokio_util::sync::CancellationToken::new(),
             preempt: turn
                 .config
                 .features
@@ -3397,7 +3398,7 @@ async fn record_token_usage_info_notifies_extension_contributors(
         .record_token_usage_info(
             &turn_context,
             &turn_context.initial_settings,
-            Some(&first_usage),
+            first_usage.clone().into(),
             crate::session::TokenUsageContext::Sampling {
                 includes_reasoning: true,
                 input_item_count: 0,
@@ -3409,7 +3410,7 @@ async fn record_token_usage_info_notifies_extension_contributors(
         .record_token_usage_info(
             &turn_context,
             &turn_context.initial_settings,
-            Some(&second_usage),
+            second_usage.clone().into(),
             context,
         )
         .await
@@ -6897,6 +6898,12 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_thread_init: codex_extension_api::ExtensionDataInit::default(),
         client_mcp_extensions: ClientMcpExtensions::default(),
         local_agent_runtime: agent_control.runtime.clone(),
+        budget_policy: crate::rollout_budget::ThreadBudgetPolicy::new(
+            crate::rollout_budget::ThreadBudgetAccount::Native(Arc::clone(
+                &agent_control.runtime.rollout_budget,
+            )),
+        )
+        .expect("test budget policy"),
         agent_control: Arc::new(agent_control),
         network_proxy: arc_swap::ArcSwapOption::from(None),
         network_proxy_audit_metadata: crate::config::NetworkProxyAuditMetadata::default(),
@@ -9248,6 +9255,12 @@ where
         mcp_thread_init: codex_extension_api::ExtensionDataInit::default(),
         client_mcp_extensions: ClientMcpExtensions::default(),
         local_agent_runtime: agent_control.runtime.clone(),
+        budget_policy: crate::rollout_budget::ThreadBudgetPolicy::new(
+            crate::rollout_budget::ThreadBudgetAccount::Native(Arc::clone(
+                &agent_control.runtime.rollout_budget,
+            )),
+        )
+        .expect("test budget policy"),
         agent_control: Arc::new(agent_control),
         network_proxy: arc_swap::ArcSwapOption::from(None),
         network_proxy_audit_metadata: crate::config::NetworkProxyAuditMetadata::default(),
@@ -13172,7 +13185,6 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
         step_context: StepContext::for_test(Arc::clone(&tc)),
         turn_store: Arc::new(codex_extension_api::ExtensionData::new(tc.sub_id.clone())),
         tool_runtime: test_tool_runtime(Arc::clone(&sess), Arc::clone(&tc)).await,
-        defer_tool_dispatch: false,
         cancellation_token: CancellationToken::new(),
     };
 

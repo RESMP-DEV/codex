@@ -104,6 +104,9 @@ impl App {
                     | AppEvent::ManagedWorktreeCreated(_)
                     | AppEvent::AgentsOverviewWorktreeCreated(_)
                     | AppEvent::AgentsOverviewPinToggled { .. }
+                    | AppEvent::OpenAgentsOverview
+                    | AppEvent::ShowMoreAgentsOverview
+                    | AppEvent::AgentsOverviewThreadsLoaded { .. }
                     | AppEvent::AgentsOverviewUsageLoaded { .. }
                     | AppEvent::AppendMessageHistoryEntry { .. }
                     | AppEvent::BeginInitialHistoryReplayBuffer
@@ -3382,13 +3385,14 @@ impl App {
                 self.toggle_agents_overview_pin(app_server, thread_id, pinned);
             }
             AppEvent::AgentsOverviewPinToggled {
+                backend_id,
                 request_id,
                 thread_id,
                 pinned,
                 result,
             } => {
                 self.complete_agents_overview_pin(
-                    app_server, request_id, thread_id, pinned, result,
+                    app_server, backend_id, request_id, thread_id, pinned, result,
                 );
             }
             AppEvent::SuggestThreadName {
@@ -3427,8 +3431,9 @@ impl App {
                 destination,
                 result,
             } => {
-                self.temporary_structured_requests
-                    .remove(&temporary_thread_id);
+                if let Some(temporary_thread_id) = temporary_thread_id {
+                    self.temporary_structured_requests.remove(&temporary_thread_id);
+                }
 
                 if cancellation.is_cancelled() {
                     return Ok(AppRunControl::Continue);

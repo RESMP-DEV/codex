@@ -7,10 +7,13 @@ use crate::compact_retained_tool_outputs::is_retained_tool_output;
 use crate::session::FileAudioDurations;
 
 use crate::Prompt;
-use crate::ResponseStream;
 use crate::client::ModelClientSession;
 use crate::client::ResponsesHttpExecutor;
+use crate::client::SamplingOptions;
 use crate::client_common::ResponseEvent;
+use crate::client_common::SamplingEvent;
+use crate::client_common::SamplingStream;
+use crate::client_common::SamplingUsage;
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
@@ -40,6 +43,7 @@ use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
+use codex_async_utils::OrCancelExt;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
 use codex_features::Feature;
@@ -97,7 +101,7 @@ const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
 
 #[derive(Clone, Copy)]
 enum CompactionRequestKind<'a> {
-    Foreground,
+    Foreground(&'a CancellationToken),
     Background(&'a CancellationToken),
 }
 
@@ -214,7 +218,7 @@ async fn run_remote_compact_task_inner(
             return Err(error);
         }
     }
-    let started_item = if candidate.is_none() {
+    let started_item = if candidate.is_none() && !sess.defer_compaction_start(turn_context, phase) {
         let item = TurnItem::ContextCompaction(ContextCompactionItem::new());
         sess.emit_turn_item_started(turn_context, &item).await;
         Some(item)
@@ -260,10 +264,11 @@ async fn run_remote_compact_task_inner(
     attempt
         .track(sess.as_ref(), status, codex_error, analytics_details)
         .await;
+    let result = sess.finish_compaction(turn_context, phase, result);
     match result {
         Ok(installed) => Ok(installed),
         Err(err)
-            if matches!(err.details(), CodexErrorDetails::TurnAborted)
+            if crate::tasks::ends_turn_as_interrupted(&err)
                 || matches!(phase, CompactionPhase::PostTurn) =>
         {
             Err(err)
@@ -289,8 +294,9 @@ struct RemoteCompactionV2Output {
 }
 
 async fn run_remote_compaction_request_v2(
-    sess: &Session,
-    step_context: &StepContext,
+    request: &mut crate::hook_runtime::sampling::SamplingRequest,
+    sess: &Arc<Session>,
+    step_context: &Arc<StepContext>,
     prompt: &Arc<Prompt>,
     responses_metadata: &CodexResponsesMetadata,
     transport: &mut CompactionRequestTransport<'_>,
@@ -308,14 +314,25 @@ async fn run_remote_compaction_request_v2(
             // Replay the routing token without letting this request change foreground routing.
             let turn_state = Arc::new(turn_state.clone().map(OnceLock::from).unwrap_or_default());
             let http_executor = ResponsesHttpExecutor::new(&sess.services.model_client);
+            let send = http_executor.stream_responses_http(
+                &turn_state,
+                auth_owner.clone(),
+                /*event_sender*/ None,
+                prompt,
+                &settings.model_info,
+                &step_context.session_telemetry,
+                SamplingOptions {
+                    reasoning_effort: effort,
+                    reasoning_summary: settings.reasoning_summary,
+                    service_tier: settings.service_tier.clone(),
+                },
+                responses_metadata,
+                &trace,
+            );
             let stream = tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => return Err(CodexErr::TurnAborted),
-                stream = http_executor.stream_responses_http(
-                    &turn_state, auth_owner.clone(), /*event_sender*/ None, prompt, &settings.model_info, &step_context.session_telemetry, effort,
-                    settings.reasoning_summary, settings.service_tier.clone(), responses_metadata,
-                    &trace,
-                ) => stream?,
+                stream = request.open(sess, step_context, &settings.model_info.slug, &cancellation, send) => stream?,
             };
             return collect_compaction_output(
                 sess,
@@ -334,27 +351,38 @@ async fn run_remote_compaction_request_v2(
         .stream_max_retries()
         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
     let mut retry_state = ResponsesStreamRetryState::default();
+    let cancellation = &step_context.turn_cancellation;
     loop {
-        let result = match client_session
-            .stream(
-                prompt,
-                &settings.model_info,
-                &turn_context.session_telemetry,
-                sess.reasoning_effort_for_request(settings, RequestEffortUsage::Compaction)
-                    .await,
-                settings.reasoning_summary,
-                step_context.settings.service_tier.clone(),
-                responses_metadata,
-                &InferenceTraceContext::disabled(),
+        let result = match request
+            .open(
+                sess,
+                step_context,
+                &settings.model_info.slug,
+                cancellation,
+                client_session.open_model_response(
+                    prompt,
+                    &settings.model_info,
+                    &turn_context.session_telemetry,
+                    SamplingOptions {
+                        reasoning_effort: sess
+                            .reasoning_effort_for_request(settings, RequestEffortUsage::Compaction)
+                            .await,
+                        reasoning_summary: settings.reasoning_summary,
+                        service_tier: step_context.settings.service_tier.clone(),
+                    },
+                    responses_metadata,
+                    &InferenceTraceContext::disabled(),
+                ),
             )
-            .await
+            .or_cancel(cancellation)
+            .await?
         {
             Ok(stream) => {
                 collect_compaction_output(
                     sess,
                     turn_context,
                     stream,
-                    CompactionRequestKind::Foreground,
+                    CompactionRequestKind::Foreground(cancellation),
                 )
                 .await
             }
@@ -386,7 +414,7 @@ async fn run_remote_compaction_request_v2(
 async fn collect_compaction_output(
     sess: &Session,
     turn_context: &TurnContext,
-    mut stream: ResponseStream,
+    mut stream: SamplingStream,
     request_kind: CompactionRequestKind<'_>,
 ) -> CodexResult<RemoteCompactionV2Output> {
     let mut output_item_count = 0usize;
@@ -396,7 +424,9 @@ async fn collect_compaction_output(
     let mut completed_token_usage = None;
     loop {
         let event = match request_kind {
-            CompactionRequestKind::Foreground => stream.next().await,
+            CompactionRequestKind::Foreground(cancellation) => {
+                stream.next_for_turn(cancellation).await
+            }
             CompactionRequestKind::Background(cancellation) => tokio::select! {
                 biased;
                 // Charge completed usage even when cancellation arrives at the same time.
@@ -404,31 +434,40 @@ async fn collect_compaction_output(
                 _ = cancellation.cancelled() => return Err(CodexErr::TurnAborted),
             },
         };
-        let Some(event) = event else { break };
-        if let Err(err) = &event
-            && let CodexErrorDetails::ResponseIncomplete(incomplete) = err.details()
-        {
-            match request_kind {
-                CompactionRequestKind::Background(_) => {
-                    if let Some(usage) = incomplete.token_usage.as_ref() {
-                        // Match completed background requests without replacing the terminal error.
-                        let _ = sess
-                            .record_rollout_budget_usage(&turn_context.sub_id, usage)
+        let Some(SamplingEvent { event, hook_output }) = event else {
+            break;
+        };
+        let event = match event {
+            Ok(event) => event,
+            Err(err) => {
+                if let CodexErrorDetails::ResponseIncomplete(incomplete) = err.details() {
+                    match request_kind {
+                        CompactionRequestKind::Background(_) => {
+                            // Match completed background requests without replacing the terminal error.
+                            let usage = SamplingUsage {
+                                provider: incomplete.token_usage.clone(),
+                                charge: hook_output,
+                            };
+                            let _ = sess
+                                .record_rollout_budget_usage(&turn_context.sub_id, &usage)
+                                .await;
+                        }
+                        CompactionRequestKind::Foreground(_) => {
+                            sess.record_incomplete_response_usage(
+                                turn_context,
+                                &turn_context.initial_settings,
+                                incomplete,
+                                hook_output,
+                            )
                             .await;
+                            sess.send_token_count_event(turn_context).await;
+                        }
                     }
                 }
-                CompactionRequestKind::Foreground => {
-                    sess.record_incomplete_response_usage(
-                        turn_context,
-                        &turn_context.initial_settings,
-                        incomplete,
-                    )
-                    .await;
-                    sess.send_token_count_event(turn_context).await;
-                }
+                return Err(err);
             }
-        }
-        match event? {
+        };
+        match event {
             ResponseEvent::OutputItemDone(item) => {
                 output_item_count += 1;
                 if let ResponseItem::Compaction { .. } = item {
@@ -444,25 +483,25 @@ async fn collect_compaction_output(
                 usage_metadata,
                 ..
             } => {
-                match request_kind {
-                    CompactionRequestKind::Background(_) => {
-                        if let Some(usage) = token_usage.as_ref() {
-                            sess.record_rollout_budget_usage(&turn_context.sub_id, usage)
-                                .await?;
-                        }
-                    }
-                    CompactionRequestKind::Foreground => {
-                        sess.record_observed_response_completed(
-                            turn_context,
-                            &response_id,
-                            token_usage.as_ref(),
-                            usage_metadata.as_ref(),
-                        )
-                        .await;
-                    }
+                let usage = SamplingUsage {
+                    provider: token_usage,
+                    charge: hook_output,
+                };
+                if matches!(request_kind, CompactionRequestKind::Foreground(_)) {
+                    sess.record_observed_response_completed(
+                        turn_context,
+                        &response_id,
+                        usage.provider.as_ref(),
+                        usage_metadata.as_ref(),
+                    )
+                    .await;
                 }
+                // Both callers consumed this response. Whether it contains an
+                // installable summary is a separate decision below.
+                sess.record_rollout_budget_usage(&turn_context.sub_id, &usage)
+                    .await?;
                 completed_response_id = Some(response_id);
-                completed_token_usage = token_usage;
+                completed_token_usage = usage.provider;
                 break;
             }
             _ => {}
@@ -956,19 +995,20 @@ mod tests {
         ))
     }
 
-    fn response_stream(events: Vec<CodexResult<ResponseEvent>>) -> ResponseStream {
+    fn response_stream(events: Vec<impl Into<SamplingEvent>>) -> SamplingStream {
         let (tx_event, rx_event) = mpsc::channel(events.len().max(1));
         for event in events {
             tx_event
-                .try_send(event)
+                .try_send(event.into())
                 .expect("response stream test channel should have capacity");
         }
         drop(tx_event);
-        ResponseStream {
+        SamplingStream {
             routing_affinity: None,
             rx_event,
             interrupt: None,
             consumer_dropped: CancellationToken::new(),
+            settlement_started: Default::default(),
         }
     }
 
@@ -1384,24 +1424,36 @@ mod tests {
         assert_eq!(truncated, vec![newest]);
     }
 
+    #[test_case::test_case(false; "turn interrupt discards queued incomplete usage")]
+    #[test_case::test_case(true; "session shutdown preserves queued incomplete usage without foreground updates")]
     #[tokio::test]
-    async fn collect_background_incomplete_does_not_publish_foreground_usage() {
+    async fn collect_queued_incomplete_usage_on_cancellation(background: bool) {
         let usage = TokenUsage {
             input_tokens: 100,
             output_tokens: 20,
             total_tokens: 120,
             ..Default::default()
         };
-        let stream = response_stream(vec![Err(CodexErr::new(
-            CodexErrorDetails::ResponseIncomplete(Box::new(
-                codex_protocol::error::ResponseIncompleteError {
+        let stream = response_stream(vec![SamplingEvent {
+            event: Err(CodexErr::new(CodexErrorDetails::ResponseIncomplete(
+                Box::new(codex_protocol::error::ResponseIncompleteError {
                     partial_output: vec![],
                     reason: "max_output_tokens".to_string(),
                     response_id: Some("resp-background".to_string()),
                     token_usage: Some(usage.clone()),
+                }),
+            ))),
+            hook_output: crate::client_common::SamplingCharge {
+                hooks: codex_hooks::ModelRequestHookOutcome {
+                    charge: codex_hooks::HookCharge {
+                        units: 3.0,
+                        overflowed: false,
+                    },
+                    invalid_price: Some("negative sibling price".into()),
                 },
-            )),
-        ))]);
+                ..Default::default()
+            },
+        }]);
         let (mut sess, turn_context, rx) =
             crate::session::tests::make_session_and_context_with_rx().await;
         let accounting = Arc::new(UsageRecorder {
@@ -1416,60 +1468,116 @@ mod tests {
             &sess,
             &turn_context,
             stream,
-            CompactionRequestKind::Background(&cancellation),
+            if background {
+                CompactionRequestKind::Background(&cancellation)
+            } else {
+                CompactionRequestKind::Foreground(&cancellation)
+            },
         )
         .await;
 
-        assert!(matches!(result, Err(ref err)
-            if matches!(err.details(), CodexErrorDetails::ResponseIncomplete(_))));
         assert_eq!(sess.token_usage_info().await, None);
         assert!(rx.is_empty());
+        if !background {
+            assert!(
+                matches!(result, Err(ref err) if matches!(err.details(), CodexErrorDetails::TurnAborted))
+            );
+            assert!(!sess.work_budget().is_exhausted());
+            assert!(accounting.reports.lock().unwrap().is_empty());
+            return;
+        }
+        assert!(matches!(result, Err(ref err)
+            if matches!(err.details(), CodexErrorDetails::ResponseIncomplete(_))));
+        assert!(sess.work_budget().is_exhausted());
         assert_eq!(
             *accounting.reports.lock().unwrap(),
             vec![AgentUsageReport {
                 thread_id: sess.thread_id(),
                 turn_id: turn_context.sub_id.clone(),
-                usage,
+                usage: Some(usage),
+                additional_budget_units: 3.0,
+                additional_budget_units_overflowed: false,
             }]
         );
     }
 
+    #[test_case::test_case(false, false, false; "foreground bills a complete response even without a summary")]
+    #[test_case::test_case(true, false, false; "background bills a complete response even without a summary")]
+    #[test_case::test_case(false, true, false; "turn interrupt discards a queued complete response")]
+    #[test_case::test_case(true, true, false; "session shutdown bills a queued complete response even without a summary")]
+    #[test_case::test_case(false, false, true; "a malformed sibling is still reported when valid spending exhausts the account")]
     #[tokio::test]
-    async fn background_compaction_charges_usage_even_if_output_is_missing() {
+    async fn collect_queued_complete_response(
+        background: bool,
+        interrupted: bool,
+        bad_sibling: bool,
+    ) {
         let (mut sess, turn, _) = crate::session::tests::make_session_and_context_with_rx().await;
         let accounting = Arc::new(UsageRecorder {
             reports: Mutex::new(Vec::new()),
-            decision: UsageAccountingDecision::Continue,
+            decision: if bad_sibling {
+                UsageAccountingDecision::Exhausted
+            } else {
+                UsageAccountingDecision::Continue
+            },
         });
         accounting.install(&mut sess);
-        let usage = TokenUsage {
+        let provider_usage = interrupted.then(|| TokenUsage {
             output_tokens: 42,
             ..Default::default()
+        });
+        let stream = response_stream(vec![SamplingEvent {
+            event: Ok(ResponseEvent::Completed {
+                response_id: "resp-compact".into(),
+                token_usage: provider_usage.clone(),
+                usage_metadata: None,
+                reasoning_removals: None,
+                end_turn: Some(true),
+            }),
+            hook_output: crate::client_common::SamplingCharge {
+                hooks: codex_hooks::ModelRequestHookOutcome {
+                    charge: codex_hooks::HookCharge {
+                        units: 42.0,
+                        overflowed: false,
+                    },
+                    invalid_price: bad_sibling.then(|| "negative sibling price".into()),
+                },
+                ..Default::default()
+            },
+        }]);
+        let cancellation = CancellationToken::new();
+        if interrupted {
+            cancellation.cancel();
+        }
+        let kind = if background {
+            CompactionRequestKind::Background(&cancellation)
+        } else {
+            CompactionRequestKind::Foreground(&cancellation)
         };
-        let stream = response_stream(vec![Ok(ResponseEvent::Completed {
-            response_id: "resp-compact".into(),
-            token_usage: Some(usage.clone()),
-            usage_metadata: None,
-            reasoning_removals: None,
-            end_turn: Some(true),
-        })]);
-        let result = collect_compaction_output(
-            &sess,
-            &turn,
-            stream,
-            CompactionRequestKind::Background(&CancellationToken::new()),
-        )
-        .await;
-
-        assert!(
-            matches!(result, Err(error) if matches!(error.details(), CodexErrorDetails::Fatal(_)))
-        );
+        let result = collect_compaction_output(&sess, &turn, stream, kind).await;
+        let error = result.err().expect("no installable summary");
+        if interrupted && !background {
+            assert!(matches!(error.details(), CodexErrorDetails::TurnAborted));
+            assert!(accounting.reports.lock().unwrap().is_empty());
+            return;
+        }
+        if bad_sibling {
+            assert!(
+                matches!(error.details(), CodexErrorDetails::UsageAccountingFailed(message) if message.contains("negative sibling price"))
+            );
+        } else {
+            assert!(
+                matches!(error.details(), CodexErrorDetails::Fatal(message) if message.contains("exactly one compaction output"))
+            );
+        }
         assert_eq!(
             *accounting.reports.lock().unwrap(),
             [AgentUsageReport {
                 thread_id: sess.thread_id(),
                 turn_id: turn.sub_id.clone(),
-                usage,
+                usage: provider_usage,
+                additional_budget_units: 42.0,
+                additional_budget_units_overflowed: false,
             }]
         );
     }
@@ -1514,7 +1622,7 @@ mod tests {
             &sess,
             &turn_context,
             stream,
-            CompactionRequestKind::Foreground,
+            CompactionRequestKind::Foreground(&CancellationToken::new()),
         )
         .await
         .expect("compaction should be collected");

@@ -51,6 +51,7 @@ use uuid::Uuid;
 
 use crate::app_command::AppCommand;
 use crate::app_server_session::AppServerStartedThread;
+use crate::backend_id::BackendId;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::TerminalTitleItem;
@@ -426,6 +427,7 @@ pub(crate) enum AppEvent {
     },
     /// Finish moving a task into or out of the shared pinned section.
     AgentsOverviewPinToggled {
+        backend_id: BackendId,
         request_id: Uuid,
         thread_id: ThreadId,
         pinned: bool,
@@ -447,11 +449,11 @@ pub(crate) enum AppEvent {
         effort: Option<ReasoningEffort>,
         result: Result<String, String>,
     },
-    /// Route a hidden title request to its automatic rename or editable prompt.
+    /// Finish title generation and deliver an editable suggestion when requested.
     GeneratedThreadTitle {
         cancellation: CancellationToken,
         thread_id: ThreadId,
-        temporary_thread_id: ThreadId,
+        temporary_thread_id: Option<ThreadId>,
         destination: ThreadTitleDestination,
         result: Result<String, String>,
     },

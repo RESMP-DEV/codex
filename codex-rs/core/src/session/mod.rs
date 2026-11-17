@@ -281,6 +281,8 @@ mod retained_context;
 mod review;
 mod rollout_budget;
 mod rollout_reconstruction;
+mod sampling_interrupt;
+pub(crate) use sampling_interrupt::SamplingInterrupt;
 #[allow(clippy::module_inception)]
 pub(crate) mod session;
 pub(crate) mod startup_prewarm;
@@ -388,8 +390,6 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
-use codex_protocol::models::LocalImagePreparation;
-use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
@@ -428,6 +428,8 @@ use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::HostSkillsService;
 use codex_tools::ToolName;
+use codex_user_input::LocalImagePreparation;
+use codex_user_input::from_user_input;
 use codex_utils_absolute_path::AbsolutePathBuf;
 #[cfg(test)]
 use codex_utils_stream_parser::ProposedPlanSegment;
@@ -2182,7 +2184,7 @@ impl Session {
             commit,
             previous_config,
             new_config,
-            permission_profile_changed,
+            refresh_network_proxy,
             mcp_inputs_changed,
             credential_masking_warning,
         ) = {
@@ -2218,10 +2220,11 @@ impl Session {
                 });
             let previous_config = notify_config_contributors
                 .then(|| self.build_effective_session_config(&state.session_configuration));
-            let previous_permission_profile = state.session_configuration.permission_profile();
-            let updated_permission_profile = updated.permission_profile();
-            let permission_profile_changed =
-                previous_permission_profile != updated_permission_profile;
+            let current = &state.session_configuration;
+            let refresh_network_proxy = current.permission_profile()
+                != updated.permission_profile()
+                || current.original_config_do_not_use.permissions.network
+                    != updated.original_config_do_not_use.permissions.network;
             let root_service_tier_changed = updated.parent_thread_id.is_none()
                 && state.session_configuration.step_settings.service_tier
                     != updated.step_settings.service_tier;
@@ -2281,7 +2284,7 @@ impl Session {
                 commit,
                 previous_config,
                 new_config,
-                permission_profile_changed,
+                refresh_network_proxy,
                 mcp_inputs_changed,
                 credential_masking_warning,
             )
@@ -2294,7 +2297,7 @@ impl Session {
             );
         }
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
-        if permission_profile_changed {
+        if refresh_network_proxy {
             self.refresh_managed_network_proxy_for_current_permission_profile()
                 .await;
         }
@@ -4013,7 +4016,7 @@ impl Session {
         input: Vec<UserInput>,
         user_image_content_indices: &mut HashMap<usize, usize>,
     ) -> ResponseItem {
-        let mut item = ResponseItem::from(ResponseInputItem::from_user_input(
+        let mut item = ResponseItem::from(from_user_input(
             input,
             LocalImagePreparation::Defer,
             user_image_content_indices,
@@ -6040,15 +6043,6 @@ impl Session {
             return;
         };
         turn_state.lock().await.has_memory_citation = true;
-    }
-
-    pub async fn interrupt_task(self: &Arc<Self>) {
-        info!("interrupt received: abort current task, if any");
-        let had_active_turn = self.active_turn.lock().await.is_some();
-        self.abort_all_tasks(TurnAbortReason::Interrupted).await;
-        if !had_active_turn {
-            self.cancel_mcp_startup();
-        }
     }
 
     pub(crate) fn hooks(&self) -> Arc<Hooks> {

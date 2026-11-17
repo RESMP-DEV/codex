@@ -1904,7 +1904,7 @@ impl Session {
                     parent_rollout_thread_trace.start_child_thread_trace(trace_metadata)
                 }
             } else {
-                ThreadTraceContext::start_root(trace_metadata)
+                ThreadTraceContext::start_root(trace_metadata, config.rollout_trace_limits)
             };
             let rollout_thread_trace = rollout_thread_trace.unwrap_or_else(|err| {
                 startup_error.get_or_insert_with(|| {
@@ -2134,8 +2134,15 @@ impl Session {
                 &inherited_environments,
                 &session_configuration.environments,
             );
-            sess.schedule_startup_prewarm(super::startup_prewarm::PrewarmInput::Base)
-                .await;
+            let (input, history_ready) = if sess.features().enabled(Feature::RestoredHistoryPrewarm)
+                && matches!(&initial_history, InitialHistory::Resumed(saved) if !saved.history.is_empty())
+            {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                (super::startup_prewarm::PrewarmInput::Restoring(receiver), Some(sender))
+            } else {
+                (super::startup_prewarm::PrewarmInput::Base, None)
+            };
+            sess.schedule_startup_prewarm(input).await;
             let session_start_source = match &initial_history {
                 InitialHistory::Forked(_) if forked_from_id.is_some() => {
                     codex_hooks::SessionStartSource::Fork
@@ -2166,6 +2173,9 @@ impl Session {
             {
                 let mut state = sess.state.lock().await;
                 state.queue_pending_session_start_source(session_start_source);
+            }
+            if let Some(sender) = history_ready {
+                let _ = sender.send(sess.clone_history().await);
             }
             Ok(sess)
         })

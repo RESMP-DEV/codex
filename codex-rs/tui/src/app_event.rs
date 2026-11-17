@@ -315,6 +315,7 @@ pub(crate) enum CapturedSideStream {
 #[derive(Debug)]
 pub(crate) struct CapturedSideDisplay {
     pub(crate) rendered_completion_turn_ids: std::collections::HashMap<String, bool>,
+    pub(crate) generated_images: crate::history_cell::PendingGeneratedImages,
     pub(crate) active: Option<Box<dyn HistoryCell>>,
     pub(crate) auxiliary: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
     pub(crate) draft: Box<crate::bottom_pane::TextArea>,
@@ -522,6 +523,32 @@ pub(crate) enum AppEvent {
         request: uuid::Uuid,
     },
     StartQueuedSavedChat,
+    OpenSidebarDocument {
+        backend_id: crate::backend_id::BackendId,
+        source: ThreadId,
+        link: crate::markdown_render::FileLink,
+    },
+    SidebarDocumentResolved {
+        backend_id: crate::backend_id::BackendId,
+        parent: ThreadId,
+        source: ThreadId,
+        request: uuid::Uuid,
+        original_path: codex_app_server_client::AppServerPath,
+        path: std::result::Result<codex_utils_path_uri::PathUri, String>,
+        location: Option<crate::markdown_render::SourceLocation>,
+    },
+    SidebarDocumentLoaded {
+        backend_id: crate::backend_id::BackendId,
+        parent: ThreadId,
+        request: uuid::Uuid,
+        result: Result<crate::sidebar_image::DocumentContent, String>,
+    },
+    SidebarFilesLoaded {
+        backend_id: crate::backend_id::BackendId,
+        parent: ThreadId,
+        request: uuid::Uuid,
+        page: Option<codex_app_server_protocol::ThreadItemsListResponse>,
+    },
     SavedSideChatsLoaded {
         backend_id: crate::backend_id::BackendId,
         parent: ThreadId,

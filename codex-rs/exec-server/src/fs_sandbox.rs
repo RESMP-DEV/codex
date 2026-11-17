@@ -74,7 +74,7 @@ impl FileSystemSandboxRunner {
         sandbox: &FileSystemSandboxContext,
     ) -> Result<SandboxExecRequest, JSONRPCErrorError> {
         let command = self.sandbox_command(sandbox)?;
-        crate::run_integrity_checks(&command).await;
+        crate::run_integrity_checks((&command).into()).await;
         Ok(command)
     }
 
@@ -128,7 +128,7 @@ impl FileSystemSandboxRunner {
                 command,
                 permissions: &sandbox.permissions,
                 workspace_roots: Some(&sandbox.workspace_roots),
-                runtime_readable_paths: &helper_readable_paths,
+                runtime_readable_paths: Some(&helper_readable_paths),
                 selection,
                 enforce_managed_network: false,
                 network: None,
@@ -151,7 +151,8 @@ impl FileSystemSandboxRunner {
                 }
                 err => invalid_request(format!("failed to prepare fs sandbox: {err}")),
             })?
-            .into_command_request();
+            .into_command_request()
+            .map_err(io_error)?;
         request.sandbox_override = sandbox.sandbox_override;
         Ok(request)
     }
@@ -325,29 +326,22 @@ pub(crate) async fn wait_for_helper_output(
 }
 
 pub(crate) fn spawn_command(
-    SandboxExecRequest {
-        command: argv,
-        cwd,
-        mut env,
-        arg0,
-        ..
-    }: SandboxExecRequest,
+    request: SandboxExecRequest,
     stdin: ChildStdin,
 ) -> Result<Child, JSONRPCErrorError> {
-    let Some((program, args)) = argv.split_first() else {
+    let Some((program, args)) = request.program_and_args() else {
         return Err(invalid_request("fs sandbox command was empty".to_string()));
     };
     let mut command = Command::new(program);
+    command.args(args);
     #[cfg(unix)]
-    if let Some(arg0) = arg0 {
+    if let Some(arg0) = request.arg0 {
         command.arg0(arg0);
     }
-    #[cfg(not(unix))]
-    let _ = arg0;
-    command.args(args);
     // TODO(anp): Keep PathUri through the filesystem helper launch boundary.
-    let cwd = cwd.to_abs_path().map_err(io_error)?;
+    let cwd = request.cwd.to_abs_path().map_err(io_error)?;
     command.current_dir(cwd.as_path());
+    let mut env = request.env;
     env.retain(|name, _| !codex_protocol::shell_environment::is_non_inheritable_env_var(name));
     command.envs(env);
     command.stdin(stdin);

@@ -89,9 +89,19 @@ fn cell_content_layout(
     if let Some(protocol) = presentation.image_protocol
         && let Some(path) = cell.image_path()
     {
+        use crate::transcript_image::PreviewKind;
+        let kind = if cell
+            .as_any()
+            .is::<crate::history_cell::ImageGenerationHistoryCell>()
+        {
+            PreviewKind::Generated
+        } else {
+            PreviewKind::Inspected
+        };
         layout.image =
-            crate::transcript_image::TranscriptImage::load(path.as_path(), width, protocol)
+            crate::transcript_image::TranscriptImage::load(path.as_path(), width, protocol, kind)
                 .map(Arc::new);
+        layout.image_left_aligned = kind == PreviewKind::Generated;
     }
     layout
 }
@@ -110,6 +120,7 @@ pub(super) struct LayoutCache {
 #[derive(PartialEq, Eq)]
 struct RenderState {
     theme: u64,
+    document_links: bool,
     foreground: Option<(u8, u8, u8)>,
     background: Option<(u8, u8, u8)>,
     color_level: crate::terminal_palette::StdoutColorLevel,
@@ -318,6 +329,7 @@ impl LayoutCache {
         self.frame = self.frame.wrapping_add(/*rhs*/ 1);
         let state = RenderState {
             theme: crate::render::highlight::syntax_theme_revision(),
+            document_links: crate::markdown_render::preferences::document_links_enabled(),
             foreground: crate::terminal_palette::default_fg(),
             background: crate::terminal_palette::default_bg(),
             color_level: crate::terminal_palette::stdout_color_level(),

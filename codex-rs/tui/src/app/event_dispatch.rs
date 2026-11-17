@@ -96,6 +96,10 @@ impl App {
                     | AppEvent::SideChatArchived { .. }
                     | AppEvent::SavedChatPrepared { .. } | AppEvent::SavedChatReleased { .. }
                     | AppEvent::StartQueuedSavedChat
+                    | AppEvent::OpenSidebarDocument { .. }
+                    | AppEvent::SidebarDocumentResolved { .. }
+                    | AppEvent::SidebarDocumentLoaded { .. }
+                    | AppEvent::SidebarFilesLoaded { .. }
                     | AppEvent::SavedSideChatsLoaded { .. }
                     | AppEvent::SideReplayFinished(_)
                     | AppEvent::ResetTranscriptForThreadSwitch
@@ -980,6 +984,9 @@ impl App {
                 self.recap.seed_from_turns(&retained_turns, Instant::now());
                 self.retain_realtime_replay_state_before_replace();
                 self.forget_realtime_replay_thread(thread_id);
+                if let Some(pane) = self.sidebars.get_mut(&Some(thread_id)) {
+                    pane.clear_files();
+                }
                 self.chat_widget.reset_after_prompt_revert(reverted.thread.path, &retained_turns);
                 self.ensure_thread_channel(thread_id).store.lock().await
                     .set_session(session, retained_turns);
@@ -1014,6 +1021,11 @@ impl App {
                 self.begin_initial_history_replay_buffer();
             }
             AppEvent::BeginThreadSwitchHistoryReplayBuffer => {
+                for pane in self.sidebars.values_mut() {
+                    if let Some(files) = &mut pane.files {
+                        files.scan = None;
+                    }
+                }
                 self.begin_thread_switch_history_replay_buffer();
             }
             AppEvent::ParkSideCompanion { pair, thread_id, stream, display } => {
@@ -1036,6 +1048,7 @@ impl App {
                         self.transcript_view.replace_group(cells, range.clone(), &replacement);
                         cells.splice(range, [replacement]);
                     }
+                    self.transcript_view.document_links = false;
                     self.side_companions.insert(thread_id, SideCompanion {
                         display,
                         parked_tail: self.transcript_cells.len(),
@@ -1079,6 +1092,11 @@ impl App {
                             TranscriptHistoryState::Complete
                         };
                     }
+                    tui.frame_requester().schedule_frame();
+                }
+                if finished_current_replay && self.chooser_focus().is_some()
+                {
+                    self.refresh_sidebar_files(app_server, id).await;
                     tui.frame_requester().schedule_frame();
                 }
             }
@@ -2519,7 +2537,9 @@ impl App {
                     let result = match result {
                         Ok(call) => {
                             owner.accept_realtime_call(call.answer_sdp);
-                            app_server.thread_realtime_start(thread_id, call.call_id).await
+                            app_server
+                                .thread_realtime_start(thread_id, call.call_id, call.voice_session_id)
+                                .await
                         }
                         Err(error) => Err(error),
                     };
@@ -3577,6 +3597,63 @@ impl App {
                     && self.wants_saved_chat(target)
                 {
                     Box::pin(self.open_saved_chat(tui, app_server, target)).await?;
+                }
+            }
+            AppEvent::OpenSidebarDocument { backend_id, source, link } => {
+                if app_server.backend_id() == backend_id
+                    && self.current_displayed_thread_id() == Some(source)
+                    && self.document_preview_available(tui, app_server)
+                {
+                    Box::pin(self.open_document(tui, app_server, source, link)).await?;
+                }
+            }
+            AppEvent::SidebarDocumentResolved { backend_id, parent, source, request, original_path, path, location, } => {
+                if backend_id == app_server.backend_id()
+                    && self.sidebar_parent() == Some(parent)
+                    && let Some(pane) = self.sidebars.get_mut(&Some(parent))
+                {
+                    // Late opens can add their tabs without taking back the user's focus.
+                    let requested = pane.focus_document_request == Some(request);
+                    if requested {
+                        pane.focus_document_request = None;
+                    }
+                    let focus = requested
+                        && self.current_displayed_thread_id() == Some(source)
+                        && self.document_preview_available(tui, app_server);
+                    match path {
+                        Ok(path) => Box::pin(self.open_resolved_document(tui, app_server, source, original_path, path, location, focus)).await?,
+                        Err(error) if focus => self.chat_widget.add_error_message(format!("Could not open file: {error}")),
+                        Err(_) => {}
+                    }
+                }
+            }
+            AppEvent::SidebarDocumentLoaded { backend_id, parent, request, result } => {
+                if let Some(doc) = self.sidebars.get_mut(&Some(parent)).and_then(|pane| pane.documents.get_mut(&request))
+                    && doc.backend == backend_id
+                {
+                    doc.loaded(result);
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            AppEvent::SidebarFilesLoaded { backend_id, parent, request, page } => {
+                if backend_id == app_server.backend_id()
+                    && let Some(pane) = self.sidebars.get_mut(&Some(parent))
+                    && pane.files.as_ref().and_then(|files| files.scan.as_ref())
+                        .is_some_and(|(id, _)| *id == request)
+                {
+                    let selected = pane.chat_tabs().file(pane.choice).map(|file| file.path.clone());
+                    let Some(files) = pane.files.as_mut() else {
+                        return Ok(AppRunControl::Continue);
+                    };
+                    files.scan = None;
+                    if let Some(page) = page {
+                        if files.apply_page(page) {
+                            pane.restore_file_selection(selected.as_deref());
+                            pane.tabs_revision += 1;
+                        }
+                        self.start_sidebar_files_scan(app_server, parent);
+                    }
+                    tui.frame_requester().schedule_frame();
                 }
             }
             AppEvent::SavedSideChatsLoaded { backend_id, parent, request, result } => {

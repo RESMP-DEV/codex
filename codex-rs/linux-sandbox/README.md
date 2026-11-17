@@ -23,7 +23,7 @@ The Rust sandbox helper includes the TCP stack. Codex starts it automatically.
 The Linux host needs distro `bwrap` on `PATH`, user and network namespaces, IPv6,
 and read/write access to `/dev/net/tun`.
 Use full managed SOCKS5 mode for native database ports and an isolated PID namespace.
-For executor-wide capture and HTTP CONNECT routing, see the [exec-server setup](../exec-server/README.md#transparent-tcp).
+For proxy configuration, executor-wide capture and HTTP CONNECT routing, see the [exec-server setup](../exec-server/README.md#transparent-tcp).
 
 The private DNS stub maps up to 8,192 names to stable addresses in `198.18.0.0/15`
 and `fdc0:de00::/96`. The relay sends the original name and port to the attributed proxy;
@@ -78,6 +78,12 @@ commands that would enter the bubblewrap path.
   otherwise unrestricted networking still block `AF_VSOCK` sockets. All filter
   modes block `io_uring` to prevent bypassing socket-family restrictions.
 - When bubblewrap is active, the filesystem is read-only by default via `--ro-bind / /`.
+- Filesystem-restricted commands see an empty, read-only `/etc/ssh/ssh_config.d`
+  by default. Host root-owned files can appear to belong to `nobody` in the user
+  namespace, causing OpenSSH to reject them. SSH skips settings in the masked
+  directory, including any `KnownHostsCommand` defined there. Settings in the main
+  `/etc/ssh/ssh_config` and the user's SSH config still apply. Explicit grants
+  to the drop-ins and overlapping write grants keep their configured access.
 - When bubblewrap is active, writable roots are layered with `--bind <root> <root>`.
 - When bubblewrap is active, protected subpaths under writable roots (for
   example `.git`,

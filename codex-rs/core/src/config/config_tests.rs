@@ -1668,6 +1668,7 @@ description = "Day-to-day workspace access."
 enabled = true
 proxy_url = "http://127.0.0.1:43128"
 enable_socks5 = false
+transparent_tcp = false
 allow_upstream_proxy = false
 mode = "full"
 
@@ -1722,6 +1723,7 @@ strip_request_headers = ["authorization"]
                         ]),
                     }),
                     network: Some(NetworkToml {
+                        transparent_tcp: Some(false),
                         enabled: Some(true),
                         proxy_url: Some("http://127.0.0.1:43128".to_string()),
                         enable_socks5: Some(false),
@@ -12868,6 +12870,7 @@ tool_namespace = "agents"
 hide_spawn_agent_metadata = true
 expose_spawn_agent_model_overrides = false
 wait_agent_enabled = false
+interrupt_at_item_boundary = true
 disable_native_tools = true
 disable_direct_message = true
 message_board_in_memory = true
@@ -12927,6 +12930,7 @@ max_concurrent_threads_per_session = 9
     assert!(!config.multi_agent_v2.preserve_fork_prefix);
     assert!(!config.multi_agent_v2.expose_spawn_agent_model_overrides);
     assert!(!config.multi_agent_v2.wait_agent_enabled);
+    assert!(config.multi_agent_v2.interrupt_at_item_boundary);
     assert!(config.multi_agent_v2.disable_native_tools);
     assert!(config.multi_agent_v2.disable_direct_message);
     assert!(config.multi_agent_v2.message_board_in_memory);

@@ -1361,7 +1361,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         agent_role: None,
     });
 
-    SendMessageHandlerV2
+    let output = SendMessageHandlerV2
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -1373,6 +1373,10 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
         ))
         .await
         .expect("send_message should accept the root agent path");
+    assert_eq!(
+        expect_text_output(output),
+        ("Message accepted.".to_string(), Some(true))
+    );
 
     assert!(manager.captured_ops().iter().any(|(id, op)| {
         *id == root.thread_id
@@ -3946,14 +3950,14 @@ async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
     let ops = manager.captured_ops();
     assert!(
         ops.iter()
-            .any(|(thread_id, op)| *thread_id == agent_id && matches!(op, Op::Interrupt))
+            .any(|(thread_id, op)| *thread_id == agent_id && matches!(op, Op::InterruptAgent))
     );
     assert!(!ops.iter().any(|(thread_id, op)| {
         (*thread_id == agent_id || *thread_id == child_id) && matches!(op, Op::Shutdown)
     }));
     assert!(
         !ops.iter()
-            .any(|(thread_id, op)| *thread_id == child_id && matches!(op, Op::Interrupt))
+            .any(|(thread_id, op)| *thread_id == child_id && matches!(op, Op::InterruptAgent))
     );
 }
 

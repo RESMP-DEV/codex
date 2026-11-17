@@ -222,6 +222,7 @@ mod backend_registry;
 pub(crate) mod backend_selection;
 pub(crate) mod backend_sessions;
 mod background_requests;
+mod cloud_environments;
 mod cloud_switch_wait;
 #[cfg(test)]
 pub(crate) use cloud_switch_wait::wait_for_cloud_switch;
@@ -272,6 +273,7 @@ mod resume_config;
 mod resume_preparation;
 mod right_click_paste;
 mod status_line_settings;
+mod statusline_picker;
 pub(crate) use right_click_paste::PasteEnvironment;
 mod pane_motion;
 mod safety_buffering;
@@ -558,6 +560,8 @@ struct InitialHistoryReplayBuffer {
 }
 
 pub(crate) struct App {
+    statusline_picker: Option<statusline_picker::StatuslinePicker>,
+    statusline_metrics: crate::statusline_metrics::StatuslineMetrics,
     provider_writes: HashMap<crate::backend_id::BackendId, crate::model_catalog::ProviderWrite>,
     feature_write_lock: Arc<tokio::sync::Mutex<()>>,
     config_notification_test_generation: u64,
@@ -858,13 +862,25 @@ impl App {
             feedback: self.feedback.clone(),
             is_first_run: false,
             status_account_display: self.chat_widget.status_account_display().cloned(),
-            initial_plan_type: self.chat_widget.current_plan_type(),
+            initial_plan_type: self.chat_widget.account_plan,
             model: Some(self.chat_widget.current_model().to_string()),
             startup_tooltip_override: None,
             status_line_invalid_items_warned: self.status_line_invalid_items_warned.clone(),
             terminal_title_invalid_items_warned: self.terminal_title_invalid_items_warned.clone(),
             session_telemetry: self.session_telemetry.clone(),
         }
+    }
+
+    fn shortcut_guide_owns_input(&self, tui: &tui::Tui) -> bool {
+        self.overlay.is_none()
+            && self.chat_widget.shortcut_overlay_visible()
+            && !self.focused_sidebar_chooser(tui)
+            && !(tui.is_owned_screen()
+                && (self.backtrack.overlay_preview_active
+                    || self.transcript_view.has_active_interaction()
+                    || self
+                        .transcript_view
+                        .owns_interaction_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))))
     }
 
     pub(crate) async fn handle_tui_event(
@@ -1117,6 +1133,12 @@ impl App {
             let Some(key_event) = self.route_key_chord_event(tui, key_event) else {
                 return Ok(AppRunControl::Continue);
             };
+            if self.routed_key_activation.is_none()
+                && self.shortcut_guide_owns_input(tui)
+                && self.chat_widget.handle_shortcut_view_key(key_event)
+            {
+                return Ok(AppRunControl::Continue);
+            }
             TuiEvent::Key(key_event)
         } else {
             event

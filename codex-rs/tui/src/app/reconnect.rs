@@ -304,6 +304,9 @@ impl App {
             self.agents_overview.pending_pin_change = None;
             self.agents_overview.pending_usage = None;
             self.agents_overview.usage_disabled = false;
+            self.statusline_picker = None;
+            self.chat_widget
+                .dismiss_provider_view(super::statusline_picker::PICKER);
             self.reconnect.presentation = if self
                 .chat_widget
                 .selected_index_for_active_view(agents_overview::AGENTS_OVERVIEW_VIEW_ID)
@@ -581,9 +584,12 @@ impl App {
             self.active_thread_id = Some(id);
             self.active_thread_rx = Some(receiver);
             self.recap.seed_from_turns(&snapshot.turns, Instant::now());
-            if let Err(err) = self.render_thread_snapshot(
-                tui, app_server, id, snapshot, /*resume_restored_queue*/ false,
-            ) {
+            if let Err(err) = self
+                .render_thread_snapshot(
+                    tui, app_server, id, snapshot, /*resume_restored_queue*/ false,
+                )
+                .await
+            {
                 if discard_replaced_view_input
                     && let Err(drain_err) = tui.discard_pending_input_before_interactive_screen()
                 {
@@ -647,6 +653,9 @@ impl App {
         if self.reconnect.presentation == ReconnectPresentation::Overview {
             self.refresh_agents_overview_threads(app_server);
         }
+        self.chat_widget.forget_inherited_quota_provider();
+        self.chat_widget.statusline_disconnected = false;
+        self.chat_widget.refresh_status_line();
         self.chat_widget.update_account_state(
             bootstrap.status_account_display,
             bootstrap.plan_type,

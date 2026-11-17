@@ -31,12 +31,14 @@ use strum_macros::EnumString;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
+use crate::backend_id::BackendId;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::bottom_pane_view::BottomPaneView;
 use crate::bottom_pane::multi_select_picker::MultiSelectItem;
 use crate::bottom_pane::multi_select_picker::MultiSelectPicker;
 use crate::bottom_pane::status_surface_preview::StatusSurfacePreviewData;
 use crate::bottom_pane::status_surface_preview::StatusSurfacePreviewItem;
+use crate::key_hint::KeyBinding;
 use crate::keymap::ListKeymap;
 use crate::render::renderable::Renderable;
 
@@ -280,6 +282,15 @@ impl StatusLineItem {
     }
 }
 
+pub(crate) enum StatuslineProviderActions {
+    Hidden,
+    Choose,
+    CreateAndChoose {
+        backend: Option<BackendId>,
+        thread_id: Option<codex_protocol::ThreadId>,
+    },
+}
+
 /// Interactive view for configuring which items appear in the status line.
 ///
 /// Wraps a [`MultiSelectPicker`] with status-line-specific behavior:
@@ -293,6 +304,8 @@ pub(crate) struct StatusLineSetupView {
 }
 
 impl StatusLineSetupView {
+    pub(crate) const VIEW_ID: &'static str = "status-line-setup";
+
     /// Creates a new status line setup view.
     ///
     /// # Arguments
@@ -308,19 +321,48 @@ impl StatusLineSetupView {
     pub(crate) fn new(
         status_line_items: Option<&[String]>,
         use_theme_colors: bool,
+        providers: StatuslineProviderActions,
         preview_data: StatusSurfacePreviewData,
         app_event_tx: AppEventSender,
         list_keymap: ListKeymap,
     ) -> Self {
         let mut used_ids = HashSet::new();
-        let mut items = vec![MultiSelectItem {
+        let mut items = Vec::new();
+        if !matches!(providers, StatuslineProviderActions::Hidden) {
+            items.push(MultiSelectItem {
+                name: "Choose a status line provider".into(),
+                orderable: false,
+                section_break_after: matches!(providers, StatuslineProviderActions::Choose),
+                on_activate: Some(Box::new(|tx, key| {
+                    tx.send(AppEvent::OpenStatuslinePicker(key))
+                })),
+                ..Default::default()
+            });
+        }
+        if let StatuslineProviderActions::CreateAndChoose { backend, thread_id } = providers {
+            items.push(MultiSelectItem {
+                name: "Create a custom status line".into(),
+                orderable: false,
+                section_break_after: true,
+                on_activate: Some(Box::new(move |tx, key| {
+                    tx.send(AppEvent::CreateCustomStatusline {
+                        backend,
+                        thread_id,
+                        key,
+                    })
+                })),
+                ..Default::default()
+            });
+        }
+        items.push(MultiSelectItem {
             id: STATUS_LINE_USE_THEME_COLORS_ITEM_ID.to_string(),
             name: "Use theme colors".to_string(),
             description: Some("Apply colors from the active /theme".to_string()),
             enabled: use_theme_colors,
             orderable: false,
             section_break_after: true,
-        }];
+            on_activate: None,
+        });
 
         if let Some(selected_items) = status_line_items.as_ref() {
             for id in *selected_items {
@@ -417,11 +459,16 @@ impl StatusLineSetupView {
             enabled,
             orderable: true,
             section_break_after: false,
+            on_activate: None,
         }
     }
 }
 
 impl BottomPaneView for StatusLineSetupView {
+    fn view_id(&self) -> Option<&'static str> {
+        Some(Self::VIEW_ID)
+    }
+
     fn keymap_contexts(&self) -> crate::keymap::KeymapContextSet {
         crate::keymap::KeymapContextSet::new(crate::keymap::KeymapContext::List)
     }
@@ -432,6 +479,15 @@ impl BottomPaneView for StatusLineSetupView {
 
     fn handle_key_event(&mut self, key_event: crossterm::event::KeyEvent) {
         self.picker.handle_key_event(key_event);
+    }
+
+    fn handle_key_event_with_activation_key(
+        &mut self,
+        key_event: crossterm::event::KeyEvent,
+        activation_key: Option<KeyBinding>,
+    ) {
+        self.picker
+            .handle_key_event_with_activation_key(key_event, activation_key);
     }
 
     fn is_complete(&self) -> bool {
@@ -600,6 +656,7 @@ mod tests {
                 enabled: true,
                 orderable: true,
                 section_break_after: false,
+                on_activate: None,
             },
             MultiSelectItem {
                 id: StatusLineItem::CurrentDir.to_string(),
@@ -608,6 +665,7 @@ mod tests {
                 enabled: true,
                 orderable: true,
                 section_break_after: false,
+                on_activate: None,
             },
         ];
 
@@ -638,6 +696,7 @@ mod tests {
                 enabled: true,
                 orderable: true,
                 section_break_after: false,
+                on_activate: None,
             },
             MultiSelectItem {
                 id: StatusLineItem::GitBranch.to_string(),
@@ -646,6 +705,7 @@ mod tests {
                 enabled: true,
                 orderable: true,
                 section_break_after: false,
+                on_activate: None,
             },
         ];
 
@@ -682,6 +742,7 @@ mod tests {
                 enabled: true,
                 orderable: true,
                 section_break_after: false,
+                on_activate: None,
             },
             MultiSelectItem {
                 id: StatusLineItem::ThreadTitle.to_string(),
@@ -690,6 +751,7 @@ mod tests {
                 enabled: true,
                 orderable: true,
                 section_break_after: false,
+                on_activate: None,
             },
         ];
 
@@ -719,6 +781,7 @@ mod tests {
             let mut view = StatusLineSetupView::new(
                 Some(&[StatusLineItem::PullRequestNumber.to_string()]),
                 use_theme_colors,
+                StatuslineProviderActions::Hidden,
                 preview,
                 AppEventSender::new(tx),
                 crate::keymap::RuntimeKeymap::defaults().list,
@@ -743,6 +806,7 @@ mod tests {
                 StatusLineItem::GitBranch.to_string(),
             ]),
             /*use_theme_colors*/ true,
+            StatuslineProviderActions::Hidden,
             StatusSurfacePreviewData::from_iter([
                 (
                     StatusLineItem::ModelName.preview_item(),
@@ -777,6 +841,7 @@ mod tests {
                 StatusLineItem::EstimatedThreadCost.to_string(),
             ]),
             /*use_theme_colors*/ true,
+            StatuslineProviderActions::Hidden,
             StatusSurfacePreviewData::from_iter([
                 (
                     StatusLineItem::ThreadCredits.preview_item(),
@@ -803,6 +868,7 @@ mod tests {
                 StatusLineItem::CurrentDir.to_string(),
             ]),
             /*use_theme_colors*/ true,
+            StatuslineProviderActions::Hidden,
             StatusSurfacePreviewData::from_iter([
                 (
                     StatusLineItem::Hostname.preview_item(),

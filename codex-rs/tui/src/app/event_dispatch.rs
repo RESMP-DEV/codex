@@ -64,6 +64,11 @@ impl App {
                 AppEvent::OpenDaemonMenu
                     | AppEvent::OpenWarnings
                     | AppEvent::StatusLineSetup { .. }
+                    | AppEvent::OpenStatuslinePicker(_)
+                    | AppEvent::CloseStatuslinePicker(_)
+                    | AppEvent::ChooseStatuslineProvider { .. }
+                    | AppEvent::CreateCustomStatusline { .. }
+                    | AppEvent::StatuslinePicker { .. }
                     | AppEvent::StatusLineSetupCancelled
                     | AppEvent::TerminalTitleSetup { .. }
                     | AppEvent::TerminalTitleSetupPreview { .. }
@@ -476,6 +481,44 @@ impl App {
                     }
                 }
             }
+            AppEvent::OpenStatuslinePicker(key) => {
+                if self.chat_widget.active_view_is(crate::bottom_pane::StatusLineSetupView::VIEW_ID) {
+                    self.open_statusline_picker(app_server);
+                    self.chat_widget.suppress_current_view_key_until_release(
+                        key,
+                        Instant::now(),
+                        crate::activation_key_guard::ActivationKeySuppression::ViewTransition,
+                    );
+                }
+            }
+            AppEvent::CloseStatuslinePicker(scan) => {
+                if self.statusline_picker.as_ref().is_some_and(|picker| picker.id == scan) {
+                    self.statusline_picker = None;
+                }
+            }
+            AppEvent::ChooseStatuslineProvider { scan, id, key } => self.choose_statusline_provider(scan, id, key, app_server).await,
+            AppEvent::CreateCustomStatusline { backend, thread_id, key } => {
+                if app_server.thread_params_mode() != crate::ThreadParamsMode::Cloud
+                    && self.config.features.enabled(Feature::TuiExtensionsStatusLine)
+                    && self.chat_widget.active_view_is(crate::bottom_pane::StatusLineSetupView::VIEW_ID)
+                    && self.chat_widget.model_catalog().backend == backend
+                    && backend.is_none_or(|id| id == app_server.backend_id())
+                    && self.current_displayed_thread_id() == thread_id
+                {
+                    crate::boxed_future!(self.start_statusline_authoring(tui, app_server)).await;
+                    if self.current_displayed_thread_id() != thread_id {
+                        self.chat_widget.suppress_current_view_key_until_release(
+                            key,
+                            Instant::now(),
+                            crate::activation_key_guard::ActivationKeySuppression::PressOnlyFallback,
+                        );
+                    }
+                }
+            }
+            AppEvent::StatuslinePicker { scan, updates } => self.finish_statusline_discovery(scan, updates, app_server),
+            AppEvent::StatuslineRead(event) => {
+                self.chat_widget.handle_statusline_read(event, app_server, &self.statusline_metrics, &self.config);
+            }
             AppEvent::TaskToolsAvailable { thread_id } => {
                 app_server.remember_task_tool_thread(thread_id);
             }
@@ -655,7 +698,10 @@ impl App {
                     Err(err) => return Err(err),
                 }
             }
-            AppEvent::ResumeBackendSession(_) | AppEvent::CycleNewConversationBackend => {
+            AppEvent::ResumeBackendSession(_)
+            | AppEvent::CycleNewConversationBackend
+            | AppEvent::ChooseCloudEnvironment
+            | AppEvent::StartCloudConversation { .. } => {
                 unreachable!("backend selection is handled by the session manager")
             }
             AppEvent::ArchiveCurrentThread => {
@@ -1651,10 +1697,10 @@ impl App {
                         elicitation_target: None,
                     });
             }
-            AppEvent::AccountEmailLoaded { request_id, email, workspace } => {
+            AppEvent::AccountEmailLoaded { request_id, email, workspace, plan_type } => {
                 if self.account_email_request_id == Some(request_id) {
                     self.account_email_request_id = None;
-                    self.chat_widget.on_account_email_loaded(email, workspace);
+                    self.chat_widget.on_account_email_loaded(email, workspace, plan_type);
                 }
             }
             AppEvent::SecuritySetupLoaded { request_id, identity, notice } => {
@@ -2108,7 +2154,12 @@ impl App {
                 }
             }
             AppEvent::RefreshRateLimits { origin } => {
-                self.refresh_rate_limits(app_server, origin);
+                // A queued recovery can outlive the chat's ChatGPT account.
+                if origin != RateLimitRefreshOrigin::Recovery
+                    || self.chat_widget.has_chatgpt_account()
+                {
+                    self.refresh_rate_limits(app_server, origin);
+                }
             }
             AppEvent::ApplyBackendBannerFallback { thread_id } => {
                 if self.active_thread_id == Some(thread_id)
@@ -2209,7 +2260,12 @@ impl App {
                         self.chat_widget.apply_usage_notice_read(request_id);
                         self.chat_widget.update_backend_banner(&response);
                         self.apply_backend_banner_fallback(app_server).await;
-                        app_server_rate_limit_snapshots(response)
+                        let snapshots = app_server_rate_limit_snapshots(response);
+                        // The account can outlive the popup or chat that requested this read.
+                        for snapshot in &snapshots {
+                            self.chat_widget.observe_quota_plan(snapshot);
+                        }
+                        snapshots
                     } else {
                         Vec::new()
                     };

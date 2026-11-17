@@ -354,10 +354,12 @@ impl CapturedSideWork {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
+    StatuslineRead(crate::chatwidget::StatuslineReadEvent),
     AccountEmailLoaded {
         request_id: uuid::Uuid,
         email: Option<String>,
         workspace: Option<String>,
+        plan_type: codex_protocol::account::PlanType,
     },
     SecuritySetupLoaded {
         request_id: uuid::Uuid,
@@ -700,6 +702,15 @@ pub(crate) enum AppEvent {
 
     /// Move an empty conversation to the next connected backend.
     CycleNewConversationBackend,
+
+    /// Show the saved environments for the empty Cloud draft.
+    ChooseCloudEnvironment,
+
+    /// Move the empty Cloud draft to the selected environment.
+    StartCloudConversation {
+        source: ThreadId,
+        saved_environment: Option<codex_app_server_client::SavedEnvironment>,
+    },
 
     /// Continue a provider-locked conversation in a fresh chat using its saved history.
     ContinueProviderChat {
@@ -1892,6 +1903,22 @@ pub(crate) enum AppEvent {
     },
     /// Dismiss the status-line setup UI without changing config.
     StatusLineSetupCancelled,
+    OpenStatuslinePicker(crate::key_hint::KeyBinding),
+    CloseStatuslinePicker(uuid::Uuid),
+    ChooseStatuslineProvider {
+        scan: uuid::Uuid,
+        id: Option<crate::statusline_provider::ProviderId>,
+        key: crate::key_hint::KeyBinding,
+    },
+    CreateCustomStatusline {
+        backend: Option<crate::backend_id::BackendId>,
+        thread_id: Option<ThreadId>,
+        key: crate::key_hint::KeyBinding,
+    },
+    StatuslinePicker {
+        scan: uuid::Uuid,
+        updates: Vec<crate::statusline_provider::discovery::DiscoveryUpdate>,
+    },
 
     /// Apply a user-confirmed terminal-title item ordering/selection.
     TerminalTitleSetup {

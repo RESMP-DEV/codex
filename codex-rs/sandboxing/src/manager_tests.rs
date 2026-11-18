@@ -1,4 +1,5 @@
 use super::SandboxCommand;
+use super::SandboxExecutables;
 use super::SandboxManager;
 use super::SandboxNetwork;
 use super::SandboxSelection;
@@ -116,7 +117,6 @@ fn unsandboxed_transform_preserves_foreign_cwd_and_unrestricted_file_system_poli
             },
             permissions: &permissions,
             workspace_roots: None,
-            runtime_readable_paths: None,
             selection: SandboxSelection::Explicit(SandboxType::None),
             network: SandboxNetwork::new(
                 /*enforce_managed_network*/ false,
@@ -124,7 +124,7 @@ fn unsandboxed_transform_preserves_foreign_cwd_and_unrestricted_file_system_poli
                 Some("remote"),
             ),
             sandbox_policy_cwd: &cwd_uri,
-            sandbox_exe: None,
+            executables: SandboxExecutables::Launcher(None),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
         })
@@ -182,11 +182,10 @@ fn symlinked_workspace_reports_seatbelt_preparation_error() {
             },
             permissions: &permissions,
             workspace_roots: None,
-            runtime_readable_paths: None,
             selection: SandboxSelection::Explicit(SandboxType::MacosSeatbelt),
             network: Default::default(),
             sandbox_policy_cwd: &workspace_uri,
-            sandbox_exe: None,
+            executables: SandboxExecutables::Launcher(None),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
         })
@@ -237,11 +236,10 @@ fn transform_additional_permissions_enable_network_for_external_sandbox() {
             },
             permissions: &permissions,
             workspace_roots: None,
-            runtime_readable_paths: None,
             selection: SandboxSelection::Explicit(SandboxType::None),
             network: Default::default(),
             sandbox_policy_cwd: &cwd_uri,
-            sandbox_exe: None,
+            executables: SandboxExecutables::Launcher(None),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
         })
@@ -326,11 +324,10 @@ fn transform_additional_permissions_preserves_denied_entries() {
             },
             permissions: &permissions,
             workspace_roots: Some(roots),
-            runtime_readable_paths: Some(&[]),
             selection: SandboxSelection::Explicit(SandboxType::None),
             network: Default::default(),
             sandbox_policy_cwd: &cwd_uri,
-            sandbox_exe: None,
+            executables: SandboxExecutables::Launcher(None),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
         };
@@ -405,11 +402,10 @@ fn sandbox_transform_request(cwd: &PathUri, sandbox: SandboxType) -> SandboxTran
         },
         permissions: &PermissionProfile::Disabled,
         workspace_roots: None,
-        runtime_readable_paths: None,
         selection: SandboxSelection::Explicit(sandbox),
         network: Default::default(),
         sandbox_policy_cwd: cwd,
-        sandbox_exe: None,
+        executables: SandboxExecutables::Launcher(None),
         use_legacy_landlock: false,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     }
@@ -440,81 +436,10 @@ fn transform_linux_seccomp_request(
     let cwd = PathUri::from_abs_path(&AbsolutePathBuf::current_dir().expect("current dir"));
     manager
         .transform(SandboxTransformRequest {
-            sandbox_exe: Some(codex_linux_sandbox_exe),
+            executables: SandboxExecutables::Launcher(Some(codex_linux_sandbox_exe)),
             ..sandbox_transform_request(&cwd, SandboxType::LinuxSeccomp)
         })
         .expect("transform")
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn wsl1_rejects_linux_bubblewrap_path() {
-    let restricted_policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
-        path: FileSystemPath::Special {
-            value: FileSystemSpecialPath::Root,
-        },
-        access: FileSystemAccessMode::Read,
-        missing_path_behavior: None,
-    }]);
-
-    assert!(matches!(
-        super::ensure_linux_bubblewrap_is_supported(
-            &restricted_policy,
-            /*use_legacy_landlock*/ false,
-            /*allow_network_for_proxy*/ false,
-            /*is_wsl1*/ true,
-        ),
-        Err(super::SandboxTransformError::Wsl1UnsupportedForBubblewrap)
-    ));
-    assert!(matches!(
-        super::ensure_linux_bubblewrap_is_supported(
-            &FileSystemSandboxPolicy::unrestricted(),
-            /*use_legacy_landlock*/ false,
-            /*allow_network_for_proxy*/ true,
-            /*is_wsl1*/ true,
-        ),
-        Err(super::SandboxTransformError::Wsl1UnsupportedForBubblewrap)
-    ));
-    assert!(matches!(
-        super::ensure_linux_bubblewrap_is_supported(
-            &FileSystemSandboxPolicy::unrestricted(),
-            /*use_legacy_landlock*/ true,
-            /*allow_network_for_proxy*/ true,
-            /*is_wsl1*/ true,
-        ),
-        Err(super::SandboxTransformError::Wsl1UnsupportedForBubblewrap)
-    ));
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn wsl1_allows_non_bubblewrap_linux_paths() {
-    assert!(
-        super::ensure_linux_bubblewrap_is_supported(
-            &FileSystemSandboxPolicy::unrestricted(),
-            /*use_legacy_landlock*/ false,
-            /*allow_network_for_proxy*/ false,
-            /*is_wsl1*/ true,
-        )
-        .is_ok()
-    );
-
-    let restricted_policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
-        path: FileSystemPath::Special {
-            value: FileSystemSpecialPath::Root,
-        },
-        access: FileSystemAccessMode::Read,
-        missing_path_behavior: None,
-    }]);
-    assert!(
-        super::ensure_linux_bubblewrap_is_supported(
-            &restricted_policy,
-            /*use_legacy_landlock*/ true,
-            /*allow_network_for_proxy*/ false,
-            /*is_wsl1*/ true,
-        )
-        .is_ok()
-    );
 }
 
 #[cfg(target_os = "linux")]
@@ -563,7 +488,7 @@ async fn inherited_terminal_preserves_native_linux_helper_and_uses_its_dispatch_
     use std::os::unix::fs::symlink;
 
     let dir = tempfile::tempdir()?;
-    let alias = OsStr::new(crate::landlock::CODEX_LINUX_SANDBOX_ARG0);
+    let alias = OsStr::new(crate::linux::CODEX_LINUX_SANDBOX_ARG0);
     let alias_path = dir.path().join(alias);
     for (helper, expected_arg0) in [
         (alias_path.clone(), alias_path.as_os_str()),
@@ -727,7 +652,6 @@ async fn check_linux_managed_policy(transparent_tcp: bool) -> anyhow::Result<()>
             },
             permissions: &PermissionProfile::Disabled,
             workspace_roots: None,
-            runtime_readable_paths: None,
             selection: SandboxSelection::Explicit(SandboxType::LinuxSeccomp),
             network: SandboxNetwork::new(
                 enforce_managed_network,
@@ -735,7 +659,9 @@ async fn check_linux_managed_policy(transparent_tcp: bool) -> anyhow::Result<()>
                 /*environment_id*/ None,
             ),
             sandbox_policy_cwd: &cwd_uri,
-            sandbox_exe: Some(std::path::Path::new("/tmp/codex-linux-sandbox")),
+            executables: SandboxExecutables::Launcher(Some(std::path::Path::new(
+                "/tmp/codex-linux-sandbox",
+            ))),
             use_legacy_landlock: false,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
         })?;

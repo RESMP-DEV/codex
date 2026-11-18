@@ -203,8 +203,7 @@ pub enum Feature {
     StandaloneWebSearch,
     /// Let the host authorize MCP search independently of native search through per-turn policy.
     HostedSearchPolicy,
-    /// Use the legacy Landlock Linux sandbox fallback instead of the default
-    /// bubblewrap pipeline.
+    /// Request the legacy Landlock mode of the Linux sandbox.
     UseLegacyLandlock,
     /// Experimental shell snapshotting.
     ShellSnapshot,
@@ -235,6 +234,8 @@ pub enum Feature {
     LocalThreadStoreSharedCompression,
     /// Migrate legacy local rollout files to paginated history in the background.
     BackgroundPaginatedRolloutMigration,
+    /// Enroll paginated local threads in canonical realtime frame history.
+    RealtimeFramesLocal,
     /// Enable the Chronicle sidecar for passive screen-context memories.
     Chronicle,
     /// Compress request bodies (zstd) when sending streaming requests to codex-backend.
@@ -1503,6 +1504,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::BackgroundPaginatedRolloutMigration,
         key: "background_paginated_rollout_migration",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::RealtimeFramesLocal,
+        key: "realtime_frames_local",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

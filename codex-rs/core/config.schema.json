@@ -1286,6 +1286,9 @@
             "realtime_conversation": {
               "type": "boolean"
             },
+            "realtime_frames_local": {
+              "type": "boolean"
+            },
             "reasoning_effort_override": {
               "type": "boolean"
             },
@@ -5496,6 +5499,8 @@
               "hide": null,
               "new_task": null,
               "new_worktree": null,
+              "next_group": null,
+              "previous_group": null,
               "rename": null,
               "resume": null,
               "search": null,
@@ -5934,6 +5939,22 @@
             }
           ],
           "description": "Open a new session in a worktree from the project default branch."
+        },
+        "next_group": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Select the first task in the next group."
+        },
+        "previous_group": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Select the first task in the previous group."
         },
         "rename": {
           "allOf": [
@@ -6691,6 +6712,8 @@
             "hide": null,
             "new_task": null,
             "new_worktree": null,
+            "next_group": null,
+            "previous_group": null,
             "rename": null,
             "resume": null,
             "search": null,
@@ -8576,6 +8599,9 @@
           "type": "boolean"
         },
         "realtime_conversation": {
+          "type": "boolean"
+        },
+        "realtime_frames_local": {
           "type": "boolean"
         },
         "reasoning_effort_override": {

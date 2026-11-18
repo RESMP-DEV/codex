@@ -27,6 +27,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_sandboxing::SandboxCommand;
+use codex_sandboxing::SandboxExecutables;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxNetwork;
 use codex_sandboxing::SandboxSelection;
@@ -40,7 +41,7 @@ use tokio::process::Child;
 use tokio::process::Command as TokioCommand;
 use toml::Value as TomlValue;
 
-use crate::LandlockCommand;
+use crate::LinuxSandboxCommand;
 use crate::SeatbeltCommand;
 use crate::WindowsCommand;
 use crate::exit_status::handle_exit_status;
@@ -96,12 +97,12 @@ pub async fn run_command_under_seatbelt(
     anyhow::bail!("Seatbelt sandbox is only available on macOS");
 }
 
-pub async fn run_command_under_landlock(
-    command: LandlockCommand,
+pub async fn run_command_under_linux_sandbox(
+    command: LinuxSandboxCommand,
     codex_linux_sandbox_exe: Option<PathBuf>,
     loader_overrides: LoaderOverrides,
 ) -> anyhow::Result<()> {
-    let LandlockCommand {
+    let LinuxSandboxCommand {
         transparent_tcp,
         sandbox_state,
         permissions_profile,
@@ -126,7 +127,7 @@ pub async fn run_command_under_landlock(
         command,
         config_overrides,
         codex_linux_sandbox_exe,
-        SandboxType::Landlock { transparent_tcp },
+        SandboxType::Linux { transparent_tcp },
         /*log_denials*/ false,
         &[],
     )
@@ -172,7 +173,7 @@ pub async fn run_command_under_windows_sandbox(
 enum SandboxType {
     #[cfg(target_os = "macos")]
     Seatbelt,
-    Landlock {
+    Linux {
         transparent_tcp: bool,
     },
     Windows,
@@ -309,7 +310,7 @@ async fn run_command_under_sandbox(
     };
 
     let transparent_tcp = match sandbox_type {
-        SandboxType::Landlock { transparent_tcp } => {
+        SandboxType::Linux { transparent_tcp } => {
             transparent_tcp
                 || config
                     .permissions
@@ -329,7 +330,7 @@ async fn run_command_under_sandbox(
         SandboxEnforcement::Managed => match sandbox_type {
             #[cfg(target_os = "macos")]
             SandboxType::Seatbelt => SandboxBackend::MacosSeatbelt,
-            SandboxType::Landlock { .. } => SandboxBackend::LinuxSeccomp,
+            SandboxType::Linux { .. } => SandboxBackend::LinuxSeccomp,
             #[cfg(windows)]
             SandboxType::Windows if windows_sandbox_type == WindowsMxc => WindowsMxc,
             #[cfg(windows)]
@@ -437,7 +438,6 @@ async fn run_command_under_sandbox(
         },
         permissions: &permission_profile,
         workspace_roots: workspace_roots.as_deref(),
-        runtime_readable_paths: None,
         selection: SandboxSelection::Explicit(sandbox),
         network: SandboxNetwork::new(
             network.is_some(),
@@ -445,7 +445,7 @@ async fn run_command_under_sandbox(
             /*environment_id*/ None,
         ),
         sandbox_policy_cwd: &cwd,
-        sandbox_exe: sandbox_exe.as_deref(),
+        executables: SandboxExecutables::Launcher(sandbox_exe.as_deref()),
         use_legacy_landlock,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     })?;

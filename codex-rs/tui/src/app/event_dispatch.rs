@@ -101,6 +101,7 @@ impl App {
                     | AppEvent::SideChatArchived { .. }
                     | AppEvent::SavedChatPrepared { .. } | AppEvent::SavedChatReleased { .. }
                     | AppEvent::StartQueuedSavedChat
+                    | AppEvent::OpenSidebarAgent { .. }
                     | AppEvent::OpenSidebarDocument { .. }
                     | AppEvent::SidebarDocumentResolved { .. }
                     | AppEvent::SidebarDocumentLoaded { .. }
@@ -178,6 +179,7 @@ impl App {
                 event,
                 AppEvent::OpenAgentPicker
                     | AppEvent::SelectAgentThread(_)
+                    | AppEvent::OpenSidebarAgent { .. }
                     | AppEvent::StartSide { .. }
                     | AppEvent::ForkCurrentSession { .. }
                     | AppEvent::StartManagedWorktree {
@@ -229,6 +231,7 @@ impl App {
         };
         match event {
             AppEvent::OpenDaemonMenu => self.open_daemon_menu(),
+            AppEvent::RemoteControl(_) | AppEvent::RemoteControlForBackend { .. } | AppEvent::RemoteControlFinished { .. } => {}
             AppEvent::ConfirmDaemonRestart => self.confirm_daemon_restart(),
             AppEvent::RunDaemonRestart => {
                 if self.chat_widget.remote_connection.as_ref().is_some_and(|connection| connection.is_managed_daemon)
@@ -766,7 +769,7 @@ impl App {
                     }
                     self.chat_widget.fork_in_progress = true;
                     // This handler awaits the fork outside the draw loop. Paint before waiting.
-                    let screen_size = tui.terminal.last_known_screen_size;
+                    let screen_size = tui.prepare_draw_size()?;
                     self.handle_draw_pre_render(tui, screen_size)?;
                     self.chat_widget.pre_draw_tick();
                     self.render_chat_widget_frame(tui, screen_size)?;
@@ -1075,7 +1078,10 @@ impl App {
                 self.begin_thread_switch_history_replay_buffer();
             }
             AppEvent::ParkSideCompanion { pair, thread_id, stream, display } => {
-                if self.side_threads.contains_key(&pair) {
+                if self.side_threads.contains_key(&pair)
+                    || self.sidebars.get(&self.primary_thread_id)
+                        .is_some_and(|pane| pane.agents.detail == Some(pair))
+                {
                     self.transcript_view.sync_history_tail(&self.transcript_cells);
                     let mut answer = None;
                     if let Some(stream) = stream {
@@ -1479,7 +1485,7 @@ impl App {
                         | AppCommand::RealtimeConversationSpeech { .. }
                 );
                 if is_user_turn {
-                    let screen_size = tui.terminal.last_known_screen_size;
+                    let screen_size = tui.prepare_draw_size()?;
                     self.handle_draw_pre_render(tui, screen_size)?;
                     if self.transcript_reflow.has_pending_reflow() {
                         self.transcript_reflow.schedule_immediate();
@@ -2114,6 +2120,7 @@ impl App {
                 self.skill_load_warnings.startup_complete = true;
             }
             AppEvent::StartFileSearch(query) => {
+                app_server.task_search.cancel();
                 self.file_search.on_user_query(query.clone());
                 if let Some(thread_id) = self.active_thread_id
                     && app_server.task_tools_available(thread_id)
@@ -2129,12 +2136,12 @@ impl App {
                                 .map(std::path::Path::to_path_buf)
                         })
                         .unwrap_or_else(|| self.config.cwd.to_path_buf());
-                    crate::task_mentions::spawn_search(
-                        app_server.request_handle(),
+                    let handle = app_server.request_handle();
+                    app_server.task_search.spawn(
+                        handle,
                         query,
                         thread_id,
                         cwd,
-                        app_server.task_search_generation(),
                         self.app_event_tx.clone(),
                     );
                 }
@@ -3577,17 +3584,26 @@ impl App {
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker(app_server).await;
             }
+            AppEvent::DiscoverSidebarAgents(root) => {
+                if self.primary_thread_id == Some(root) && !self.reconnect.offline {
+                    self.refresh_agent_picker_threads(app_server, root);
+                }
+            }
             AppEvent::AgentPickerThreadsLoaded {
                 primary_thread_id,
                 request_id,
                 result,
             } => {
-                self.apply_agent_picker_thread_refresh(
+                if let Some(link) = self.apply_agent_picker_thread_refresh(
                     app_server,
                     primary_thread_id,
                     request_id,
                     result,
-                );
+                )
+                    && self.sidebar_agent_link_root(tui, link.source) == Some(primary_thread_id)
+                {
+                    self.open_sidebar_agent(tui, app_server, link.agent).await?;
+                }
             }
             AppEvent::SelectAgentThread(thread_id) => {
                 self.select_agent_thread(tui, app_server, thread_id)
@@ -3653,6 +3669,18 @@ impl App {
                     && self.wants_saved_chat(target)
                 {
                     Box::pin(self.open_saved_chat(tui, app_server, target)).await?;
+                }
+            }
+            AppEvent::OpenSidebarAgent { backend, source, agent } => {
+                if backend == app_server.backend_id()
+                    && let Some(root) = self.sidebar_agent_link_root(tui, source)
+                {
+                    if self.is_confirmed_sidebar_agent(root, agent) {
+                        self.open_sidebar_agent(tui, app_server, agent).await?;
+                    } else if self.agent_navigation.picker_refresh.as_ref().is_some_and(|refresh| refresh.root == root) {
+                        // Resume can paint a link before its owning thread list returns.
+                        self.sidebar_mut().agents.pending_link = Some(sidebar_subagents::PendingLink { backend, source, agent });
+                    }
                 }
             }
             AppEvent::OpenSidebarDocument { backend_id, source, link } => {
@@ -4519,8 +4547,11 @@ impl App {
             self.chat_widget
                 .set_footer_hint_override(Some(vec![("Archiving…".into(), String::new())]));
             // Cleanup waits outside the event loop. Paint before sending its first request.
-            let screen_size = tui.terminal.last_known_screen_size;
-            if let Err(error) = self.render_chat_widget_frame(tui, screen_size) {
+            if let Err(error) = (|| -> Result<_> {
+                let screen_size = tui.prepare_draw_size()?;
+                self.handle_draw_pre_render(tui, screen_size)?;
+                self.render_chat_widget_frame(tui, screen_size)
+            })() {
                 tracing::warn!(%error, "failed to render archive progress");
             }
         }

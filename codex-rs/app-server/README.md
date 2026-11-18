@@ -37,6 +37,23 @@ across account switches. Resume and revert preserve that distinction; forks are 
 Scoped requests skip candidates whose rollout header cannot be read. API-key
 logins see all local history. Direct access by thread ID remains available.
 
+# Streaming thread search (experimental)
+
+`thread/search` continues to return a single paginated response. Clients that initialize
+with `experimentalApi: true` can instead call `thread/search/stream` with the same params
+(a maximum of 65,536 UTF-8 bytes for the trimmed search term).
+It emits best-effort `thread/search/partial` notifications containing the original
+`requestId` and a small subset of verified results. Partials may be dropped, may fall
+outside the final page, and use stored thread metadata; replace them with the final
+response, which is authoritative for results, ordering, and cursors.
+
+Send `thread/search/stream/cancel` with `{requestId}` on the same connection to cancel
+the original streaming request. A client can use a UUID string as the search request ID. The cancel RPC has its own ID and returns `{}`; the
+search completes independently with an error if cancellation wins, or may succeed if
+completion races cancellation. Unknown or finished IDs are no-ops. `thread/search/cancel`
+targets only the existing nonstreaming method. A JavaScript client can connect an
+`AbortSignal` listener to the corresponding cancel RPC.
+
 # Thread list ID filters
 
 `thread/list` accepts `includedThreadIds` to list specific saved threads and
@@ -612,7 +629,7 @@ PAT sessions continue to return no bearer token from `getAuthStatus`.
 
 The experimental `account/read.workspaceRouting` response field returns the selected ChatGPT workspace's `chatgptAccountId`, resolved HTTPS `backendOrigin`, and backend-provided `accountRoutingOverride`. The routing value is `us`, `us_cr`, or the explicit `NO_CONSTRAINT` value. API-only and signed-out accounts return `null` and do not need `accounts/check`.
 
-App-server discovers routing for saved ChatGPT logins at startup and for new logins or workspace switches. After requirements and routing are ready, it sends the existing `account/updated` notification. Newly initialized connections also receive this notification once saved-workspace routing is ready, including when discovery finished before the connection initialized. Clients then reread `configRequirements/read` and `account/read`. Saved ChatGPT credentials without a selected workspace ID retain their account information and return `workspaceRouting: null`; app-server does not guess a workspace from the backend's default account. Discovery failures for a selected workspace, including missing or null fields from older backends, return an `account/read` error. They never produce a successful unrestricted result. A later read retries failed discovery. Logout clears the cached routing, and results from earlier authentication owners are discarded. Token refreshes for the same known user and workspace invalidate cached routing without cancelling discovery or failing sign-in. Configuration is reloaded after discovery; a changed backend, model provider, or required backend rejects the result so the next read discovers against current configuration. Account notifications recheck the auth owner generation after waiting for outbound queue capacity. Superseded sign-in attempts emit a failed `account/login/completed` event instead of silently dropping completion. Notifications remain snapshots: clients reread current account and requirements state rather than treating a queued notification as authorization.
+App-server discovers routing for saved ChatGPT logins at startup and for new logins or workspace switches. After requirements and routing are ready, it sends the existing `account/updated` notification. Newly initialized connections also receive this notification once saved-workspace routing is ready, including when discovery finished before the connection initialized. This initial notification carries `reason: "workspaceRoutingReady"` when the authenticated owner generation is unchanged. Login, logout, and workspace-switch notifications include `reason: null`. Clients then reread `configRequirements/read` and `account/read`. Saved ChatGPT credentials without a selected workspace ID retain their account information and return `workspaceRouting: null`; app-server does not guess a workspace from the backend's default account. Discovery failures for a selected workspace, including missing or null fields from older backends, return an `account/read` error. They never produce a successful unrestricted result. A later read retries failed discovery. Logout clears the cached routing, and results from earlier authentication owners are discarded. Token refreshes for the same known user and workspace invalidate cached routing without cancelling discovery or failing sign-in. Configuration is reloaded after discovery; a changed backend, model provider, or required backend rejects the result so the next read discovers against current configuration. Account notifications recheck the auth owner generation after waiting for outbound queue capacity. Superseded sign-in attempts emit a failed `account/login/completed` event instead of silently dropping completion. Notifications remain snapshots: clients reread current account and requirements state rather than treating a queued notification as authorization.
 
 Routing compares origins by scheme, host, and effective port, ignoring API paths. A required
 `chatgpt_base_url` must match discovery; if neither provides an origin, `NO_CONSTRAINT` uses the
@@ -964,6 +981,28 @@ managed fields. Configuration writes that overlap managed settings are rejected.
 
 Exporter header values are redacted in effective config, source layers, managed
 requirements, and write-override metadata. Runtime exporters retain the original values.
+
+A system `requirements.toml` file or MDM requirements payload can set
+`otel.headers_helper` and its optional `otel.headers_helper_refresh_interval_ms`.
+Put the helper and each OTLP HTTP exporter that should receive its headers in
+the same requirements layer. If another layer replaces an exporter, that
+exporter uses its own configured headers.
+
+Set the managed helper to the absolute path of an executable, for example
+`/opt/company/bin/otel-auth`. Install it in a directory controlled by the
+administrator and grant Codex users permission to execute it. Codex launches
+the executable directly with its parent as the working directory. A relative
+path makes the managed requirements invalid. If the executable is missing or
+cannot run, Codex warns and pauses exports that depend on its headers until a
+refresh succeeds.
+
+**Rollout.** Install the helper and upgrade targeted clients to a release that
+supports both keys in managed requirements before enabling either key in policy.
+Older clients can reject the requirements at startup even if they support the
+helper in ordinary config. For a mixed fleet, target only upgraded devices.
+
+**Rollback.** Remove both managed keys and confirm each device has received the
+updated policy before downgrading its client or uninstalling the helper.
 
 Managed span attributes and tracestate metadata are included in effective config
 and requirements reads. Unmanaged metadata remains writable.

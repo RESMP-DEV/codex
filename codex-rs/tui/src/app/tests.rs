@@ -2398,14 +2398,17 @@ async fn archived_untracked_threads_do_not_appear_in_agent_picker() -> Result<()
         .agent_navigation
         .begin_picker_refresh(primary_thread_id)
         .expect("picker refresh after missed archive");
-    app.apply_agent_picker_thread_refresh(
-        &app_server,
-        primary_thread_id,
-        request_id,
-        Ok(crate::app_event::AgentPickerThreadRefresh {
-            threads: Vec::new(),
-            archived_thread_ids: std::collections::HashSet::from([archived_thread_id]),
-        }),
+    assert!(
+        app.apply_agent_picker_thread_refresh(
+            &app_server,
+            primary_thread_id,
+            request_id,
+            Ok(crate::app_event::AgentPickerThreadRefresh {
+                threads: Vec::new(),
+                archived_thread_ids: std::collections::HashSet::from([archived_thread_id]),
+            }),
+        )
+        .is_none()
     );
     assert_eq!(
         app.thread_event_channels[&archived_thread_id].attachment(),
@@ -4991,8 +4994,10 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     }
     let zoom = KeyEvent::from(KeyCode::Char('z'));
     keys!(prefix, zoom);
+    assert!(app.conversation_frame.side_pane().is_none());
     let zoomed = side_frame(&mut app, &mut tui, wide)?;
     keys!(prefix, zoom);
+    assert!(app.conversation_frame.side_pane().is_some());
     let restored = side_frame(&mut app, &mut tui, wide)?;
     assert_eq!(divider_at(&tui, 0), 197);
     keys!(prefix, zoom);
@@ -9248,6 +9253,7 @@ async fn make_test_app() -> Box<App> {
         daemon_cli_executable: None,
         pending_update_action: None,
         daemon_restart: None,
+        remote_control_pending: false,
         pending_shutdown_exit_thread_id: None,
         windows_sandbox: WindowsSandboxState::default(),
         thread_event_channels: HashMap::new(),
@@ -9394,6 +9400,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             daemon_cli_executable: None,
             pending_update_action: None,
             daemon_restart: None,
+            remote_control_pending: false,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
@@ -10389,7 +10396,7 @@ async fn resizing_empty_transcript_schedules_settled_size_recheck() {
     );
 }
 
-fn test_turn(turn_id: &str, status: TurnStatus, items: Vec<ThreadItemPayload>) -> Turn {
+pub(super) fn test_turn(turn_id: &str, status: TurnStatus, items: Vec<ThreadItemPayload>) -> Turn {
     Turn {
         id: turn_id.to_string(),
         root_turn_id: None,

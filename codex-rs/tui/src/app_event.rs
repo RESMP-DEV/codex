@@ -367,6 +367,15 @@ pub(crate) enum AppEvent {
         notice: crate::security_setup::Notice,
     },
     OpenDaemonMenu,
+    RemoteControl(crate::app::remote_control::Action),
+    RemoteControlForBackend {
+        backend_id: crate::backend_id::BackendId,
+        action: crate::app::remote_control::Action,
+    },
+    RemoteControlFinished {
+        backend_id: crate::backend_id::BackendId,
+        result: crate::app::remote_control::Outcome,
+    },
     ConfirmDaemonRestart,
     RunDaemonRestart,
     ConfirmDaemonUpdate(crate::update_action::DaemonUpdateSource),
@@ -480,6 +489,8 @@ pub(crate) enum AppEvent {
     },
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
+    /// Discover saved subagents on the owning backend after attaching a primary thread.
+    DiscoverSidebarAgents(ThreadId),
     /// Merge a completed root-scoped agent-picker refresh without blocking terminal input.
     AgentPickerThreadsLoaded {
         primary_thread_id: ThreadId,
@@ -525,6 +536,11 @@ pub(crate) enum AppEvent {
         request: uuid::Uuid,
     },
     StartQueuedSavedChat,
+    OpenSidebarAgent {
+        backend: crate::backend_id::BackendId,
+        source: ThreadId,
+        agent: ThreadId,
+    },
     OpenSidebarDocument {
         backend_id: crate::backend_id::BackendId,
         source: ThreadId,

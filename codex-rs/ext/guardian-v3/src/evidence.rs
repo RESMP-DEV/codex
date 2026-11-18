@@ -20,7 +20,6 @@ use codex_thread_store::ThreadStoreResult;
 use codex_utils_string::to_json_string_bounded;
 use serde::Deserialize;
 use serde::Serialize;
-use std::sync::Arc;
 
 /// Position in the containing snapshot's root history, independent of channel routing.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -37,15 +36,6 @@ impl EvidenceId {
             /*max_bytes*/ 512,
         )?)
     }
-
-    pub(crate) fn from_request_id(request: &str, channel: &str) -> anyhow::Result<Self> {
-        let (ordinal, destination): (u64, String) = serde_json::from_str(request)?;
-        ensure!(
-            destination == channel,
-            "evidence request ID channel mismatch"
-        );
-        Ok(Self { ordinal })
-    }
 }
 
 /// Original model-visible evidence, with roles, call IDs and verified source order.
@@ -59,13 +49,11 @@ pub struct OriginalEvidence {
 }
 
 /// An immutable capture. Later history appends cannot enter its reads or routing.
-/// Clones share the captured records rather than copying message payloads.
-#[derive(Clone)]
 pub struct EvidenceSnapshot {
     thread_id: ThreadId,
     start: HistoryPosition,
     end: HistoryPosition,
-    records: Arc<[OriginalEvidence]>,
+    records: Vec<OriginalEvidence>,
     // Report these positions only when the intake cursor accepts this capture.
     pub(super) skipped_incomplete_deliveries: Vec<u64>,
 }
@@ -188,7 +176,7 @@ impl EvidenceCursor {
             thread_id: self.thread_id,
             start: self.position,
             end,
-            records: records.into(),
+            records,
             skipped_incomplete_deliveries,
         })
     }

@@ -190,7 +190,9 @@ impl App {
             return Ok(());
         }
         self.chat_widget.pre_draw_tick();
-        self.render_chat_widget_frame(tui, tui.terminal.last_known_screen_size)?;
+        let screen_size = tui.prepare_draw_size()?;
+        self.handle_draw_pre_render(tui, screen_size)?;
+        self.render_chat_widget_frame(tui, screen_size)?;
         if self.chat_widget.has_active_modal() && self.startup_protected_input_boundary {
             self.discard_startup_modal_input(tui)?;
         }
@@ -1057,6 +1059,7 @@ See the Codex keymap documentation for supported actions and examples."
             daemon_cli_executable,
             pending_update_action: None,
             daemon_restart: None,
+            remote_control_pending: false,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState {
                 prompt_after_trust: should_prompt_windows_sandbox_nux_at_startup
@@ -1560,6 +1563,15 @@ See the Codex keymap documentation for supported actions and examples."
                             && let Some(slot) = backends.slot(*backend_id)
                         {
                             backends.parked_inputs_mut(slot).remove(thread_id);
+                        }
+                        if matches!(&event, AppEvent::RemoteControl(_) | AppEvent::RemoteControlForBackend { .. } | AppEvent::RemoteControlFinished { .. }) {
+                            super::remote_control::handle(&mut app, &backends, event);
+                            if app.chat_widget.has_active_modal()
+                                && let Err(err) = app.render_startup_frame(tui, &app_event_rx)
+                            {
+                                break Err(err);
+                            }
+                            continue;
                         }
                         let switch_backend = match &event {
                             AppEvent::ChooseCloudEnvironment => {

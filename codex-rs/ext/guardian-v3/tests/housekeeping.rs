@@ -1,11 +1,13 @@
 //! Original evidence is routed by a retained housekeeper conversation into a real board.
 
 #![allow(clippy::expect_used)]
+#![recursion_limit = "256"]
 
 use chrono::Utc;
 use codex_guardian_v3::EvidenceCursor;
 use codex_guardian_v3::HOUSEKEEPER_INSTRUCTIONS;
 use codex_guardian_v3::Housekeeper;
+use codex_guardian_v3::LiveDelivery;
 use codex_guardian_v3::local_board;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
@@ -161,8 +163,14 @@ async fn routes_captured_originals_and_updates_descriptions(
         )
         .await?;
     let board_handle: Arc<dyn AgentMessageBoard> = board.clone();
-    let mut housekeeper =
-        Housekeeper::new(board_handle, cursor, &test.codex, &test.thread_manager).await?;
+    let mut housekeeper = Housekeeper::new(
+        board_handle,
+        cursor,
+        Arc::new(LiveDelivery::new(owner)),
+        &test.codex,
+        &test.thread_manager,
+    )
+    .await?;
     let cancellation = CancellationToken::new();
     let reply = match case {
         RoutingCase::MissingNewDescription => {
@@ -455,9 +463,19 @@ async fn routes_captured_originals_and_updates_descriptions(
             json!({"catalog":catalog,"sources":[source]})
         );
     }
-    let view = board.read_view(owner).await?;
-    let release = view
-        .channels()
+    let catalog = board
+        .list_channels(
+            owner,
+            ChannelQuery {
+                query: Some("release".into()),
+                direction: SortDirection::OldestFirst,
+                page: PageRequest::default(),
+            },
+        )
+        .await?;
+    let release = catalog
+        .channels
+        .results
         .iter()
         .find(|channel| channel.channel_name == "release");
     assert_eq!(
@@ -733,8 +751,14 @@ async fn command_token_rotation_between_batches_reauthenticates_the_housekeeper(
         .read_write()
         .open(board_host(root))
         .await?;
-    let mut housekeeper =
-        Housekeeper::new(Arc::new(board), cursor, &test.codex, &test.thread_manager).await?;
+    let mut housekeeper = Housekeeper::new(
+        Arc::new(board),
+        cursor,
+        Arc::new(LiveDelivery::new(root)),
+        &test.codex,
+        &test.thread_manager,
+    )
+    .await?;
     for (index, text) in ["Hold the release.", "The release is approved."]
         .into_iter()
         .enumerate()
@@ -778,6 +802,192 @@ async fn command_token_rotation_between_batches_reauthenticates_the_housekeeper(
             Some("Bearer second-token".to_owned())
         ]
     );
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn subscribed_evidence_reaches_the_retained_reviewer_when_it_becomes_idle()
+-> anyhow::Result<()> {
+    use codex_core::guardian_review::prepare_review_prewarm;
+    use codex_extension_api::ExtensionData;
+    use codex_extension_api::ExtensionRegistryBuilder;
+    use codex_extension_api::ThreadReadyInput;
+    use codex_extension_api::ThreadStopInput;
+    use codex_guardian_reviewer::SessionDisposition;
+    use codex_message_board::SubscriptionChange;
+    use codex_message_board::SubscriptionRequest;
+    use codex_message_board::SubscriptionTarget;
+    use codex_protocol::models::ResponseItem;
+    use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::SubAgentSource;
+    use codex_protocol::turn_input::TurnInputRequest;
+    use codex_protocol::user_input::UserInput;
+    use core_test_support::wait_for_successful_turn;
+
+    core_test_support::skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_history_mode(ThreadHistoryMode::Paginated)
+        .with_model_info_override("gpt-5.6-luna", |_| {})
+        .with_config(|config| config.approvals_reviewer = ApprovalsReviewer::User)
+        .build_with_auto_env(&server)
+        .await?;
+    let actor_thread = &test.codex;
+    let root = actor_thread.startup_metadata().thread_id;
+    let mut registry = ExtensionRegistryBuilder::default();
+    codex_guardian_v3::install(
+        &mut registry,
+        Arc::downgrade(&test.thread_manager),
+        test.config.sqlite_config().clone(),
+        |root| board_host(root),
+    );
+    let registry = registry.build();
+    let session = ExtensionData::new(root.to_string());
+    let thread = actor_thread.thread_extension_data();
+    let lifecycle = &registry.thread_lifecycle_contributors()[0];
+    let child = ExtensionData::new(codex_protocol::ThreadId::new().to_string());
+    lifecycle
+        .on_thread_ready(ThreadReadyInput {
+            config: &test.config,
+            session_source: &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            }),
+            history_initialization: codex_history::HistoryInitialization::New,
+            history_mode: ThreadHistoryMode::Paginated,
+            session_store: &session,
+            thread_store: &child,
+        })
+        .await;
+    assert!(child.get::<codex_guardian_v3::ActorReviewer>().is_none());
+    lifecycle
+        .on_thread_ready(ThreadReadyInput {
+            config: &test.config,
+            session_source: &SessionSource::Exec,
+            history_initialization: codex_history::HistoryInitialization::New,
+            history_mode: ThreadHistoryMode::Paginated,
+            session_store: &session,
+            thread_store: thread,
+        })
+        .await;
+    let actor = thread
+        .get::<codex_guardian_v3::ActorReviewer>()
+        .expect("reviewer installed");
+    let context = prepare_review_prewarm(actor_thread, codex_guardian_v3::BOARD_RETRIEVAL).await?;
+    let cancel = CancellationToken::new();
+    let first = actor.reserve(&context, &cancel).await?;
+    let id = first.thread_id();
+    let reviewer = test
+        .thread_manager
+        .get_thread_with_extension::<codex_guardian_v3::LiveRetrievalBinding>(id, |_| true)
+        .await?;
+    let board = local_board(test.config.sqlite_config().clone(), root.into())
+        .read_write()
+        .open(board_host(root))
+        .await?;
+    board
+        .upsert_channel(
+            root,
+            UpsertChannelRequest {
+                channel_name: "release".into(),
+                description: "Release policy".to_owned().try_into()?,
+            },
+        )
+        .await?;
+    board
+        .set_subscription(
+            root,
+            SubscriptionRequest {
+                target: SubscriptionTarget::Channel("release".into()),
+                target_agent: None,
+                change: SubscriptionChange::Subscribe,
+            },
+        )
+        .await?;
+    let model = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_assistant_message("route", r#"{"routes":[["release"]],"descriptions":{}}"#),
+                ev_completed("route"),
+            ]),
+            sse(vec![
+                ev_assistant_message("verdict", "Deny the release."),
+                ev_completed("verdict"),
+            ]),
+        ],
+    )
+    .await;
+    test.thread_store
+        .persist_thread(root, PersistContext::Standard)
+        .await?;
+    test.thread_store
+        .append_items(AppendThreadItemsParams {
+            thread_id: root,
+            items: vec![RolloutItem::ResponseItem(ResponseItemEnvelope {
+                item: user_message_item("Stop the release."),
+                metadata: Some(CodexHarnessMetadata {
+                    user_input_order: Some(1),
+                    ..Default::default()
+                }),
+            })],
+        })
+        .await?;
+    let evidence = thread
+        .get::<codex_guardian_v3::RootEvidence>()
+        .expect("root intake");
+    evidence.request_catch_up().await?.await?;
+    let has_delivery = |items: &dyn codex_extension_api::ConversationHistorySnapshot| {
+        items.items().any(|item| matches!(item, ResponseItem::FunctionCallOutput { name: Some(name), output, .. }
+            if name == "guardian_original_evidence" && output.text_content().is_some_and(|text| text.contains("Stop the release."))))
+    };
+    assert!(!has_delivery(
+        reviewer.conversation_history_snapshot().await.as_ref()
+    ));
+    first.finish(SessionDisposition::Reusable);
+    // Observe the reviewer directly. Reserving it again here would hide a lazy-delivery regression.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !has_delivery(reviewer.conversation_history_snapshot().await.as_ref()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    assert_eq!(model.requests().len(), 1, "only the housekeeper sampled");
+    let second = actor.reserve(&context, &cancel).await?;
+    assert_eq!(id, second.thread_id());
+    reviewer
+        .start_turn_if_idle(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Assess the release.".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_successful_turn(&reviewer).await;
+    let [_, request] = &model.requests()[..] else {
+        anyhow::bail!("expected one routing request and one reviewer request");
+    };
+    assert!(request.body_contains_text("Stop the release."));
+    insta::assert_snapshot!(
+        "guardian_reviewer_routed_original",
+        context_snapshot::format_request_history_snapshot(
+            "The retained reviewer receives the subscribed original before assessing the action.",
+            std::slice::from_ref(request),
+            &ContextSnapshotOptions::default().rewrite_known_segments(),
+        )
+    );
+    drop(second);
+    let third = actor.reserve(&context, &cancel).await?;
+    assert_ne!(id, third.thread_id());
+    third.finish(SessionDisposition::Discard);
+    lifecycle
+        .on_thread_stop(ThreadStopInput {
+            thread_store: thread,
+            session_store: &session,
+        })
+        .await;
     test.codex.shutdown_and_wait().await?;
     Ok(())
 }

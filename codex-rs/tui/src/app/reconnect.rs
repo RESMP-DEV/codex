@@ -419,6 +419,7 @@ impl App {
         *app_event_rx = rx;
         for pane in self.sidebars.values_mut() {
             pane.focus_document_request = None;
+            pane.agents.pending_link = None;
             for doc in pane.documents.values_mut() {
                 doc.connection_replaced();
             }
@@ -565,6 +566,11 @@ impl App {
                 self.agent_navigation.mark_stopped(id);
             }
             if self.primary_thread_id == Some(id) {
+                self.restore_sidebar_agent_outcomes(
+                    id,
+                    &started.turns,
+                    super::sidebar_subagents::OutcomeReplay::Reconnect,
+                );
                 self.primary_session_configured = Some(started.session.clone());
             }
             if started.blocks_direct_input {

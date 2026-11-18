@@ -83,7 +83,8 @@
 //! the Chinese closing book-title bracket (`》`), takes the place of a newly inserted separator.
 //! Existing whitespace stays part of the draft.
 //!
-//! `Esc` records the active token as dismissed. A completed value that begins with `@` or `$` is
+//! `Esc` records the active token as dismissed and resets any pending unified mention search.
+//! A completed value that begins with `@` or `$` is
 //! also re-dismissed before popup synchronization, because separator affinity can still identify
 //! the completed token to the left of the cursor. Synchronization keeps the popup hidden only while
 //! the query, complete token text, and ordinal among matching occurrences remain the same.
@@ -191,7 +192,8 @@
 //!
 //! During reconnection, `handle_restricted_key` edits the draft directly without popup dispatch,
 //! composer shortcuts, or submission; `?` becomes literal input. Enter and Tab leave the draft
-//! intact until reconnection succeeds, except for `/warnings`, `/config`, `/quit`, and `/exit`.
+//! intact until reconnection succeeds, except for `/warnings`, `/config`, `/rc` (alias `/remote`,
+//! including `stop`), `/quit`, and `/exit`.
 //! When connected but the thread is unavailable, configured
 //! submit keys may dispatch explicitly allowed recovery and local commands; other drafts stay put.
 //! Empty-prompt agents navigation remains available with its usual editor and draft guards.
@@ -526,7 +528,7 @@ pub enum InputResult {
 fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
     if matches!(
         command,
-        SlashCommand::Export | SlashCommand::Title | SlashCommand::Statusline
+        SlashCommand::Export | SlashCommand::Title | SlashCommand::Statusline | SlashCommand::Rc
     ) {
         return true;
     }
@@ -2513,6 +2515,10 @@ impl ChatComposer {
                     self.popups.dismissed_mention_token =
                         Some(DismissedToken::new(&self.draft.textarea, range, query));
                 }
+                if self.popups.current_file_query.take().is_some() {
+                    self.app_event_tx
+                        .send(AppEvent::StartFileSearch(String::new()));
+                }
                 self.popups.active = ActivePopup::None;
                 (InputResult::None, true)
             }
@@ -3489,7 +3495,7 @@ impl ChatComposer {
             matches!(
                 self.slash_input().command(name),
                 Some(SlashCommandItem::Builtin(command))
-                    if name == command.command()
+                    if (name == command.command() || command == SlashCommand::Rc && name == "remote")
                         && parent_owned_command_is_allowed(command, args)
             )
         });
@@ -8054,6 +8060,11 @@ mod tests {
         composer.on_file_search_result("foo".to_string(), Vec::new());
         let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(matches!(composer.popups.active, ActivePopup::None));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AppEvent::StartFileSearch(query)) if query.is_empty()
+        ));
+        assert!(composer.popups.current_file_query.is_none());
 
         composer.draft.textarea.set_cursor("@foo @foo".len());
         composer.sync_popups();

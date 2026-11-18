@@ -508,15 +508,14 @@ async fn handle_approved_mcp_tool_call(
     } else {
         None
     };
-    // Code Mode can retain this step past a later turn's first native call.
-    // A call rejected here never reaches the peer or acquires MCP attribution.
-    if matches!(
-        search.as_deref(),
-        Some(crate::model_search::ModelSearch::Hosted { .. })
-    ) && !crate::model_search::SearchOwner::admit(
-        &sess.services.thread_extension_data,
-        codex_protocol::openai_models::WebSearchProvider::SearchMcp,
-    ) {
+    // Every Search MCP call can create provider-specific references. Claim Search MCP before the
+    // peer runs so a stale Code Mode call cannot mix them with native search references.
+    if is_search
+        && !crate::model_search::SearchOwner::admit(
+            &sess.services.thread_extension_data,
+            codex_protocol::openai_models::WebSearchProvider::SearchMcp,
+        )
+    {
         let result = notify_mcp_tool_call_skip(
             sess,
             turn_context,
@@ -2115,6 +2114,22 @@ pub(crate) fn build_guardian_mcp_tool_review_request(
             }),
         prompt_permissions: None,
     }
+}
+
+/// Connector identity only when this exact App call is enabled and needs no user approval.
+pub(crate) fn bundled_app_hook_connector(call: &PreparedMcpCall) -> Option<&str> {
+    let info = call.tool_info();
+    if !call.is_host_owned_apps() {
+        return None;
+    }
+    let metadata = mcp_tool_metadata(info, call.plugin_id(), /*arguments*/ None).ok()?;
+    let policy = app_tool_policy(call.config(), &metadata, &info.tool.name);
+    if !policy.enabled
+        || requires_mcp_tool_approval_for_mode(metadata.annotations.as_ref(), policy.approval)
+    {
+        return None;
+    }
+    info.connector_id.as_deref()
 }
 
 fn mcp_tool_approval_policy(

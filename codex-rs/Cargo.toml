@@ -113,7 +113,6 @@ members = [
     "runtime-agent-instance",
     "response-debug-context",
     "sandboxing",
-    "stdio-to-uds",
     "otel",
     "otel-trace-websocket",
     "tcp-tunnel",
@@ -302,7 +301,6 @@ codex-shell-command = { path = "shell-command" }
 codex-skills-extension = { path = "ext/skills" }
 codex-skills = { path = "skills" }
 codex-state = { path = "state" }
-codex-stdio-to-uds = { path = "stdio-to-uds" }
 codex-terminal-detection = { path = "terminal-detection" }
 codex-test-binary-support = { path = "test-binary-support" }
 codex-thread-store = { path = "thread-store" }
@@ -477,7 +475,7 @@ regex-automata = { version = "0.4.13", default-features = false, features = ["st
 regex-lite = "0.1.8"
 regex-syntax = "0.8.8"
 reqwest = { version = "0.12", features = ["cookies"] }
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "98a54789b80110ad210495c4ad845c89e1980471", version = "=3.5.1", default-features = false }
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "b11a40d889e022087d7f2b8cd23aa28e19ceaf5b", version = "=3.6.0", default-features = false }
 runfiles = { git = "https://github.com/dzbarsky/rules_rust", rev = "b56cbaa8465e74127f1ea216f813cd377295ad81" }
 rustix = { version = "1.1.4", features = ["net"] }
 rustls = { version = "0.23.46", default-features = false, features = [
@@ -684,7 +682,7 @@ opt-level = 0
 [patch.crates-io]
 # Uncomment to debug local changes.
 # ratatui = { path = "../../ratatui" }
-crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "ed1cdab335221515706178d68495bba2aed1924f" }
+crossterm = { git = "https://github.com/openai-oss-forks/crossterm", rev = "37ca4a27a9424ec5dbe6451f48c339d7b45f8d63" }
 # SQLx 0.9.0 excludes libsqlite3-sys 0.39. Keep its driver and Core traits on
 # the same reviewed source until a release includes transact-rs/sqlx#4502.
 sqlx-core = { git = "https://github.com/transact-rs/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }

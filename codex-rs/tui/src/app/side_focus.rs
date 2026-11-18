@@ -58,7 +58,10 @@ impl App {
         tui: &mut tui::Tui,
         server: &mut AppServerSession,
     ) -> Result<()> {
-        if let Some(parent) = self.active_side_parent_thread_id() {
+        if let Some(parent) = self
+            .sidebar_parent()
+            .filter(|parent| Some(*parent) != self.current_displayed_thread_id())
+        {
             self.select_agent_thread(tui, server, parent).await?;
             if self.current_displayed_thread_id() != Some(parent) {
                 return Ok(());
@@ -115,24 +118,34 @@ impl App {
         server: &mut AppServerSession,
         tab: SidebarTab,
     ) -> Result<()> {
+        if tab == SidebarTab::Subagents {
+            if let Some(agent) = self.sidebar().and_then(|pane| pane.agents.detail) {
+                return Box::pin(self.open_sidebar_agent(tui, server, agent)).await;
+            }
+            return Ok(());
+        }
         if let SidebarTab::Document(id) = tab {
-            if let Some(parent) = self.active_side_parent_thread_id() {
+            if let Some(parent) = self
+                .sidebar_parent()
+                .filter(|parent| Some(*parent) != self.current_displayed_thread_id())
+            {
                 self.select_agent_thread(tui, server, parent).await?;
                 if self.current_displayed_thread_id() != Some(parent) {
                     return Ok(());
                 }
                 self.focus_returned_parent_composer(parent).await?;
             }
-            if self
+            if !self
                 .sidebar()
                 .and_then(|pane| pane.documents.get(&id))
                 .is_some_and(|doc| doc.backend == server.backend_id())
             {
-                self.zoomed_thread = None;
-                self.sidebar_mut()
-                    .show(SidebarContent::Document(id), PaneFocus::Sidebar);
-                tui.frame_requester().schedule_frame();
+                return Ok(());
             }
+            self.zoomed_thread = None;
+            self.sidebar_mut()
+                .show(SidebarContent::Document(id), PaneFocus::Sidebar);
+            tui.frame_requester().schedule_frame();
             return Ok(());
         }
         let SidebarTab::Chat(id) = tab else {
@@ -158,10 +171,32 @@ impl App {
     ) -> Result<()> {
         match tab {
             SidebarTab::Chat(id) => sidebar_close::request(self, tui, server, id, CloseTab).await,
-            SidebarTab::Document(id) => {
+            SidebarTab::Document(_) | SidebarTab::Subagents => {
+                if tab == SidebarTab::Subagents
+                    && let Some((parent, agent)) = self.docked_agent()
+                    && self.current_displayed_thread_id() == Some(agent)
+                {
+                    self.select_agent_thread(tui, server, parent).await?;
+                    if self.current_displayed_thread_id() != Some(parent) {
+                        return Ok(());
+                    }
+                    self.focus_returned_parent_composer(parent).await?;
+                }
+                if tab == SidebarTab::Subagents
+                    && let Some(agent) = self.sidebar().and_then(|pane| pane.agents.detail)
+                {
+                    self.side_companions.remove(&agent);
+                }
                 let pane = self.sidebar_mut();
-                let active = pane.visible_content() == Some(SidebarContent::Document(id));
-                pane.remove_document(id);
+                let active = match tab {
+                    SidebarTab::Document(id) => {
+                        let active = pane.visible_content() == Some(SidebarContent::Document(id));
+                        pane.remove_document(id);
+                        active
+                    }
+                    SidebarTab::Subagents => pane.close_agents(),
+                    SidebarTab::Chat(_) => unreachable!(),
+                };
                 if active {
                     if let Some(previous) = pane.recent_tab(/*excluding*/ None) {
                         self.zoomed_thread = None;
@@ -313,6 +348,13 @@ impl App {
         ) {
             return self.handle_document_input(tui, server, event).await;
         }
+        if self
+            .sidebar()
+            .and_then(sidebar::SidebarPane::visible_content)
+            == Some(SidebarContent::Subagents)
+        {
+            return self.handle_docked_agent_input(tui, server, event).await;
+        }
         if self.chooser_focus().is_none() {
             return false;
         }
@@ -403,6 +445,7 @@ impl App {
                     && list_action != ListAction::Cancel
                     && pane.creation.is_none()
                     && pane.chat_tabs().files.is_empty()
+                    && pane.chat_tabs().agents.is_empty()
                 {
                     return true;
                 }
@@ -451,7 +494,9 @@ impl App {
         if let ChooserAction::Open(index) = action
             && new_chat == sidebar_chooser::NewChatState::WaitingForMainMessage
             && self.sidebar().is_some_and(|pane| {
-                pane.creation.is_none() && pane.chat_tabs().file(index).is_none()
+                pane.creation.is_none()
+                    && pane.chat_tabs().file(index).is_none()
+                    && pane.chat_tabs().agent(index).is_none()
             })
         {
             return true;
@@ -486,6 +531,23 @@ impl App {
             return true;
         }
         let pane = self.sidebar_mut();
+        if let ChooserAction::Open(index) = action
+            && pane.creation.is_none()
+            && let Some(agent) = pane.chat_tabs().agent(index).map(|agent| agent.id)
+        {
+            pane.choice = index;
+            if self
+                .agent_navigation
+                .visible_threads()
+                .iter()
+                .any(|(id, _)| *id == agent)
+                && let Err(error) = Box::pin(self.open_sidebar_agent(tui, server, agent)).await
+            {
+                self.chat_widget.add_error_message(error.to_string());
+            }
+            self.guard_chooser_key(activation);
+            return true;
+        }
         if let ChooserAction::Open(index) = action
             && pane.creation.is_none()
             && pane.chat_tabs().retry_row(index)
@@ -551,7 +613,8 @@ impl App {
                 });
             }
         } else if matches!(action, ChooserAction::Back)
-            && let Some(tab @ SidebarTab::Document(_)) = pane.recent_tab(/*excluding*/ None)
+            && let Some(tab @ (SidebarTab::Document(_) | SidebarTab::Subagents)) =
+                pane.recent_tab(/*excluding*/ None)
         {
             if let Err(err) = self.activate_sidebar_tab(tui, server, tab).await {
                 self.chat_widget.add_error_message(err.to_string());
@@ -644,12 +707,18 @@ impl App {
             (bindings.close_sidebar_tab.is_pressed(key)
                 || (document_shortcut && crate::key_hint::plain(KeyCode::Esc).is_press(key)))
             .then_some(SidebarTab::Document(id))
+        } else if bindings.close_sidebar_tab.is_pressed(key) {
+            self.current_displayed_thread_id().and_then(|id| {
+                if self.docked_agent().is_some_and(|(_, agent)| id == agent) {
+                    Some(SidebarTab::Subagents)
+                } else {
+                    self.side_threads
+                        .contains_key(&id)
+                        .then_some(SidebarTab::Chat(id))
+                }
+            })
         } else {
-            self.current_displayed_thread_id()
-                .filter(|id| {
-                    bindings.close_sidebar_tab.is_pressed(key) && self.side_threads.contains_key(id)
-                })
-                .map(SidebarTab::Chat)
+            None
         };
         let left = bindings.focus_pane_left.is_pressed(key);
         let tab_step = if bindings.sidebar_up.is_pressed(key)
@@ -749,7 +818,7 @@ impl App {
         } else if let Some(target) = zoom_target {
             self.zoomed_thread = (self.zoomed_thread != Some(target)).then_some(target);
             tui.frame_requester().schedule_frame();
-            Ok(())
+            self.refresh_owned_transcript(tui)
         } else if panel_focus.is_some() {
             if hide || (sidebar && panel_focus == Some(PaneFocus::Sidebar)) {
                 self.zoomed_thread = None;
@@ -832,7 +901,10 @@ impl App {
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
     ) -> Result<()> {
-        if let Some(parent) = self.active_side_parent_thread_id() {
+        if let Some(parent) = self
+            .sidebar_parent()
+            .filter(|parent| Some(*parent) != self.current_displayed_thread_id())
+        {
             self.select_agent_thread(tui, app_server, parent).await?;
             if self.current_displayed_thread_id() == Some(parent) {
                 self.focus_returned_parent_composer(parent).await?;
@@ -844,6 +916,9 @@ impl App {
     }
 
     fn focus_current_parent_view(&mut self, tui: &mut tui::Tui) {
+        if let Some(pane) = self.sidebars.get_mut(&self.sidebar_parent()) {
+            pane.agents.pending_link = None;
+        }
         self.cancel_transcript_browsing(tui);
         clear_transcript_interaction(&mut self.transcript_view, &self.transcript_cells);
         self.cancel_pending_key_chord();

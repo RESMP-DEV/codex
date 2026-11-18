@@ -29,11 +29,14 @@ mod path;
 mod remote;
 mod remote_addr;
 mod remote_websocket;
+pub use cloud::CLOUD_RECOVERY_NETWORK_BLOCKED;
 pub use cloud::CloudClient;
 pub use cloud::CloudCommand;
 pub use cloud::CloudOperation;
+pub use cloud::CloudRecoveryRelease;
 pub use cloud::CloudRequestHandle;
 pub use cloud::CloudUserMessageReceipt;
+pub use cloud_backend::CloudRecoverySignInChanged;
 mod server_request;
 pub use server_request::AppServerReplyHandle;
 
@@ -410,13 +413,15 @@ impl InProcessAppServerClient {
                                 // this loop can keep draining runtime events
                                 // while the request is blocked on client input.
                                 tokio::spawn(async move {
-                                    // Device ceremonies belong to the waiting UI. Preserve
-                                    // its cancellation through this buffering task.
+                                    // Dropping the UI's request must drop the detached runtime
+                                    // future too: its drop guard cancels verification and search.
                                     let cancellable = matches!(*request,
                                         ClientRequest::UserVerificationStatus { .. }
                                         | ClientRequest::UserVerificationEnroll { .. }
                                         | ClientRequest::UserVerificationDelete { .. }
-                                        | ClientRequest::UserVerificationVerify { .. });
+                                        | ClientRequest::UserVerificationVerify { .. }
+                                        | ClientRequest::ThreadSearch { .. }
+                                        | ClientRequest::ThreadSearchStream { .. });
                                     let mut response_tx = response_tx;
                                     tokio::select! {
                                         _ = response_tx.closed(), if cancellable => {}
@@ -1829,6 +1834,7 @@ mod tests {
                 serde_json::from_value(
                     serde_json::to_value(ServerNotification::AccountUpdated(
                         AccountUpdatedNotification {
+                            reason: None,
                             auth_mode: None,
                             plan_type: None,
                         },

@@ -2438,12 +2438,12 @@ async fn external_transport_registers_dynamic_tools_and_finds_task_mentions() ->
         .await?;
     let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
 
-    crate::task_mentions::spawn_search(
-        restarted_app_server.request_handle(),
+    let handle = restarted_app_server.request_handle();
+    restarted_app_server.task_search.spawn(
+        handle,
         "bbd".to_string(),
         startup.session.thread_id,
         app.config.cwd.to_path_buf(),
-        restarted_app_server.task_search_generation(),
         crate::app_event_sender::AppEventSender::new(sender),
     );
 
@@ -2617,6 +2617,15 @@ async fn archive_opens_command_center_before_the_server_replies() -> Result<()> 
 
 #[tokio::test]
 async fn archive_shows_progress_and_keeps_the_session_when_side_chat_cleanup_fails() -> Result<()> {
+    archive_progress_scenario(/*owned_screen*/ false).await
+}
+
+#[tokio::test]
+async fn fullscreen_archive_progress_handles_terminal_shrink() -> Result<()> {
+    archive_progress_scenario(/*owned_screen*/ true).await
+}
+
+async fn archive_progress_scenario(owned_screen: bool) -> Result<()> {
     use codex_app_server_client::AppServerClient;
     use codex_app_server_client::CloudClient;
     use codex_app_server_client::CloudOperation;
@@ -2641,6 +2650,11 @@ async fn archive_shows_progress_and_keeps_the_session_when_side_chat_cleanup_fai
     app.side_threads
         .insert(side_id, SideThreadState::new(thread_id));
     let mut tui = crate::tui::test_support::make_test_tui()?;
+    if owned_screen {
+        tui.set_owned_screen(/*owned*/ true)?;
+        tui.terminal
+            .resize(Size::new(/*width*/ 80, /*height*/ 37))?;
+    }
 
     let mut archive =
         Box::pin(app.handle_event(&mut tui, &mut server, AppEvent::ArchiveCurrentThread));
@@ -2692,6 +2706,9 @@ async fn archive_shows_progress_and_keeps_the_session_when_side_chat_cleanup_fai
         "Unsent draft"
     );
     assert!(!render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("Archiving"));
+    if owned_screen {
+        tui.set_owned_screen(/*owned*/ false)?;
+    }
     Ok(())
 }
 

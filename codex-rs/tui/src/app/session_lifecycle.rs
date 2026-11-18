@@ -692,6 +692,9 @@ impl App {
         if !self.can_select_thread() {
             return Ok(());
         }
+        if let Some(pane) = self.sidebars.get_mut(&self.sidebar_parent()) {
+            pane.agents.pending_link = None;
+        }
         if self.active_thread_id == Some(thread_id) {
             // Detach the cached receiver before a successful attachment replaces its channel.
             self.store_active_thread_receiver().await;
@@ -776,6 +779,7 @@ impl App {
         thread_id: ThreadId,
         selection: Selection,
     ) -> Result<()> {
+        app_server.task_search.cancel();
         let Selection {
             mode,
             cached_session,
@@ -954,6 +958,11 @@ impl App {
     ) -> Result<()> {
         let retain_side_view = self.side_retention_enabled(tui);
         let side_parent = |id| {
+            if let Some((parent, agent)) = self.docked_agent()
+                && (id == parent || id == agent)
+            {
+                return Some(parent);
+            }
             self.side_threads
                 .get(&self.side_pair_key(id)?)
                 .map(|side| side.parent_thread_id)
@@ -1297,6 +1306,7 @@ impl App {
             }
             return;
         }
+        self.cancel_cloud_inventory_refresh(app_server).await;
         // Resolve trust before loading defaults and applying explicit permission choices.
         if self.current_displayed_thread_id().is_none() {
             let mut config = self.chat_widget.config_ref().clone();
@@ -1471,6 +1481,7 @@ impl App {
         if self.reject_pending_permission_root_switch() {
             return Ok(());
         }
+        self.cancel_cloud_inventory_refresh(app_server).await;
         let prepared = match self
             .prepare_fresh_session(app_server, Some(ThreadStartSource::Clear))
             .await
@@ -1821,6 +1832,7 @@ impl App {
 
         let mut refreshed_thread_ids = HashSet::new();
         for thread in find_loaded_subagent_threads_for_primary(threads, primary_thread_id) {
+            self.confirm_sidebar_agent(primary_thread_id, thread.thread_id);
             let agent_path = thread.agent_path;
             let has_live_channel = self
                 .thread_event_channels

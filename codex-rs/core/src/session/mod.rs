@@ -68,6 +68,7 @@ use chrono::Utc;
 use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::ImagePreparationFact;
 use codex_analytics::ImagePreparationMetadata;
+use codex_analytics::IncompleteReason;
 use codex_analytics::SubAgentThreadStartedInput;
 use codex_analytics::ThreadInitializationMode;
 use codex_analytics::TurnCodexErrorFact;
@@ -186,6 +187,7 @@ use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::ThreadStartedTraceMetadata;
 use codex_rollout_trace::ThreadTraceContext;
 use codex_sandboxing::SandboxType;
+use codex_sandboxing::managed_proxy_routing_for_windows_sandbox;
 use codex_sandboxing::policy_transforms::intersect_permission_profiles_with_context;
 use codex_shell_command::parse_command::parse_command;
 use codex_terminal_detection::user_agent;
@@ -366,7 +368,6 @@ use crate::turn_timing::record_turn_ttfm_metric;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use crate::windows_sandbox::local_binding_policy_for_sandbox;
-use crate::windows_sandbox::managed_proxy_routing_for_windows_sandbox;
 use codex_core_plugins::PluginCommandAttribution;
 use codex_core_plugins::PluginsManager;
 use codex_git_utils::get_git_repo_root;
@@ -3312,7 +3313,9 @@ impl Session {
                 .features
                 .enabled(Feature::CriticalPathTiming)
         {
-            turn_context.turn_timing_state.invalidate_critical_path();
+            turn_context
+                .turn_timing_state
+                .invalidate_critical_path(&[IncompleteReason::UnattributedUserWait]);
         }
         timing
     }
@@ -5284,7 +5287,14 @@ impl Session {
                 .features
                 .plugin_recommendations_enabled()
         {
-            match PreparedToolRecommendations::load(self, turn_context).await {
+            let started_at = std::time::Instant::now();
+            let recommendations = PreparedToolRecommendations::load(self, turn_context).await;
+            turn_context.session_telemetry.record_duration(
+                "codex.initial_context.plugin_recommendations_wait_ms",
+                started_at.elapsed(),
+                &[],
+            );
+            match recommendations {
                 PreparedToolRecommendations::Endpoint(tools) => Some(tools),
                 PreparedToolRecommendations::Legacy(_) => None,
             }

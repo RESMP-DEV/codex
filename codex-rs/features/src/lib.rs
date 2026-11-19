@@ -30,6 +30,8 @@ pub use feature_configs::GuardianV2ReviewScopeConfigToml;
 pub use feature_configs::GuardianV2TranscriptConfigToml;
 pub use feature_configs::GuardianV2TranscriptSource;
 pub use feature_configs::GuardianV3ConfigToml;
+pub use feature_configs::GuardianV3HousekeeperConfigToml;
+pub use feature_configs::GuardianV3ReviewerConfigToml;
 pub use feature_configs::MultiAgentV2ConfigToml;
 pub use feature_configs::NetworkProxyConfigToml;
 pub use feature_configs::NetworkProxyDomainPermissionToml;
@@ -147,6 +149,8 @@ pub enum Feature {
     UntrustedAsToolOutput,
     /// Record model-attempted tool calls in internal Responses metadata.
     ExecutedToolCallMetadata,
+    /// Record executed tool calls and attach eligible connector results to their metadata.
+    ConnectorToolResultPassthrough,
     /// Enable JavaScript code mode backed by the standalone host process.
     CodeMode,
     /// Expose ranked tool discovery inside JavaScript code mode.
@@ -1175,7 +1179,11 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::TuiExtensionsStatusLine,
         key: "tui_extensions_statusline",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Experimental {
+            name: "Custom status line",
+            menu_description: "Restart the TUI, then use /statusline.",
+            announcement: "",
+        },
         default_enabled: false,
     },
     FeatureSpec {
@@ -1318,6 +1326,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::ExecutedToolCallMetadata,
         key: "executed_tool_call_metadata",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::ConnectorToolResultPassthrough,
+        key: "connector_tool_result_passthrough",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1806,8 +1820,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::McpLazyStdioStartup,
         key: "mcp_lazy_stdio_startup",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::MultiEnvironmentMcp,

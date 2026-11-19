@@ -263,14 +263,6 @@ class AppToolApproval(Enum):
     approve = "approve"
 
 
-class AppToolConfig(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    approval_mode: AppToolApproval | None = None
-    enabled: bool | None = None
-
-
 class AppToolSummary(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -580,6 +572,9 @@ class CodexErrorInfoValue(str, Enum):
     context_window_exceeded = "contextWindowExceeded"
     session_budget_exceeded = "sessionBudgetExceeded"
     usage_limit_exceeded = "usageLimitExceeded"
+    api_key_spend_limit_exceeded = "apiKeySpendLimitExceeded"
+    project_spend_limit_exceeded = "projectSpendLimitExceeded"
+    organization_spend_limit_exceeded = "organizationSpendLimitExceeded"
     rate_limit_exceeded = "rateLimitExceeded"
     flex_unavailable = "flexUnavailable"
     server_overloaded = "serverOverloaded"
@@ -7589,6 +7584,15 @@ class AppTemplateSummary(BaseModel):
     name: str
     reason: AppTemplateUnavailableReason | None = None
     template_id: Annotated[str, Field(alias="templateId")]
+
+
+class AppToolConfig(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    approval_mode: AppToolApproval | None = None
+    approvals_reviewer: ApprovalsReviewer | None = None
+    enabled: bool | None = None
 
 
 class ApplicationNetworkRequirements(BaseModel):

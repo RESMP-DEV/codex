@@ -169,6 +169,7 @@ pub(crate) async fn handle_mcp_tool_call(
     invocation_tool_name: ToolName,
     source: &crate::tools::context::ToolCallSource,
     arguments: String,
+    observe_server_result: impl FnOnce(&PreparedMcpCall, &CallToolResult),
 ) -> Result<CompletedMcpToolCall, FunctionCallError> {
     let turn_context = &step_context.turn;
     let server = advertised_tool.server_name().to_owned();
@@ -325,6 +326,7 @@ pub(crate) async fn handle_mcp_tool_call(
                     metadata,
                     item_metadata,
                     source,
+                    observe_server_result,
                     McpToolApprovalApplication::Apply {
                         decision,
                         policy: approval_policy,
@@ -417,6 +419,7 @@ pub(crate) async fn handle_mcp_tool_call(
         metadata,
         item_metadata,
         source,
+        observe_server_result,
         McpToolApprovalApplication::NotRequired,
     )
     .await
@@ -488,6 +491,7 @@ async fn handle_approved_mcp_tool_call(
     metadata: &McpToolApprovalMetadata,
     item_metadata: McpToolCallItemMetadata,
     source: &crate::tools::context::ToolCallSource,
+    observe_server_result: impl FnOnce(&PreparedMcpCall, &CallToolResult),
     approval_application: McpToolApprovalApplication,
 ) -> Result<CompletedMcpToolCall, FunctionCallError> {
     let turn_context = step_context.turn.as_ref();
@@ -719,6 +723,7 @@ async fn handle_approved_mcp_tool_call(
                 &result,
             );
             let mut result = result?;
+            observe_server_result(&prepared_call, &result);
             crate::tools::record_confirmed_code_mode_send(
                 sess,
                 &turn_context.sub_id,
@@ -1362,7 +1367,7 @@ pub(crate) struct McpToolApprovalMetadata {
     connector_description: Option<String>,
     connected_account_email: Option<String>,
     plugin_id: Option<String>,
-    tool_title: Option<String>,
+    pub(crate) tool_title: Option<String>,
     tool_description: Option<String>,
     mcp_app_resource_uri: Option<String>,
     mcp_app_ui: Option<McpAppUi>,
@@ -1759,6 +1764,7 @@ async fn prepare_mcp_tool_approval(
         &invocation.server,
         metadata.connector_id.as_deref(),
         metadata.link_id.as_deref(),
+        Some((&invocation.tool, metadata.tool_title.as_deref())),
     );
     let action = ApprovalAction::McpToolCall {
         id: call_id.to_string(),
@@ -2720,7 +2726,8 @@ async fn maybe_persist_mcp_tool_approval(
         return;
     }
 
-    sess.reload_user_config_layer().await;
+    // Keep the config reload's large future out of ordinary MCP calls, which never poll it.
+    Box::pin(sess.reload_user_config_layer()).await;
 }
 
 async fn persist_codex_app_tool_approval(

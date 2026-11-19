@@ -778,7 +778,6 @@ impl Session {
             history_initialization: Some(self.history_initialization),
             window_number: Some(window_number),
             context_window_id: Some(context_window_id),
-            mcp_attribution: Some(self.services.executed_tool_calls.mcp_attribution_snapshot()),
             analytics_enabled: Some(self.services.analytics_events_client.is_enabled()),
             history_ingest_requested: turn_context
                 .config
@@ -1082,6 +1081,11 @@ impl Session {
         let thread_extension_data = codex_extension_api::ExtensionData::new_with_init(
             thread_id.to_string(),
             thread_extension_init,
+        );
+        crate::agent::turn_metrics::register_thread(
+            &thread_extension_data,
+            &session_source,
+            &initial_history,
         );
         if let Some(required) = &required_cyber_access_programs {
             thread_extension_data.insert(
@@ -1606,6 +1610,7 @@ impl Session {
                 ContextManager::for_session(
                     session_configuration.root_capabilities_restricted,
                     &config.features,
+                    config.guardian_reuses_parent_compaction(),
                     config.guardian_context_budgeting(),
                     Arc::clone(&item_id_generator),
                 ),
@@ -1881,7 +1886,12 @@ impl Session {
                     .enabled(Feature::ConcurrentReasoningSummaries),
                 config.features.enabled(Feature::OutputTokenReplay),
                 attestation_provider.clone(),
-                config.http_client_factory(),
+                thread_extension_data
+                    .get::<crate::guardian::GuardianReviewerInference>()
+                    .map_or_else(
+                        || config.http_client_factory(),
+                        |inference| inference.0.http_client_factory.clone(),
+                    ),
                 workspace_routing.as_ref().clone(),
                 extensions.model_request_contributors().to_vec(),
             )

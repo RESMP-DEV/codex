@@ -181,7 +181,6 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
-use codex_rollout::should_persist_response_item;
 use codex_rollout::state_db;
 use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::ThreadStartedTraceMetadata;
@@ -310,6 +309,8 @@ pub(crate) use self::environment::ThreadEnvironmentDefaults;
 use self::handlers::submission_dispatch_span;
 use self::handlers::submission_loop;
 pub(crate) use self::input_queue::InputQueueActivity;
+pub(crate) use self::input_queue::InputQueueEntry;
+pub(crate) use self::input_queue::SubmittedAdditionalContext;
 pub(crate) use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
 pub(crate) use self::input_queue::UserInputMetadata;
@@ -1036,12 +1037,27 @@ impl Session {
         let enable_full_access_form_input = !root_capabilities_restricted
             && matches!(thread_source.as_ref(), Some(ThreadSource::User))
             && client_mcp_extensions.contains(OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID);
-        let provider_auth = codex_model_provider::ProviderAuthContext {
-            credentials: Arc::clone(&auth_manager),
-            runtime_auth: configured_runtime.map(|runtime| (runtime, config.runtime_auth_mode)),
-        };
+        let provider_auth = thread_extension_init
+            .get::<crate::guardian::GuardianReviewerInference>()
+            .map_or_else(
+                || codex_model_provider::ProviderAuthContext {
+                    credentials: Arc::clone(&auth_manager),
+                    runtime_auth: configured_runtime
+                        .map(|runtime| (runtime, config.runtime_auth_mode)),
+                },
+                |inference| inference.0.auth.clone(),
+            );
         // Replace any inherited context before startup hooks see this thread's effective auth.
         thread_extension_init.insert(provider_auth.clone());
+        if config.guardian_model_provider.is_some()
+            && thread_extension_init
+                .get::<crate::guardian::GuardianInferenceContext>()
+                .is_none()
+        {
+            return Err(CodexErr::InvalidRequest(
+                "host-selected Guardian inference context is not initialized".to_string(),
+            ));
+        }
         let session_configuration = SessionConfiguration {
             turn_extension_init,
             provider: provider_auth.model_provider(config.model_provider.clone()),
@@ -2049,14 +2065,13 @@ impl Session {
         // checkpoint can make reconstruction depend on reviewer compatibility.
         let reviewer_compaction_hash = if codex_history::CompactionCheckpoint::latest(&history)
             .is_some_and(codex_history::CompactionCheckpoint::is_usable)
-            && turn_context
-                .config
-                .features
-                .enabled(Feature::GuardianReuseParentCompaction)
+            && turn_context.config.guardian_reuses_parent_compaction()
         {
             let context = crate::guardian::GuardianReviewContext::from(turn_context);
-            let (_, reviewer) = crate::guardian::resolve_review_model(self, &context).await;
-            reviewer.comp_hash.clone()
+            crate::guardian::resolve_review_model(self, &context)
+                .await
+                .ok()
+                .and_then(|(_, reviewer)| reviewer.comp_hash.clone())
         } else {
             None
         };
@@ -2424,12 +2439,15 @@ impl Session {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
     ) -> ConstraintResult<()> {
-        self.update_settings(SessionSettingsUpdate {
-            app_server_client_name,
-            app_server_client_version,
-            ..Default::default()
-        })
-        .await?;
+        // A new turn may supply a valid replacement for a model blocked by policy.
+        // Recording its client identity must not validate the old model first.
+        let configuration = &mut self.state.lock().await.session_configuration;
+        if let Some(name) = app_server_client_name {
+            configuration.app_server_client_name = Some(name);
+        }
+        if let Some(version) = app_server_client_version {
+            configuration.app_server_client_version = Some(version);
+        }
         Ok(())
     }
 
@@ -2742,6 +2760,7 @@ impl Session {
 
     /// Persist the event to rollout and send it to clients.
     pub(crate) async fn send_event(&self, turn_context: &TurnContext, mut msg: EventMsg) {
+        crate::agent::turn_metrics::record_terminal_event(turn_context, &msg);
         if let Some((item_id, started_at_ms)) = msg.command_approval_start() {
             // The client can see the command before execution. Keep its first start
             // for the canonical lifecycle events that will be saved in history.
@@ -4135,40 +4154,13 @@ impl Session {
                     .get_or_insert_with(|| with_serialization_allowance(policy).token_budget());
             }
         }
-        // Last-N-turn forks retain a suffix starting at a user turn boundary. Repeat the
-        // cumulative checkpoint there so the suffix remains self-contained even when the fork
-        // happens mid-turn; dirty checkpoints preserve new sources between boundaries.
-        let force_mcp_checkpoint = items
+        let has_user_turn_boundary = items
             .iter()
             .any(|envelope| crate::context_manager::is_user_turn_boundary(&envelope.item));
-        let cached_retry = matches!(&realtime, Some(RealtimeRecord::Handoff(input)) if input.cached_envelope.is_some());
-        let mcp_revision = (!cached_retry)
-            .then(|| {
-                self.services
-                    .executed_tool_calls
-                    .mcp_attribution_checkpoint(force_mcp_checkpoint)
-            })
-            .flatten()
-            .and_then(|(attribution, revision)| {
-                let first_persisted = items
-                    .iter()
-                    .position(|envelope| should_persist_response_item(&envelope.item))?;
-                for (index, envelope) in items.iter_mut().enumerate() {
-                    // Rollout batches may be partially written. Checkpoint the first persisted
-                    // item, and repeat the checkpoint at turn boundaries retained by forks.
-                    if index == first_persisted
-                        || crate::context_manager::is_user_turn_boundary(&envelope.item)
-                    {
-                        envelope.metadata.get_or_insert_default().mcp_attribution =
-                            Some(attribution.clone());
-                    }
-                }
-                Some(revision)
-            });
         // Thread settings precede the first accepted input. Keep the persistence lock
         // through its seal, and clear the pending flag only after the seal succeeds.
         let realtime_settings_guard = if realtime.is_some()
-            && force_mcp_checkpoint
+            && has_user_turn_boundary
             && self.reference_context_item().await.is_none()
         {
             Some(thread_settings::acquire_persistence_lock(self).await)
@@ -4284,14 +4276,11 @@ impl Session {
                     metadata: image,
                 });
         }
-        let persisted = if let Some(RealtimeRecord::Handoff(prepared)) = &realtime {
+        if let Some(RealtimeRecord::Handoff(prepared)) = &realtime {
             self.finish_realtime_handoff(prepared, &items[0]).await;
-            true
-        } else if matches!(&realtime, Some(RealtimeRecord::Chunk)) {
-            true
-        } else {
+        } else if !matches!(&realtime, Some(RealtimeRecord::Chunk)) {
             let settings_guard =
-                if force_mcp_checkpoint && self.reference_context_item().await.is_none() {
+                if has_user_turn_boundary && self.reference_context_item().await.is_none() {
                     Some(thread_settings::acquire_persistence_lock(self).await)
                 } else {
                     None
@@ -4309,14 +4298,10 @@ impl Session {
                 .map(RolloutItem::EventMsg)
                 .chain(items.into_iter().map(RolloutItem::ResponseItem))
                 .collect::<Vec<_>>();
-            self.persist_rollout_items(&rollout_items).await
-        };
-        drop(realtime_settings_guard);
-        if persisted && let Some(revision) = mcp_revision {
-            self.services
-                .executed_tool_calls
-                .mark_mcp_attribution_persisted(revision);
+            self.persist_rollout_items(&rollout_items).await;
+            drop(settings_guard);
         }
+        drop(realtime_settings_guard);
         if turn_context.config.memories.disable_on_external_context
             && let Some(item) = response_items
                 .iter()
@@ -4767,6 +4752,7 @@ impl Session {
         Ok(Arc::new(StepContext {
             sampled_through_sequence: None,
             serving_assessment: None,
+            guardian_probe: None,
             turn_cancellation: cancellation_token.clone(),
             preempt: turn_context
                 .config
@@ -4982,16 +4968,6 @@ impl Session {
             &self.services.thread_extension_data,
             &mut items,
         );
-        let mcp_revision = self
-            .services
-            .executed_tool_calls
-            .mcp_attribution_checkpoint(/*force*/ true)
-            .and_then(|(attribution, revision)| {
-                items.last_mut().map(|envelope| {
-                    envelope.metadata.get_or_insert_default().mcp_attribution = Some(attribution);
-                    revision
-                })
-            });
         if let Some(checkpoint) = items.iter_mut().rev().find(|envelope| {
             matches!(
                 envelope.item,
@@ -5133,13 +5109,7 @@ impl Session {
             // The frozen turn context must not override current settings in persisted metadata.
             RolloutItem::EventMsg(thread_settings::applied_event(self).await),
         ];
-        if self.persist_rollout_items(&rollout_items).await
-            && let Some(revision) = mcp_revision
-        {
-            self.services
-                .executed_tool_calls
-                .mark_mcp_attribution_persisted(revision);
-        }
+        self.persist_rollout_items(&rollout_items).await;
         {
             let mut state = self.state.lock().await;
             state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);

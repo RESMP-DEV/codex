@@ -51,10 +51,8 @@ use crate::shell_snapshot::ShellSnapshot;
 use crate::test_support::models_manager_with_provider;
 use crate::tools::format_exec_output_str;
 use crate::tools::registry::ToolRegistry;
-use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
-use codex_analytics::CompactionTrigger;
 use codex_config::ConfigLayerStack;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::LoaderOverrides;
@@ -132,7 +130,6 @@ use tracing::Span;
 
 use crate::connectors::AppInfo;
 use crate::responses_metadata::CodexResponsesRequestKind;
-use crate::responses_metadata::CompactionTurnMetadata;
 use crate::rollout::recorder::RolloutRecorder;
 use crate::session::Submission;
 use crate::state::ActiveTurn;
@@ -177,9 +174,6 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::items::HookPromptFragment;
 use codex_protocol::items::build_hook_prompt_message;
-use codex_protocol::mcp::McpAttribution;
-use codex_protocol::mcp::McpAttributionSource;
-use codex_protocol::mcp::McpAttributionStatus;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
@@ -327,6 +321,7 @@ impl StepContext {
             environments,
             executor_hook_sources: Vec::new(),
             serving_assessment: None,
+            guardian_probe: None,
             extension_data: Arc::new(codex_extension_api::ExtensionData::new(turn.sub_id.clone())),
             mcp: Arc::new(codex_mcp::McpBinding::empty(mcp_config_for_test(
                 &turn.config,
@@ -2812,12 +2807,6 @@ async fn annotated_history_uses_explicit_model_without_a_step(
     session
         .record_annotated_conversation_items(&turn_context, &model_info, expected.clone())
         .await;
-    expected[0].metadata.get_or_insert_default().mcp_attribution = Some(
-        session
-            .services
-            .executed_tool_calls
-            .mcp_attribution_snapshot(),
-    );
     for (index, envelope) in expected.iter_mut().enumerate() {
         let metadata = envelope.metadata.get_or_insert_default();
         metadata.history_sequence = Some(index as u64 + 1);
@@ -6028,105 +6017,6 @@ async fn settings_checkpoint_waits_for_accepted_settings_persistence() {
     );
 }
 
-#[tokio::test]
-async fn mcp_attribution_checkpoints_cover_batch_prefixes_compaction_and_restore() {
-    let (mut session, turn_context) = make_session_and_context().await;
-    session.services.executed_tool_calls =
-        crate::state::ExecutedToolCalls::new(&turn_context.config.features, &InitialHistory::New);
-    let rollout_path = attach_thread_persistence(&mut session).await;
-    let source = McpAttributionSource {
-        connector_id: None,
-        plugin_id: None,
-        server_name: "example".to_string(),
-        tool_name: "search".to_string(),
-        first_turn_id: "turn_1".to_string(),
-    };
-    session
-        .services
-        .executed_tool_calls
-        .record_mcp_source(source.clone());
-    let expected = McpAttribution {
-        status: McpAttributionStatus::Complete,
-        error_reason: None,
-        sources: vec![source],
-    };
-    session
-        .record_annotated_conversation_items(
-            &turn_context,
-            turn_context.model_info(),
-            vec![
-                ResponseItemEnvelope::new(ResponseItem::FunctionCallOutput {
-                    id: None,
-                    call_id: Some("call_1".to_string()),
-                    name: None,
-                    namespace: None,
-                    output: FunctionCallOutputPayload::from_text("result".to_string()),
-                    internal_chat_message_metadata_passthrough: None,
-                }),
-                ResponseItemEnvelope::new(user_message("next turn")),
-            ],
-        )
-        .await;
-    let checkpoints = session
-        .clone_history()
-        .await
-        .annotated_items()
-        .iter()
-        .map(|envelope| {
-            envelope
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.mcp_attribution.clone())
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        checkpoints,
-        vec![Some(expected.clone()), Some(expected.clone())]
-    );
-
-    let (window_number, window_ids) = session.advance_auto_compact_window().await;
-    session
-        .replace_compacted_history(
-            vec![ResponseItemEnvelope::new(user_message("compacted history"))],
-            turn_context.to_turn_context_item(),
-            WorldStateSnapshot::default(),
-            /*rejected_audio_file_ids*/ Default::default(),
-            CompactedHistoryMetadata {
-                input_goal_ids: Default::default(),
-                message: "summary".to_string(),
-                window_number,
-                window_ids,
-                compaction_response_id: None,
-                compaction_model_hash: None,
-                reviewer_compaction_hash: None,
-            },
-        )
-        .await;
-    session
-        .flush_rollout()
-        .await
-        .expect("flush compacted history");
-
-    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
-        .await
-        .expect("read compacted history");
-    let checkpoint = items.iter().rev().find_map(|item| match item {
-        RolloutItem::Compacted(compacted) => compacted
-            .replacement_history
-            .as_ref()?
-            .iter()
-            .rev()
-            .find_map(|envelope| envelope.metadata.as_ref()?.mcp_attribution.as_ref()),
-        _ => None,
-    });
-    assert_eq!(checkpoint, Some(&expected));
-    let restored = crate::state::ExecutedToolCalls::new(
-        &turn_context.config.features,
-        &InitialHistory::Forked(items),
-    );
-    assert_eq!(restored.mcp_attribution_snapshot(), expected);
-}
-
 #[test_case(None; "idle")]
 #[test_case(Some(ActiveTurn::default()); "reserved turn")]
 #[test_case(Some(ActiveTurn {
@@ -6758,51 +6648,6 @@ pub(crate) async fn build_world_state_from_turn_context(
 }
 
 #[tokio::test]
-async fn response_metadata_builders_capture_fresh_mcp_attribution() {
-    let (mut session, turn_context) = make_session_and_context().await;
-    session.services.executed_tool_calls =
-        crate::state::ExecutedToolCalls::new(&turn_context.config.features, &InitialHistory::New);
-    let turn_context = Arc::new(turn_context);
-    let step_context = StepContext::for_test(Arc::clone(&turn_context));
-    let before = session
-        .responses_metadata(&step_context, CodexResponsesRequestKind::Turn)
-        .await;
-    let source = McpAttributionSource {
-        connector_id: None,
-        plugin_id: None,
-        server_name: "example".to_string(),
-        tool_name: "search".to_string(),
-        first_turn_id: turn_context.sub_id.clone(),
-    };
-    session
-        .services
-        .executed_tool_calls
-        .record_mcp_source(source.clone());
-    let after = session
-        .responses_metadata(&step_context, CodexResponsesRequestKind::Turn)
-        .await;
-    let compaction = session
-        .compaction_responses_metadata(
-            &step_context,
-            CompactionTurnMetadata::new(
-                CompactionTrigger::Auto,
-                CompactionReason::ContextLimit,
-                CompactionImplementation::Responses,
-                CompactionPhase::MidTurn,
-            ),
-        )
-        .await;
-    let expected = Some(McpAttribution {
-        status: McpAttributionStatus::Complete,
-        error_reason: None,
-        sources: vec![source],
-    });
-    assert_eq!(before.mcp_attribution, Some(McpAttribution::default()));
-    assert_eq!(after.mcp_attribution, expected);
-    assert_eq!(compaction.mcp_attribution, expected);
-}
-
-#[tokio::test]
 async fn responses_metadata_uses_selected_harness_analytics_client() {
     for enabled in [true, false] {
         let (mut session, mut turn_context) = make_session_and_context().await;
@@ -6909,6 +6754,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     state.history = ContextManager::for_session(
         session_configuration.root_capabilities_restricted,
         &config.features,
+        config.guardian_reuses_parent_compaction(),
         config.guardian_context_budgeting(),
         Arc::clone(&item_id_generator),
     );
@@ -9267,6 +9113,7 @@ where
     state.history = ContextManager::for_session(
         session_configuration.root_capabilities_restricted,
         &config.features,
+        config.guardian_reuses_parent_compaction(),
         config.guardian_context_budgeting(),
         Arc::clone(&item_id_generator),
     );
@@ -12951,7 +12798,7 @@ async fn abort_empty_active_turn_preserves_pending_input() {
         sess.input_queue
             .take_pending_input_for_turn_state(turn_state.as_ref())
             .await,
-        vec![TurnInput::ResponseItem(pending_item.into())]
+        vec![TurnInput::ResponseItem(pending_item.into()).into()]
     );
 }
 
@@ -13008,7 +12855,7 @@ async fn queue_only_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
 
     assert_eq!(
         (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
-        vec![TurnInput::InterAgentCommunication(communication.into())],
+        vec![TurnInput::InterAgentCommunication(communication.into()).into()],
     );
 }
 
@@ -13109,8 +12956,8 @@ async fn active_turn_keeps_first_root_when_mail_coalesces(inherited_root: Option
     assert_eq!(
         (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
         vec![
-            TurnInput::InterAgentCommunication(first.into()),
-            TurnInput::InterAgentCommunication(second.into()),
+            TurnInput::InterAgentCommunication(first.into()).into(),
+            TurnInput::InterAgentCommunication(second.into()).into(),
         ]
     );
     assert_eq!(
@@ -13166,8 +13013,9 @@ async fn steered_input_reopens_mailbox_delivery_for_current_turn() {
                 },
                 content: vec![ResolvedUserInput::text("follow up".to_string())],
                 client_id: None,
-            },
-            TurnInput::InterAgentCommunication(communication.into()),
+            }
+            .into(),
+            TurnInput::InterAgentCommunication(communication.into()).into(),
         ],
     );
 }
@@ -13220,8 +13068,9 @@ async fn stale_defer_mailbox_delivery_does_not_override_steered_input() {
                 },
                 content: vec![ResolvedUserInput::text("follow up".to_string())],
                 client_id: None,
-            },
-            TurnInput::InterAgentCommunication(communication.into()),
+            }
+            .into(),
+            TurnInput::InterAgentCommunication(communication.into()).into(),
         ],
     );
 }
@@ -13282,7 +13131,7 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
     assert!(output.tool_future.is_some());
     assert_eq!(
         (sess.input_queue.get_pending_input(&sess.active_turn).await).0,
-        vec![TurnInput::InterAgentCommunication(communication.into())],
+        vec![TurnInput::InterAgentCommunication(communication.into()).into()],
     );
 }
 

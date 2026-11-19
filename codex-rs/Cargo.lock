@@ -2075,6 +2075,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "http 1.4.0",
+ "log",
  "pretty_assertions",
  "rcgen",
  "regex-lite",
@@ -2109,6 +2110,7 @@ dependencies = [
  "codex-analytics",
  "codex-app-server-daemon",
  "codex-app-server-protocol",
+ "codex-app-server-remote-client",
  "codex-app-server-transport",
  "codex-arg0",
  "codex-aws-auth",
@@ -2224,7 +2226,7 @@ dependencies = [
  "codex-api",
  "codex-app-server",
  "codex-app-server-protocol",
- "codex-app-server-transport",
+ "codex-app-server-remote-client",
  "codex-arg0",
  "codex-backend-client",
  "codex-cloud-client",
@@ -2238,7 +2240,6 @@ dependencies = [
  "codex-protocol",
  "codex-uds",
  "codex-utils-absolute-path",
- "codex-utils-rustls-provider",
  "color-eyre",
  "futures",
  "pretty_assertions",
@@ -2324,6 +2325,25 @@ name = "codex-app-server-protocol-noop-macros"
 version = "0.0.0"
 
 [[package]]
+name = "codex-app-server-remote-client"
+version = "0.0.0"
+dependencies = [
+ "codex-app-server-protocol",
+ "codex-uds",
+ "codex-utils-absolute-path",
+ "codex-utils-rustls-provider",
+ "futures",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "url",
+ "zstd 0.13.3",
+]
+
+[[package]]
 name = "codex-app-server-test-client"
 version = "0.0.0"
 dependencies = [
@@ -2356,6 +2376,7 @@ dependencies = [
  "chrono",
  "codex-api",
  "codex-app-server-protocol",
+ "codex-app-server-remote-client",
  "codex-config",
  "codex-core",
  "codex-features",
@@ -2391,7 +2412,6 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
- "zstd 0.13.3",
 ]
 
 [[package]]
@@ -2725,11 +2745,13 @@ dependencies = [
  "codex-backend-client",
  "codex-config",
  "codex-core",
+ "codex-exec-server",
  "codex-http-client",
  "codex-keyring-store",
  "codex-login",
  "codex-otel",
  "codex-protocol",
+ "codex-rmcp-client",
  "hmac 0.12.1",
  "pretty_assertions",
  "serde",
@@ -2814,11 +2836,11 @@ version = "0.0.0"
 dependencies = [
  "codex-code-mode-protocol",
  "codex-http-client",
- "codex-install-context",
  "codex-otel",
  "codex-protocol",
  "futures",
  "http-body-util",
+ "opentelemetry",
  "pretty_assertions",
  "prost",
  "rand 0.9.3",
@@ -2842,6 +2864,7 @@ dependencies = [
  "codex-code-mode",
  "codex-code-mode-protocol",
  "codex-code-mode-runtime",
+ "codex-core",
  "codex-http-client",
  "codex-otel",
  "codex-otel-trace-websocket",
@@ -16247,7 +16270,7 @@ dependencies = [
 [[package]]
 name = "tokio-tungstenite"
 version = "0.28.0"
-source = "git+https://github.com/openai-oss-forks/tokio-tungstenite?rev=7447c427513cfe685f236e1ac0513c4ea3dd9c0b#7447c427513cfe685f236e1ac0513c4ea3dd9c0b"
+source = "git+https://github.com/openai-oss-forks/tokio-tungstenite?rev=7a920470d62138955446b64220c7609e46ad770e#7a920470d62138955446b64220c7609e46ad770e"
 dependencies = [
  "futures-util",
  "log",
@@ -16740,7 +16763,7 @@ dependencies = [
 [[package]]
 name = "tungstenite"
 version = "0.27.0"
-source = "git+https://github.com/openai-oss-forks/tungstenite-rs?rev=bc589d684755a8c02da0fc7e58d0861cbfc306f1#bc589d684755a8c02da0fc7e58d0861cbfc306f1"
+source = "git+https://github.com/openai-oss-forks/tungstenite-rs?rev=e19950ef7828cb311e6d51a6bedcebf0192e055c#e19950ef7828cb311e6d51a6bedcebf0192e055c"
 dependencies = [
  "bytes",
  "data-encoding",

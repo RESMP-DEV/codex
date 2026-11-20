@@ -1,8 +1,10 @@
-//! Core owns a thread discovery cache shared across turns. Explicit refresh dirties every entry.
+//! Core owns a thread discovery cache shared across turns. Explicit refresh evicts every entry.
 //! In-flight readers may keep their inventories; invalidation applies to the next lookup.
+//! Prewarming bounds discovery before readiness without publishing MCP state or failing startup.
 
 use super::Session;
 use super::TurnContext;
+use super::turn_context::TurnEnvironment;
 use crate::McpRefreshReason;
 use crate::config::Config;
 use crate::environment_selection::TurnEnvironmentSnapshot;
@@ -13,6 +15,9 @@ use codex_exec_server::ExecutorCapabilityDiscoveryV2Snapshot;
 use codex_exec_server::supports_capability_discovery_v2;
 use codex_features::Feature;
 use std::sync::Arc;
+use std::time::Duration;
+
+const DISCOVERY_PREWARM_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub(crate) struct ExecutorDiscovery {
@@ -20,9 +25,52 @@ pub(crate) struct ExecutorDiscovery {
 }
 
 impl ExecutorDiscovery {
+    pub(crate) fn ensure_capacity(&self, minimum: usize) {
+        self.cache.ensure_capacity(minimum);
+    }
+
     #[expect(dead_code, reason = "Reserved for future environment-scoped refresh")]
     pub(crate) fn invalidate_environment(&self, environment: &Arc<Environment>) {
         self.cache.invalidate_environment(environment);
+    }
+
+    pub(crate) async fn prewarm(&self, selected: &TurnEnvironment) {
+        let prewarm = async {
+            let Ok(info) = selected.environment().info().await else {
+                tracing::warn!(
+                    environment_id = selected.selection.environment_id,
+                    "could not read executor discovery V2 support during prewarm"
+                );
+                return;
+            };
+            if !supports_capability_discovery_v2(&info) {
+                return;
+            }
+            // Discovery logs failures and retains them according to its existing retry policy.
+            let _ = self
+                .cache
+                .discover(
+                    &selected.selection.environment_id,
+                    selected.environment(),
+                    DiscoverV2CapabilitiesRequest {
+                        force_reload: false,
+                        cwd: selected.cwd().clone(),
+                        sandbox: Some(selected.sandbox_context(/*additional_permissions*/ None)),
+                    },
+                )
+                .await;
+        };
+        if tokio::time::timeout(DISCOVERY_PREWARM_TIMEOUT, prewarm)
+            .await
+            .is_err()
+        {
+            // Dropping the load releases the cache's OnceCell for a later step to retry.
+            tracing::warn!(
+                environment_id = selected.selection.environment_id,
+                timeout_ms = DISCOVERY_PREWARM_TIMEOUT.as_millis(),
+                "executor discovery V2 prewarm timed out; continuing environment startup"
+            );
+        }
     }
 }
 
@@ -82,6 +130,7 @@ impl Session {
                 continue;
             }
             let request = DiscoverV2CapabilitiesRequest {
+                force_reload: false,
                 cwd: selected.cwd().clone(),
                 sandbox: Some(self.discovery_sandbox(selected, skill_turn)),
             };
@@ -117,7 +166,6 @@ impl Session {
                     .zip(&snapshots)
                     .any(|(previous, current)| !previous.same_discovery(current))
         });
-        let inventory_changed = cache.take_recovered_discovery() || inventory_changed;
         (Some(snapshots), inventory_changed)
     }
 }

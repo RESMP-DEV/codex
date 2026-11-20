@@ -3,6 +3,12 @@
 #[path = "scenarios_bundled_app_hooks.rs"]
 mod bundled_app_hooks;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn executor_discovery_v2_refreshes_inventory_and_reuses_it_across_turns() -> anyhow::Result<()>
+{
+    super::executor_discovery_v2::check_acquisition(/*enabled*/ true, "0.164.0").await
+}
+
 #[path = "scenarios_turn_input_agent_message.rs"]
 mod turn_input_agent_message;
 
@@ -3552,7 +3558,11 @@ async fn attached_side_chat_preserves_model_context_on_cold_resume() -> Result<(
     resume_options.environments = options.environments.clone();
     let child = test
         .thread_manager
-        .fork_prepared_thread(options, prepared)
+        .fork_prepared_thread(
+            options,
+            prepared,
+            codex_thread_store::InheritedHistoryVisibility::Full,
+        )
         .await?;
     child
         .thread

@@ -191,6 +191,7 @@ use codex_sandboxing::policy_transforms::intersect_permission_profiles_with_cont
 use codex_shell_command::parse_command::parse_command;
 use codex_terminal_detection::user_agent;
 use codex_thread_store::CreateThreadParams;
+use codex_thread_store::InheritedHistoryVisibility;
 use codex_thread_store::LiveThread;
 use codex_thread_store::LiveThreadInitGuard;
 use codex_thread_store::LocalThreadStore;
@@ -259,6 +260,7 @@ mod config_refresh;
 pub(crate) mod context_window;
 mod daemon_recovery;
 mod environment;
+mod executor_discovery;
 mod extension_interruption;
 pub(crate) mod extension_metrics;
 mod guardian_checkpoint;
@@ -276,7 +278,6 @@ mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
 mod model_catalog_settings;
-mod model_ids;
 pub(crate) mod multi_agents;
 mod plugin_selection;
 mod realtime_handoff;
@@ -497,6 +498,7 @@ pub(crate) enum ForkPersistence {
     Referenced {
         history_base: Option<HistoryPosition>,
         inherited_item_count: usize,
+        inherited_history_visibility: InheritedHistoryVisibility,
     },
 }
 
@@ -605,12 +607,12 @@ const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyb
 
 pub(crate) fn assign_missing_item_id(
     item: &mut ResponseItem,
-    item_id_generator: &codex_protocol::ItemIdGenerator,
+    context_ids: &codex_thread_context_ids::ThreadContextIds,
 ) {
     if item.id().is_none_or(|id| id.is_empty())
         && let Some(prefix) = item.id_prefix()
     {
-        item.set_id(Some(item_id_generator(prefix)));
+        item.set_id(Some(context_ids.next_item(prefix)));
     }
 }
 
@@ -4036,7 +4038,7 @@ impl Session {
     }
 
     pub(crate) fn assign_missing_response_item_id(&self, item: &mut ResponseItem) {
-        assign_missing_item_id(item, &self.item_id_generator);
+        assign_missing_item_id(item, &self.context_ids);
     }
 
     pub(crate) fn response_item_from_user_input(
@@ -4545,7 +4547,7 @@ impl Session {
                     .await,
             );
             // Only skill discovery may use a turn's temporary file access. Plugin servers and
-            // hooks use the session inventory above because they can outlive the step.
+            // hooks use the session inventory because they can outlive the step.
             let turn_skill_discovery =
                 if let Some(grants) = turn_context.turn_skill_filesystem_grants(&environments) {
                     if turn_context
@@ -4605,12 +4607,14 @@ impl Session {
             {
                 required_servers.push(codex_mcp::CODEX_APPS_MCP_SERVER_NAME.to_owned());
             }
+            let captured_executor_discovery_v2 = executor_capability_discovery_v2.as_deref();
             let catalogs = self.lock_cloud_catalogs().await;
             let (mcp, prepared_recommendations) = tokio::join!(
                 // MCP refresh can be large; keep it off the sampling request's stack.
                 Box::pin(self.mcp_runtime_for_step(
                     turn_context.as_ref(),
                     &selected_capability_roots,
+                    captured_executor_discovery_v2,
                     &required_servers,
                     required_plugins,
                 )),
@@ -4622,6 +4626,11 @@ impl Session {
                     }
                 },
             );
+            let mcp = mcp?;
+            // Skill and hook admission must use the policy published with this binding.
+            let mut plugin_config = turn_context.config.as_ref().clone();
+            plugin_config.plugins = mcp.config().plugins.clone();
+            plugin_config.config_layer_stack = mcp.config().config_layer_stack.clone();
             let search = crate::model_search::resolve(
                 turn_context.as_ref(),
                 &settings,
@@ -4648,7 +4657,7 @@ impl Session {
             let select_plugins = |discovery, discovery_v2| {
                 self.services.mcp_manager.selected_plugins_for_step(
                     codex_extension_api::McpServerContributionContext::for_step(
-                        turn_context.config.as_ref(),
+                        &plugin_config,
                         &self.services.mcp_thread_init,
                         &self.services.thread_extension_data,
                         &turn_context.originator,
@@ -5025,6 +5034,17 @@ impl Session {
                 metadata,
                 started_item,
             } = replacement;
+            // History assigns sequences on append and on legacy replay. Only newly
+            // rendered context in this replacement should receive a prefix ID.
+            let fresh = items.iter_mut().filter(|entry| {
+                entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.history_sequence)
+                    .is_none()
+            });
+            self.context_ids
+                .assign_prefix_ids(fresh.map(|entry| &mut entry.item));
             for envelope in &mut items {
                 self.assign_missing_response_item_id(&mut envelope.item);
             }
@@ -5595,12 +5615,8 @@ impl Session {
         let retained_client_items = crate::compact_remote_v2::retained_client_items(
             history.annotated_items(),
             &history.file_audio_durations,
-            |item| {
-                crate::compact_remote_v2::should_retain_client_item(
-                    item,
-                    &turn_context.config.features,
-                )
-            },
+            ResponseItemEnvelope::is_always_retained,
+            Some(&turn_context.config.features),
         );
         // Resolve the roster before allocating a new context window.
         let rendered = world_state.render_full_with_host_roster().await;
@@ -5709,12 +5725,15 @@ impl Session {
         if self.reference_context_item().await.is_some() {
             return Ok(None);
         }
-        let items = crate::context_manager::updates::merge_world_state_updates(updates);
-        self.state
-            .lock()
-            .await
-            .history
-            .set_world_state_baseline(snapshot.clone());
+        let mut items = crate::context_manager::updates::merge_world_state_updates(updates);
+        {
+            let mut state = self.state.lock().await;
+            // Recovery may need to append full instructions after a surviving prefix.
+            if state.history.annotated_items().is_empty() {
+                self.context_ids.assign_prefix_ids(items.iter_mut());
+            }
+            state.history.set_world_state_baseline(snapshot.clone());
+        }
         self.publish_step_context(
             step_context,
             items,
@@ -6060,8 +6079,9 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         model_info: &ModelInfo,
-        response_item: ResponseItem,
+        mut response_item: ResponseItem,
     ) {
+        self.assign_missing_response_item_id(&mut response_item);
         // Add to conversation history and persist response item to rollout.
         self.record_conversation_items(
             turn_context,

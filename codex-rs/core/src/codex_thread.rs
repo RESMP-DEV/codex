@@ -428,9 +428,9 @@ impl CodexThread {
         &self.session.services.thread_extension_data
     }
 
-    /// Generator used for response items produced on behalf of this thread.
-    pub fn item_id_generator(&self) -> &codex_protocol::ItemIdGenerator {
-        &self.session.item_id_generator
+    /// Allocates context IDs on behalf of this thread.
+    pub fn context_ids(&self) -> &codex_thread_context_ids::ThreadContextIds {
+        &self.session.context_ids
     }
 
     /// Returns tools from this thread’s ready, unshared Apps MCP client.
@@ -1283,22 +1283,27 @@ impl CodexThread {
             ));
         }
         let items: Vec<InjectedResponseItem> = items.into_iter().map(Into::into).collect();
+        for item in &items {
+            validate_injected_response_item(&item.item)?;
+        }
         let mut indexed_items = items.iter().enumerate();
         while let Some((index, item)) = indexed_items.next() {
-            validate_injected_response_item(&item.item)?;
-            if item.retention != ItemRetention::Always {
+            if matches!(
+                item.retention,
+                ItemRetention::Unspecified | ItemRetention::Default
+            ) {
                 continue;
             }
             let needs_call = crate::tools::output_call_id(&item.item).is_some()
                 && !matches!(&item.item, ResponseItem::ToolSearchOutput { execution, .. } if execution == "server");
             if (crate::tools::input_call_id(&item.item).is_some() || needs_call)
                 && !indexed_items.next().is_some_and(|(_, output)| {
-                    output.retention == ItemRetention::Always
+                    output.retention == item.retention
                         && crate::tools::is_matching_tool_output(&item.item, &output.item)
                 })
             {
                 return Err(CodexErr::InvalidRequest(format!(
-                    "items[{index}]: retained tool calls and outputs must be adjacent in the same request, call first, with both marked always"
+                    "items[{index}]: retained tool calls and outputs must be adjacent in the same request, call first, with the same retention policy"
                 )));
             }
         }
@@ -1600,6 +1605,13 @@ impl CodexThread {
                 .refresh_mcp_config(expected_config, next_config),
         )
         .await
+    }
+
+    /// Invalidates this thread's executor DiscoveryV2 inventory. The next discovery
+    /// consumer reloads it; unchanged turns and other reads share the cached inventory.
+    /// Environment/session, cwd, and sandbox changes also trigger discovery independently.
+    pub fn invalidate_executor_discovery(&self) {
+        self.session.invalidate_executor_discovery();
     }
 
     /// Refreshes this thread's Apps tools before returning their runtime state.

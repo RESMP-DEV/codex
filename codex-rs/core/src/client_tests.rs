@@ -65,7 +65,6 @@ use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol_test_support::uuid_v7_item_id_generator_for_test;
 use codex_rollout_trace::ExecutionStatus;
 use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
@@ -78,6 +77,8 @@ use codex_runtime_agent_instance::AgentHostAuthorization;
 use codex_runtime_agent_instance::RuntimeAuthManager;
 use codex_runtime_agent_instance::RuntimeRegistrationMetadata;
 use codex_runtime_agent_instance::RuntimeRole;
+use codex_thread_context_ids::ThreadContextIds;
+use codex_thread_context_ids_test_support::thread_context_ids;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiTool;
 use codex_tools::ToolSpec;
@@ -114,19 +115,20 @@ use wiremock::matchers::path;
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 
 fn test_model_client(session_source: SessionSource) -> ModelClient {
-    test_model_client_with_thread_id(ThreadId::new(), session_source)
+    test_model_client_with_ids(ThreadId::new(), session_source, thread_context_ids())
 }
 
-fn test_model_client_with_thread_id(
+fn test_model_client_with_ids(
     thread_id: ThreadId,
     session_source: SessionSource,
+    context_ids: ThreadContextIds,
 ) -> ModelClient {
     let provider = create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
     ModelClient::new(
         codex_model_provider::create_model_provider(provider, /*auth_manager*/ None),
         AgentIdentityAuthPolicy::JwtOnly,
         thread_id,
-        uuid_v7_item_id_generator_for_test(),
+        context_ids,
         session_source,
         "test_originator".to_string(),
         /*model_verbosity*/ None,
@@ -595,7 +597,7 @@ async fn responses_request_includes_internal_metadata_for_provider_grant_or_firs
         recorder.attach_direct_call_to_output(
             &mut item,
             Some((recorded, permit)),
-            &session.item_id_generator,
+            &session.context_ids,
         );
         outputs.push(item);
     }
@@ -1081,7 +1083,7 @@ async fn responses_http_preserves_raw_tool_metadata_for_openai_custom_endpoint()
 #[test_case::test_case(true; "responses_lite")]
 fn prefix_ids_track_thread_and_payload(responses_lite: bool) -> anyhow::Result<()> {
     let thread_id = ThreadId::new();
-    let client = test_model_client_with_thread_id(thread_id, SessionSource::Cli);
+    let client = test_model_client_with_ids(thread_id, SessionSource::Cli, thread_context_ids());
     let mut model = test_model_info();
     model.use_responses_lite = responses_lite;
     let instructions_index = usize::from(responses_lite);
@@ -1147,10 +1149,7 @@ fn prefix_ids_track_thread_and_payload(responses_lite: bool) -> anyhow::Result<(
         );
     }
 
-    let independent = build(
-        &test_model_client_with_thread_id(ThreadId::new(), SessionSource::Cli),
-        &prompt,
-    )?;
+    let independent = build(&test_model_client(SessionSource::Cli), &prompt)?;
     assert_ne!(
         independent.input[instructions_index].id(),
         changed_tools.input[instructions_index].id()
@@ -2188,7 +2187,7 @@ fn model_client_with_counting_attestation(
         codex_model_provider::create_model_provider(provider, auth_manager),
         AgentIdentityAuthPolicy::JwtOnly,
         ThreadId::new(),
-        uuid_v7_item_id_generator_for_test(),
+        thread_context_ids(),
         SessionSource::Exec,
         "test_originator".to_string(),
         /*model_verbosity*/ None,

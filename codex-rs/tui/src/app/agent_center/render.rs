@@ -129,7 +129,8 @@ impl Renderable for AgentsOverviewView {
         let inset =
             |area: Rect| area.inner(Margin::new(/*horizontal*/ 2, /*vertical*/ 0));
         let footer_hints = self.center_footer_hints();
-        let state = self.state();
+        let mut state = self.state();
+        state.row_hits.clear();
         let filter_keys = if state.editing_metadata() {
             String::new()
         } else {
@@ -177,12 +178,17 @@ impl Renderable for AgentsOverviewView {
             );
             tabs.width = tabs.width.saturating_sub(hint_width + 2);
         }
-        render_filled_tab_bar(
+        let targets = render_filled_tab_bar(
             &labels.iter().map(String::as_str).collect::<Vec<_>>(),
             state.status_filter,
             tabs,
             buf,
         );
+        if self.dock_focused == Some(false)
+            && let Some((_, tab)) = targets.iter().find(|(id, _)| *id == state.status_filter)
+        {
+            buf.set_style(*tab, crate::style::quiet_workspace_style());
+        }
         line(
             "─"
                 .repeat(usize::from(area.width.saturating_sub(/*rhs*/ 4)))

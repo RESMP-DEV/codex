@@ -94,6 +94,8 @@ impl App {
                     | AppEvent::TestConfigNotification
                     | AppEvent::SendConfigTestNotification { .. }
                     | AppEvent::SaveConfigPreference(_)
+                    | AppEvent::SaveReasoningSummary { .. }
+                    | AppEvent::RefreshConfigReasoningSummary
                     | AppEvent::CopyWarning(_)
                     | AppEvent::UpdateWarnings { .. }
                     | AppEvent::CopySelection { .. }
@@ -854,6 +856,10 @@ impl App {
                                     }
                                     // Keep local input without replacing the fork's running state.
                                     self.chat_widget.restore_reconnected_input(retained_input, &[]);
+                                    if from_agents_overview && self.agents_overview.workspace.is_open() {
+                                        self.focus_workspace_composer(tui);
+                                        self.repaint_agents_overview();
+                                    }
                                     if let Some(err) = name_error {
                                         self.chat_widget.add_error_message(err);
                                     }
@@ -1339,7 +1345,7 @@ impl App {
                     && (self.agents_overview.threads.iter().any(|(id, thread)| {
                         (mode == ExitMode::Immediate
                             || Some(*id) != self.current_displayed_thread_id()
-                            || self.chat_widget.active_view_is(AGENTS_OVERVIEW_VIEW_ID))
+                            || self.agents_overview_has_focus())
                             && matches!(thread.as_ref().map(|t| &t.status), Some(ThreadStatus::Active { .. }))
                     }) || self.running_side_thread_id().await.is_some()) =>
             {
@@ -3469,8 +3475,14 @@ impl App {
                 {
                     AppRunControl::Continue
                         if self.primary_thread_id.is_none()
-                            && self.chat_widget.selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID).is_none() => {
+                            && self.overview_selected_index().is_none() => {
                         self.open_agents_overview(app_server);
+                    }
+                    AppRunControl::Continue
+                        if self.agents_overview.workspace.is_open()
+                            && self.current_displayed_thread_id() == Some(thread_id) => {
+                        self.focus_workspace_composer(tui);
+                        self.repaint_agents_overview();
                     }
                     AppRunControl::Continue => {}
                     AppRunControl::Exit(reason) => return Ok(AppRunControl::Exit(reason)),
@@ -4137,6 +4149,16 @@ impl App {
             }
             AppEvent::SaveConfigPreference(preference) => {
                 self.save_config_preference(tui, preference).await;
+            }
+            AppEvent::SaveReasoningSummary { backend, summary } => {
+                if backend == app_server.backend_id() {
+                    self.update_reasoning_summary(app_server, Some(summary)).await;
+                }
+                tui.frame_requester().schedule_frame();
+            }
+            AppEvent::RefreshConfigReasoningSummary => {
+                self.update_reasoning_summary(app_server, /*requested*/ None).await;
+                tui.frame_requester().schedule_frame();
             }
             AppEvent::PersistAgentsOverviewGrouping(grouping) => {
                 self.persist_agents_overview_grouping(grouping).await;

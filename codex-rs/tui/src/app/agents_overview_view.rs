@@ -160,8 +160,16 @@ pub(super) fn directory_group_key(cwd: &Path, worktrees_enabled: bool) -> PathBu
         .unwrap_or_else(|| cwd.to_path_buf())
 }
 
+/// The item painted under the pointer, identified across task-list refreshes.
+#[derive(Clone, Copy)]
+enum RowTarget {
+    Thread(ThreadId),
+    ShowMore,
+}
+
 #[derive(Default)]
 pub(super) struct AgentsOverviewViewState {
+    row_hits: Vec<(RowTarget, Rect)>,
     scroll: usize,
     page_height: usize,
     status_filter: usize,
@@ -227,6 +235,8 @@ impl AgentsOverviewViewState {
 }
 
 pub(super) struct AgentsOverviewView {
+    /// Some when shown beside the conversation. The value records keyboard focus.
+    pub(super) dock_focused: Option<bool>,
     use_theme_colors: bool,
     pub(super) rows: Vec<AgentsOverviewRow>,
     project_groups: Vec<AgentsOverviewProjectGroup>,
@@ -305,6 +315,7 @@ impl AgentsOverviewView {
             }
         }
         let mut view = Self {
+            dock_focused: None,
             editor_keymap: keymap.clone(),
             use_theme_colors,
             rows,
@@ -328,6 +339,29 @@ impl AgentsOverviewView {
         view.state().completion = None;
         view.reconcile_command_center_selection();
         view
+    }
+
+    pub(super) fn owns_nested_input(&self) -> bool {
+        let state = self.state();
+        state.editing_metadata() || state.help || state.removal.is_some() || state.creating_worktree
+    }
+
+    /// Follow a newly displayed task once its row arrives. Ordinary refreshes keep the browse position.
+    pub(super) fn follow_changed_conversation(&mut self, previous: &Self) {
+        let Some((index, current)) = self.rows.iter().enumerate().find(|(_, row)| row.is_current)
+        else {
+            return;
+        };
+        if !previous
+            .rows
+            .iter()
+            .any(|row| row.is_current && row.thread_id == current.thread_id)
+            && !self.owns_nested_input()
+            && self.visible_indices().contains(&index)
+        {
+            self.selected = index;
+            self.state().show_more_selected = false;
+        }
     }
 
     pub(super) fn thread_ids(&self) -> Vec<ThreadId> {

@@ -5868,17 +5868,6 @@
             }
           ]
         },
-        "client_search_provider": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/WebSearchProvider"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Effective tools.client_search_provider hint. Model-selected providers take precedence."
-        },
         "compact_prompt": {
           "type": [
             "string",
@@ -6796,6 +6785,13 @@
       ],
       "type": "object"
     },
+    "ConfiguredHookFailurePolicy": {
+      "enum": [
+        "continue",
+        "block"
+      ],
+      "type": "string"
+    },
     "ConfiguredHookHandler": {
       "oneOf": [
         {
@@ -6819,6 +6815,16 @@
               "type": [
                 "string",
                 "null"
+              ]
+            },
+            "onFailure": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ConfiguredHookFailurePolicy"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "statusMessage": {
@@ -6856,6 +6862,16 @@
             "input": {
               "additionalProperties": true,
               "type": "object"
+            },
+            "onFailure": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ConfiguredHookFailurePolicy"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "server": {
               "type": "string"
@@ -9463,7 +9479,7 @@
       "type": "object"
     },
     "GatewayOAuthLoginParams": {
-      "description": "Authorize a configured provider without changing the default or any thread's provider.",
+      "description": "Authorize a configured service without changing the selected model provider.",
       "properties": {
         "deviceAuth": {
           "description": "Select device authorization when the server advertises support for it.",
@@ -9475,6 +9491,17 @@
             "string",
             "null"
           ]
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GatewayOAuthTarget"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Available only on `--startup-oauth`. Mutually exclusive with `modelProvider`."
         }
       },
       "type": "object"
@@ -9581,6 +9608,26 @@
         "failed"
       ],
       "type": "string"
+    },
+    "GatewayOAuthTarget": {
+      "description": "An explicit service to authorize instead of the selected model provider.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "enum": [
+                "configServer"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "ConfigServerGatewayOAuthTarget",
+          "type": "object"
+        }
+      ]
     },
     "GcpProviderId": {
       "enum": [
@@ -20316,6 +20363,28 @@
       ],
       "type": "object"
     },
+    "StartupGatewayOAuthChangedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Browser handoff on the dedicated `--startup-oauth` connection.",
+      "properties": {
+        "authUrl": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/GatewayOAuthStatus"
+        },
+        "target": {
+          "$ref": "#/definitions/GatewayOAuthTarget"
+        }
+      },
+      "required": [
+        "authUrl",
+        "status",
+        "target"
+      ],
+      "title": "StartupGatewayOAuthChangedNotification",
+      "type": "object"
+    },
     "StrictReviewRequiredNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -22431,6 +22500,11 @@
             },
             "id": {
               "type": "string"
+            },
+            "imageMetadata": {
+              "additionalProperties": true,
+              "description": "Per-image metadata selected by the backend for the receiving surface.",
+              "type": "object"
             },
             "inputImages": {
               "description": "Observed local inputs for a completed generation, absent on older items.",
@@ -26686,14 +26760,6 @@
         "cached",
         "indexed",
         "live"
-      ],
-      "type": "string"
-    },
-    "WebSearchProvider": {
-      "description": "Provider preference selected by the resolved model catalog entry.",
-      "enum": [
-        "standalone",
-        "search_mcp"
       ],
       "type": "string"
     },

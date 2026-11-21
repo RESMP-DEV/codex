@@ -137,6 +137,11 @@ pub struct ThreadStartParams {
     #[experimental("thread/start.daybreakEnabled")]
     #[ts(optional = nullable)]
     pub daybreak_enabled: Option<bool>,
+    /// False opts this new root out of Daybreak propagation unless managed policy
+    /// requires it. Omitted, null, or true uses the configured enrollment rule.
+    #[experimental("thread/start.daybreakProgramPropagationEnrolled")]
+    #[ts(optional = nullable)]
+    pub daybreak_program_propagation_enrolled: Option<bool>,
     /// Optional sticky environments for this thread.
     ///
     /// Omitted selects the default environment when environment access is
@@ -1863,8 +1868,7 @@ pub struct ThreadGuardianReviewParams {
 #[ts(export_to = "v2/")]
 pub struct ThreadGuardianReviewResponse {
     pub call_id: String,
-    /// Null when current policy or a remembered approval skips review.
-    pub assessment: Option<ThreadGuardianAssessment>,
+    pub assessment: ThreadGuardianAssessment,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

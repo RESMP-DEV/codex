@@ -299,6 +299,7 @@ impl StepContext {
         });
         settings.service_tier = turn.config.service_tier.clone();
         Arc::new(Self {
+            active_collaboration_mode: settings.active_collaboration_mode(/*previous*/ None),
             sampled_through_sequence: None,
             turn_cancellation: tokio_util::sync::CancellationToken::new(),
             preempt: turn
@@ -1946,6 +1947,7 @@ async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
                     timeout_sec: Some(600),
                     r#async: false,
                     status_message: None,
+                    on_failure: None,
                     additional_context_limit: None,
                 }],
             },
@@ -2810,7 +2812,6 @@ async fn annotated_history_uses_explicit_model_without_a_step(
         metadata.history_sequence = Some(index as u64 + 1);
         metadata.sampled_through_sequence = Some(0);
         metadata.history_truncation_token_limit = Some(expected_budget);
-        metadata.model_search_state = Some(codex_history::ModelSearchState::Unused);
         let (ResponseItem::FunctionCallOutput { output, .. }
         | ResponseItem::CustomToolCallOutput { output, .. }) = &mut envelope.item
         else {
@@ -4344,68 +4345,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
 
 #[tokio::test]
 async fn set_rate_limits_retains_previous_credits() {
-    let codex_home = tempfile::tempdir().expect("create temp dir");
-    let config = build_test_config(codex_home.path()).await;
-    let config = Arc::new(config);
-    let model = get_model_offline_for_tests(config.model.as_deref());
-    let model_info =
-        construct_model_info_offline_for_tests(model.as_str(), &config.to_models_manager_config());
-    let reasoning_effort = config.model_reasoning_effort.clone();
-    let collaboration_mode = CollaborationMode {
-        mode: ModeKind::Default,
-        settings: Settings {
-            model,
-            reasoning_effort,
-            developer_instructions: None,
-        },
-    };
-    let session_configuration = SessionConfiguration {
-        turn_extension_init: Default::default(),
-        provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
-        environments: Vec::new(),
-        step_settings: Arc::new(StepSettings {
-            request_country: RequestCountry::default(),
-            collaboration_mode,
-            reasoning_summary: config.model_reasoning_summary,
-            service_tier: None,
-            personality: config.personality,
-            approval_policy: config.permissions.approval_policy.clone(),
-            approvals_reviewer: config.approvals_reviewer,
-        }),
-        model_info_overrides: config.to_models_manager_config().into(),
-        developer_instructions: config.developer_instructions.clone(),
-        base_instructions: config
-            .base_instructions
-            .clone()
-            .unwrap_or_else(|| render_model_instructions(&model_info)),
-        permission_profile_state: config.permissions.permission_profile_state().clone(),
-        allow_login_shell: config.permissions.allow_login_shell,
-        shell_environment_policy: config.permissions.shell_environment_policy.clone(),
-        windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
-        windows_sandbox_type: config.permissions.windows_sandbox_type,
-        use_legacy_landlock: config.features.use_legacy_landlock(),
-        legacy_fallback_cwd: config.cwd.clone(),
-        runtime_workspace_roots: config.workspace_roots.clone(),
-        codex_home: config.codex_home.clone(),
-        thread_name: None,
-        disabled_plugin_ids: Vec::new(),
-        original_config_do_not_use: Arc::clone(&config),
-        metrics_service_name: None,
-        app_server_client_name: None,
-        app_server_client_version: None,
-        trusted_guardian_reviewer: false,
-        session_source: SessionSource::Exec,
-        root_capabilities_restricted: false,
-        history_mode: Default::default(),
-        forked_from_thread_id: None,
-        parent_thread_id: None,
-        thread_source: None,
-        originator: "test_originator".to_string(),
-        dynamic_tools: Arc::default(),
-        user_shell_override: None,
-    };
-
-    let mut state = SessionState::new(session_configuration);
+    let mut state = SessionState::new(make_session_configuration_for_tests().await);
     let initial = RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
@@ -4469,68 +4409,7 @@ async fn set_rate_limits_retains_previous_credits() {
 
 #[tokio::test]
 async fn set_rate_limits_updates_plan_type_when_present() {
-    let codex_home = tempfile::tempdir().expect("create temp dir");
-    let config = build_test_config(codex_home.path()).await;
-    let config = Arc::new(config);
-    let model = get_model_offline_for_tests(config.model.as_deref());
-    let model_info =
-        construct_model_info_offline_for_tests(model.as_str(), &config.to_models_manager_config());
-    let reasoning_effort = config.model_reasoning_effort.clone();
-    let collaboration_mode = CollaborationMode {
-        mode: ModeKind::Default,
-        settings: Settings {
-            model,
-            reasoning_effort,
-            developer_instructions: None,
-        },
-    };
-    let session_configuration = SessionConfiguration {
-        turn_extension_init: Default::default(),
-        provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
-        environments: Vec::new(),
-        step_settings: Arc::new(StepSettings {
-            request_country: RequestCountry::default(),
-            collaboration_mode,
-            reasoning_summary: config.model_reasoning_summary,
-            service_tier: None,
-            personality: config.personality,
-            approval_policy: config.permissions.approval_policy.clone(),
-            approvals_reviewer: config.approvals_reviewer,
-        }),
-        model_info_overrides: config.to_models_manager_config().into(),
-        developer_instructions: config.developer_instructions.clone(),
-        base_instructions: config
-            .base_instructions
-            .clone()
-            .unwrap_or_else(|| render_model_instructions(&model_info)),
-        permission_profile_state: config.permissions.permission_profile_state().clone(),
-        allow_login_shell: config.permissions.allow_login_shell,
-        shell_environment_policy: config.permissions.shell_environment_policy.clone(),
-        windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
-        windows_sandbox_type: config.permissions.windows_sandbox_type,
-        use_legacy_landlock: config.features.use_legacy_landlock(),
-        legacy_fallback_cwd: config.cwd.clone(),
-        runtime_workspace_roots: config.workspace_roots.clone(),
-        codex_home: config.codex_home.clone(),
-        thread_name: None,
-        disabled_plugin_ids: Vec::new(),
-        original_config_do_not_use: Arc::clone(&config),
-        metrics_service_name: None,
-        app_server_client_name: None,
-        app_server_client_version: None,
-        trusted_guardian_reviewer: false,
-        session_source: SessionSource::Exec,
-        root_capabilities_restricted: false,
-        history_mode: Default::default(),
-        forked_from_thread_id: None,
-        parent_thread_id: None,
-        thread_source: None,
-        originator: "test_originator".to_string(),
-        dynamic_tools: Arc::default(),
-        user_shell_override: None,
-    };
-
-    let mut state = SessionState::new(session_configuration);
+    let mut state = SessionState::new(make_session_configuration_for_tests().await);
     let initial = RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
@@ -5142,6 +5021,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         codex_home: config.codex_home.clone(),
         thread_name: None,
         disabled_plugin_ids: Vec::new(),
+        guardian_retention: config.guardian_retention_policy(),
         original_config_do_not_use: Arc::clone(&config),
         metrics_service_name: None,
         app_server_client_name: None,
@@ -6728,6 +6608,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         codex_home: config.codex_home.clone(),
         thread_name: None,
         disabled_plugin_ids: Vec::new(),
+        guardian_retention: config.guardian_retention_policy(),
         original_config_do_not_use: Arc::clone(&config),
         metrics_service_name: None,
         app_server_client_name: None,
@@ -6757,6 +6638,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         config.guardian_reuses_parent_compaction(),
         config.guardian_context_budgeting(),
         context_ids.clone(),
+        /*retention*/ None,
     );
     let (environment_manager, resolved_environments) =
         resolved_environments_for_configuration(&session_configuration, &default_environments)
@@ -7077,6 +6959,7 @@ async fn make_session_with_config_and_rx(
         codex_home: config.codex_home.clone(),
         thread_name: None,
         disabled_plugin_ids: Vec::new(),
+        guardian_retention: config.guardian_retention_policy(),
         original_config_do_not_use: Arc::clone(&config),
         metrics_service_name: None,
         app_server_client_name: None,
@@ -7217,6 +7100,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         codex_home: config.codex_home.clone(),
         thread_name: None,
         disabled_plugin_ids: Vec::new(),
+        guardian_retention: config.guardian_retention_policy(),
         original_config_do_not_use: Arc::clone(&config),
         metrics_service_name: None,
         app_server_client_name: None,
@@ -7769,7 +7653,7 @@ async fn request_permissions_tool_resolves_legacy_paths_against_selected_environ
                 turn: turn_context,
                 cancellation_token: CancellationToken::new(),
                 tracker,
-                call_id,
+                call_id: call_id.into(),
                 tool_name: codex_tools::ToolName::plain("request_permissions"),
                 source: ToolCallSource::Direct,
                 native_call: None,
@@ -7855,7 +7739,7 @@ async fn request_permissions_tool_rejects_invalid_requests(
         turn: turn_context,
         cancellation_token: CancellationToken::new(),
         tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
-        call_id: "call-1".to_string(),
+        call_id: "call-1".into(),
         tool_name: codex_tools::ToolName::plain("request_permissions"),
         source: ToolCallSource::Direct,
         native_call: None,
@@ -9090,6 +8974,7 @@ where
         codex_home: config.codex_home.clone(),
         thread_name: None,
         disabled_plugin_ids: Vec::new(),
+        guardian_retention: config.guardian_retention_policy(),
         original_config_do_not_use: Arc::clone(&config),
         metrics_service_name: None,
         app_server_client_name: None,
@@ -9119,6 +9004,7 @@ where
         config.guardian_reuses_parent_compaction(),
         config.guardian_context_budgeting(),
         context_ids.clone(),
+        /*retention*/ None,
     );
     let (environment_manager, resolved_turn_environments) =
         resolved_environments_for_configuration(&session_configuration, &default_environments)
@@ -10969,6 +10855,17 @@ async fn build_initial_context_omits_prompt_fragments_without_extension_state() 
     );
 }
 
+fn multi_agent_role_messages(items: &[ResponseItem]) -> Vec<Vec<&str>> {
+    developer_message_texts(items)
+        .into_iter()
+        .filter(|message| {
+            message
+                .iter()
+                .any(|text| MultiAgentRoleInstructions::matches_text(text))
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn build_initial_context_adds_multi_agent_v2_root_usage_hint_as_developer_message() {
     let (session, turn_context) =
@@ -10976,18 +10873,9 @@ async fn build_initial_context_adds_multi_agent_v2_root_usage_hint_as_developer_
 
     let initial_context = build_initial_context(&session, &turn_context).await;
 
-    let developer_messages = developer_message_texts(&initial_context);
-    assert!(
-        developer_messages
-            .iter()
-            .any(|message| message.as_slice() == ["Root guidance."]),
-        "expected standalone root usage hint developer message, got {developer_messages:?}"
-    );
-    assert!(
-        !developer_messages
-            .iter()
-            .any(|message| message.as_slice() == ["Subagent guidance."]),
-        "did not expect subagent usage hint for root thread, got {developer_messages:?}"
+    assert_eq!(
+        multi_agent_role_messages(&initial_context),
+        [["<multi_agent_role>Root guidance.</multi_agent_role>"]]
     );
 }
 
@@ -11027,17 +10915,9 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
             .contains("<context_window>\nAgent name: /root/worker\n")),
         "expected subagent context window to include its canonical name, got {developer_messages:?}"
     );
-    assert!(
-        developer_messages
-            .iter()
-            .any(|message| message.as_slice() == ["Subagent guidance."]),
-        "expected standalone subagent usage hint developer message, got {developer_messages:?}"
-    );
-    assert!(
-        !developer_messages
-            .iter()
-            .any(|message| message.as_slice() == ["Root guidance."]),
-        "did not expect root usage hint for subagent thread, got {developer_messages:?}"
+    assert_eq!(
+        multi_agent_role_messages(&initial_context),
+        [["<multi_agent_role>Subagent guidance.</multi_agent_role>"]]
     );
 }
 
@@ -11048,16 +10928,7 @@ async fn build_initial_context_omits_multi_agent_v2_usage_hints_when_feature_dis
 
     let initial_context = build_initial_context(&session, &turn_context).await;
 
-    let developer_messages = developer_message_texts(&initial_context);
-    assert!(
-        !developer_messages.iter().any(|message| {
-            matches!(
-                message.as_slice(),
-                ["Root guidance."] | ["Subagent guidance."]
-            )
-        }),
-        "did not expect multi-agent v2 usage hint developer messages, got {developer_messages:?}"
-    );
+    assert!(multi_agent_role_messages(&initial_context).is_empty());
 }
 
 #[tokio::test]
@@ -11075,19 +10946,7 @@ async fn build_initial_context_omits_multi_agent_v2_usage_hints_when_hint_is_emp
 
     let initial_context = build_initial_context(&session, &turn_context).await;
 
-    let developer_messages = developer_message_texts(&initial_context);
-    assert!(
-        !developer_messages.iter().any(|message| {
-            matches!(
-                message.as_slice(),
-                ["Root guidance."] | ["Subagent guidance."]
-            ) || message.iter().any(|text| {
-                text.contains("You are `/root`, the primary agent")
-                    || text.contains("You are an agent in a team of agents")
-            })
-        }),
-        "did not expect multi-agent v2 usage hint developer messages, got {developer_messages:?}"
-    );
+    assert!(multi_agent_role_messages(&initial_context).is_empty());
 }
 
 #[tokio::test]
@@ -13396,7 +13255,7 @@ async fn unified_exec_rejects_escalated_permissions_when_policy_not_on_request()
             step_context,
             cancellation_token: CancellationToken::new(),
             tracker: Arc::clone(&tracker),
-            call_id: "exec-call".to_string(),
+            call_id: "exec-call".into(),
             tool_name: codex_tools::ToolName::plain("exec_command"),
             source: crate::tools::context::ToolCallSource::Direct,
             native_call: None,
@@ -13620,4 +13479,14 @@ async fn rejected_mcp_refresh_then_corrected_user_config_blocks_ordinary_replace
             .is_some_and(|server| server.enabled),
         "rejection must not permit same-name ordinary-auth replacement in this session"
     );
+}
+
+impl TurnContext {
+    pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
+        self.context_item_with_mode(
+            self.initial_settings
+                .active_collaboration_mode(/*previous*/ None)
+                .map(|_| self.collaboration_mode()),
+        )
+    }
 }

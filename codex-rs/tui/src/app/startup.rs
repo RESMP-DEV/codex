@@ -1035,6 +1035,7 @@ See the Codex keymap documentation for supported actions and examples."
             backend_preference_context,
             config,
             local_settings,
+            realtime_call_client: Arc::default(),
             launch_cwd,
             runtime_working_directory_override: None,
             state_db,
@@ -1343,6 +1344,9 @@ See the Codex keymap documentation for supported actions and examples."
         let mut last_screen_size = tui.terminal.last_known_screen_size;
         let mut settled_size_tags = crate::terminal_size_telemetry::tags(last_screen_size);
         let mut pending_resize: Option<(ratatui::layout::Size, Instant)> = None;
+        let mut cloud_inventory_poll = tokio::time::interval(Duration::from_secs(/*secs*/ 10));
+        cloud_inventory_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut cloud_inventory_owner = None;
         let mut reconnect = None;
         let mut cloud_environment_picker: Option<
             futures::future::LocalBoxFuture<'static, crate::bottom_pane::SelectionViewParams>,
@@ -1507,7 +1511,7 @@ See the Codex keymap documentation for supported actions and examples."
                         app.app_server_target.clone(),
                         app.config.clone(),
                         app.local_settings.clone(),
-                        app.current_displayed_thread_id(),
+                        app.reconnect_thread_id(),
                         backends
                             .session_at(displayed_session)
                             .remote_cwd_override()
@@ -1567,6 +1571,15 @@ See the Codex keymap documentation for supported actions and examples."
                     .chat_widget
                     .rate_limit_refresh_interval()
                     .and_then(|interval| app.rate_limit_refresh_state.poll_deadline(interval));
+                let cloud_owner = (backends.is_listening(displayed_owner)
+                    && backends.session_at(displayed_session).thread_params_mode()
+                        == crate::ThreadParamsMode::Cloud
+                    && app.cloud_inventory_visible(displayed_owner))
+                .then_some(displayed_owner);
+                if cloud_inventory_owner != cloud_owner {
+                    cloud_inventory_owner = cloud_owner;
+                    cloud_inventory_poll.reset();
+                }
                 let control = select! {
                     result = async {
                         match app.daemon_restart.as_mut() {
@@ -1849,6 +1862,13 @@ See the Codex keymap documentation for supported actions and examples."
                         }
                     }, if backends.is_listening(displayed_owner) => {
                         app.refresh_rate_limits(backends.session_at(displayed_session), RateLimitRefreshOrigin::Periodic);
+                        AppRunControl::Continue
+                    }
+                    _ = cloud_inventory_poll.tick(), if cloud_owner.is_some() => {
+                        let session = backends.session_at(displayed_session);
+                        if let AppServerRequestHandle::Cloud(handle) = session.request_handle() {
+                            app.poll_cloud_inventory(session, handle.has_attachment());
+                        }
                         AppRunControl::Continue
                     }
                     () = async {

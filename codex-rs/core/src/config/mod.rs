@@ -1176,6 +1176,10 @@ pub struct Config {
     /// Explicit or feature-derived web search mode.
     pub web_search_mode: Constrained<WebSearchMode>,
 
+    /// Whether this mode came from an accepted explicit `web_search` setting.
+    /// Kept with the session-static mode when user config layers are refreshed.
+    pub web_search_mode_was_explicit: bool,
+
     /// Additional parameters for the web search tool when it is enabled.
     pub web_search_config: Option<WebSearchConfig>,
 
@@ -1756,6 +1760,22 @@ impl Config {
         } else {
             codex_guardian_context::ContextBudgeting::Fixed
         }
+    }
+
+    /// Resolves recorder limits from the Sync Elastic retained-instruction entry budget.
+    pub(crate) fn guardian_retention_policy(
+        &self,
+    ) -> Option<codex_protocol::protocol::GuardianRetentionPolicy> {
+        let entry_tokens = self
+            .guardian_sync_elastic_budget
+            .as_ref()?
+            .section_limits(codex_guardian_context::ElasticSection::RetainedUserInstructions)
+            .max_section_entry_tokens();
+        let record_bytes = codex_utils_output_truncation::approx_bytes_for_tokens(entry_tokens);
+        Some(codex_protocol::protocol::GuardianRetentionPolicy {
+            assistant_record_bytes: Some(record_bytes),
+            user_record_bytes: Some(record_bytes),
+        })
     }
 
     pub fn sqlite_config(&self) -> &codex_state::SqliteConfig {
@@ -4643,6 +4663,8 @@ impl Config {
             &mut constrained_web_search_mode,
             &mut startup_warnings,
         )?;
+        let web_search_mode_was_explicit =
+            cfg.web_search == Some(constrained_web_search_mode.value());
 
         let mcp_servers = constrain_mcp_servers(cfg.mcp_servers.clone(), mcp_servers.as_ref())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{e}")))?;
@@ -4971,6 +4993,7 @@ impl Config {
             forced_chatgpt_workspace_id,
             forced_login_method,
             web_search_mode: constrained_web_search_mode.value,
+            web_search_mode_was_explicit,
             web_search_config,
             experimental_request_user_input_enabled,
             update_plan_enabled,

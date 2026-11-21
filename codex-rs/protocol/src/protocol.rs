@@ -2598,6 +2598,21 @@ pub struct ThreadSettingsSnapshot {
     /// Thread-owned plugin selection, retained even when a plugin is unavailable.
     #[serde(default)]
     pub disabled_plugin_ids: Vec<String>,
+    /// Effective Guardian recorder policy. Absent for Fixed and old snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub guardian_retention: Option<GuardianRetentionPolicy>,
+}
+
+/// Resolved limits for Guardian's retained evidence, in storage bytes.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct GuardianRetentionPolicy {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub assistant_record_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub user_record_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, JsonSchema, TS)]
@@ -3210,6 +3225,7 @@ pub struct ImageGenerationBeginEvent {
     pub call_id: String,
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ImageGenerationEndEvent {
     pub call_id: String,
@@ -3234,6 +3250,10 @@ pub struct ImageGenerationEndEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub generation_id: Option<String>,
+    #[serde_as(deserialize_as = "serde_with::DefaultOnError")]
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    #[ts(as = "Option<_>", optional)]
+    pub image_metadata: Map<String, Value>,
 }
 
 // Conversation kept for backward compatibility.

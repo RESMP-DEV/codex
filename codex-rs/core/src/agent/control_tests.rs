@@ -1818,7 +1818,7 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
                 step_context: issuing_step,
                 cancellation_token: CancellationToken::new(),
                 tracker: Default::default(),
-                call_id: "queue-only-cold-load".to_string(),
+                call_id: "queue-only-cold-load".into(),
                 tool_name: codex_tools::ToolName::plain("send_message"),
                 source: ToolCallSource::DirectPlaintextMessage,
                 payload: ToolPayload::Function {
@@ -2444,6 +2444,7 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix(
                     thread_id: Some(parent_thread_id),
                     thread_settings: ThreadSettingsSnapshot {
                         disabled_plugin_ids: Vec::new(),
+                        guardian_retention: None,
                         model: "parent-only-model".to_string(),
                         model_provider_id: "parent-only-provider".to_string(),
                         service_tier: None,
@@ -3284,10 +3285,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .expect("parent shutdown should submit");
 }
 
-#[test_case::test_case(true; "marked catalog hints")]
-#[test_case::test_case(false; "unmarked bundled hints")]
 #[tokio::test]
-async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marked: bool) {
+async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
     let harness = AgentControlHarness::new().await;
     let mut parent_config = harness.config.clone();
     let _ = parent_config.features.enable(Feature::MultiAgentV2);
@@ -3317,7 +3316,6 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
     let parent_spawn_call_id = "spawn-call-compacted-usage-hints".to_string();
     let catalog_role = |base: &str| MultiAgentRoleInstructions::Composed {
         base: base.to_string(),
-        marked,
         omit_update_plan_instructions: false,
         max_concurrency: 2,
         wait_agent_enabled: false,

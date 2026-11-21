@@ -492,7 +492,8 @@ web_search = true
         cfg.tools,
         Some(ToolsToml {
             web_search: None,
-            ..Default::default()
+            experimental_request_user_input: None,
+            update_plan: None,
         })
     );
 }
@@ -511,7 +512,8 @@ web_search = false
         cfg.tools,
         Some(ToolsToml {
             web_search: None,
-            ..Default::default()
+            experimental_request_user_input: None,
+            update_plan: None,
         })
     );
 }
@@ -528,8 +530,9 @@ fn tools_experimental_request_user_input_defaults_to_enabled() {
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
+            web_search: None,
             experimental_request_user_input: Some(ExperimentalRequestUserInput { enabled: true }),
-            ..Default::default()
+            update_plan: None,
         })
     );
 }
@@ -547,8 +550,9 @@ enabled = false
     assert_eq!(
         cfg.tools,
         Some(ToolsToml {
+            web_search: None,
             experimental_request_user_input: Some(ExperimentalRequestUserInput { enabled: false }),
-            ..Default::default()
+            update_plan: None,
         })
     );
 }
@@ -564,7 +568,6 @@ async fn load_config_resolves_experimental_request_user_input_enabled() -> std::
                     enabled: false,
                 }),
                 update_plan: None,
-                ..Default::default()
             }),
             ..ConfigToml::default()
         },
@@ -13112,9 +13115,10 @@ expose_spawn_agent_model_overrides = true
 }
 
 #[test]
-fn multi_agent_v2_disabled_native_tools_omit_default_roles() {
+fn multi_agent_v2_disabled_native_tools_keep_only_concurrency() {
     let mut config = resolve_multi_agent_v2_config(&ConfigToml::default());
     config.disable_native_tools = true;
+    config.max_concurrent_threads_per_session = 17;
     let mut messages = ResolvedModelMessages::bundled().multi_agent();
     for catalog_override in [false, true] {
         if catalog_override {
@@ -13124,7 +13128,13 @@ fn multi_agent_v2_disabled_native_tools_omit_default_roles() {
         let usage_hints = resolve_usage_hints(
             &config, messages, /*omit_update_plan_instructions*/ false,
         );
-        assert_eq!((usage_hints.root, usage_hints.subagent), (None, None));
+        let expected = Some(
+            crate::context::MultiAgentRoleInstructions::concurrency_only(
+                /*max_concurrency*/ 17,
+            ),
+        );
+        assert_eq!(usage_hints.root, expected);
+        assert_eq!(usage_hints.subagent, expected);
     }
 }
 

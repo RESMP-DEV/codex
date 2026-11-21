@@ -1319,6 +1319,12 @@ impl CodexThread {
         self.rollout_path.clone()
     }
 
+    /// Whether the latest completed sampling request in this live context reported a removal.
+    /// Returns None before sampling or when that response omitted the report.
+    pub async fn last_sampling_cot_removed(&self) -> Option<bool> {
+        self.session.last_sampling_cot_removed().await
+    }
+
     /// Selects a local feedback rollout without materializing an untouched thread.
     pub async fn feedback_rollout_path(&self) -> ThreadStoreResult<Option<PathBuf>> {
         match self.session.live_thread() {
@@ -1334,6 +1340,13 @@ impl CodexThread {
     /// Returns startup metadata without the one-time initial message replay.
     pub fn startup_metadata(&self) -> &ThreadStartupMetadata {
         &self.startup_metadata
+    }
+
+    /// Whether this live thread joined the Daybreak propagation experiment at startup.
+    pub fn daybreak_program_propagation_enrolled(&self) -> bool {
+        self.thread_extension_data()
+            .get::<crate::agent::helper_daybreak::Enrollment>()
+            .is_some()
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -1622,7 +1635,7 @@ impl CodexThread {
     }
 
     /// Refreshes cloud plugin and skill catalogs before input admission, without starting a turn.
-    /// Serializes publication with step preparation and marks MCP dirty for later reconciliation.
+    /// Serializes publication with step preparation and queues MCP prewarm as plugins are published.
     /// Accepts complete or partial catalogs; failed discovery remains retryable.
     pub async fn refresh_cloud_plugins(&self) -> anyhow::Result<()> {
         self.session.refresh_cloud_plugins().await

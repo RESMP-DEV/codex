@@ -18,8 +18,6 @@ pub use compaction_checkpoint::CompactionCheckpoint;
 mod initialization;
 pub use initialization::HistoryInitialization;
 
-mod legacy_mcp_attribution;
-
 use std::borrow::Borrow;
 use std::borrow::Cow;
 use std::ops::Deref;
@@ -66,18 +64,6 @@ use serde::de::Error as _;
 pub struct ResponseItemEnvelope {
     pub item: ResponseItem,
     pub metadata: Option<CodexHarnessMetadata>,
-}
-
-/// Persisted search-provider state for a thread.
-///
-/// A missing checkpoint means the history predates this field and may contain Search MCP
-/// references. `Unused` means the writer knows that neither provider has run yet.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelSearchState {
-    Unused,
-    SearchMcp,
-    Standalone,
 }
 
 /// Metadata owned by the Codex harness and persisted with a response item.
@@ -172,6 +158,10 @@ pub struct CodexHarnessMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_assistant_message: Option<String>,
 
+    /// A confirmed delivery whose full text was unavailable within the retention limit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delivered_assistant_message_incomplete: bool,
+
     /// Whether a response configuration update was created by the Codex harness itself.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub harness_authored_configuration: bool,
@@ -197,25 +187,6 @@ pub struct CodexHarnessMetadata {
     /// The serialized field name is retained for compatibility with saved history.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inherited_user_message: bool,
-
-    /// Whether an old `mcp_attribution` value indicates Search MCP may have been used.
-    #[serde(
-        default,
-        rename = "mcp_attribution",
-        skip_serializing,
-        deserialize_with = "legacy_mcp_attribution::deserialize_search_mcp_use"
-    )]
-    #[schemars(skip)]
-    #[doc(hidden)]
-    pub legacy_search_mcp_used: Option<bool>,
-
-    /// Search provider already used by this thread, or confirmation that neither has run yet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_search_state: Option<ModelSearchState>,
-
-    /// Native search ran during automatic fallback, so its browsing references stay on native.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub native_search_fallback_used: bool,
 
     /// Sender context captured by the host when this task message was accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -258,6 +229,16 @@ impl std::fmt::Debug for ImageReplaySource {
 }
 
 impl CodexHarnessMetadata {
+    /// The captured delivery text and whether it is incomplete.
+    pub fn confirmed_delivery(&self) -> Option<(&str, bool)> {
+        if self.delivered_assistant_message_incomplete {
+            return Some(("", true));
+        }
+        self.delivered_assistant_message
+            .as_deref()
+            .map(|text| (text, text.is_empty()))
+    }
+
     /// Shortened messages no longer prove complete instruction or review delivery.
     pub fn mark_retained_sources_incomplete(&mut self) {
         self.guardian_review_ids.clear();
@@ -559,6 +540,7 @@ pub use sender_user_messages::SenderUserMessages;
 
 pub use reconciled_retained_context::ReconciledRetainedContext;
 pub use retained_context::AcceptedFileAudio;
+pub use retained_context::MessageRetention;
 pub use retained_context::RetainedContext;
 pub use retained_context::RetainedContextEntry;
 pub use retained_context::RetainedContextEvent;

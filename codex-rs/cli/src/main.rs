@@ -1275,26 +1275,17 @@ async fn dispatch_cli(
             prepend_config_flags(&mut config_overrides, root_config_overrides.clone());
             match subcommand {
                 PluginSubcommand::Add(args) => {
-                    let overrides = config_overrides
-                        .parse_overrides()
-                        .map_err(anyhow::Error::msg)?;
-                    plugin_cmd::run_plugin_add(overrides, args).await?;
+                    plugin_cmd::run_plugin_add(&config_overrides, args).await?;
                 }
                 PluginSubcommand::List(args) => {
-                    let overrides = config_overrides
-                        .parse_overrides()
-                        .map_err(anyhow::Error::msg)?;
-                    plugin_cmd::run_plugin_list(overrides, args).await?;
+                    plugin_cmd::run_plugin_list(&config_overrides, args).await?;
                 }
                 PluginSubcommand::Marketplace(mut marketplace_cli) => {
                     prepend_config_flags(&mut marketplace_cli.config_overrides, config_overrides);
                     marketplace_cli.run().await?;
                 }
                 PluginSubcommand::Remove(args) => {
-                    let overrides = config_overrides
-                        .parse_overrides()
-                        .map_err(anyhow::Error::msg)?;
-                    plugin_cmd::run_plugin_remove(overrides, args).await?;
+                    plugin_cmd::run_plugin_remove(&config_overrides, args).await?;
                 }
             }
         }
@@ -1320,10 +1311,10 @@ async fn dispatch_cli(
                 root_remote_auth_token_env.as_deref(),
                 subcommand.as_ref(),
             )?;
-            if startup_config.print_startup_config {
+            if startup_config.print_startup_config || startup_config.startup_oauth {
                 anyhow::ensure!(
                     subcommand.is_none(),
-                    "--print-startup-config cannot run a subcommand"
+                    "startup configuration modes cannot run a subcommand"
                 );
                 codex_app_server::print_startup_config(
                     arg0_paths,

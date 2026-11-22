@@ -1,8 +1,10 @@
 //! Grouped live tasks with shared identity colors and stable title, status and age columns.
-//! Full titles use the flexible column; metadata drops at narrow widths.
+//! Narrow lists put status and branch on a second row.
 //! The final cell stays blank inside the full-width selection highlight.
 
+use super::navigation::STATUS_COLUMNS_MIN_WIDTH;
 use super::navigation::TaskListRow;
+use super::navigation::visible_page;
 use super::render::line;
 use super::render::row;
 use super::*;
@@ -10,42 +12,50 @@ use crate::bottom_pane::selection_style;
 use crate::resume_picker::format_relative_time;
 use crate::status::format_directory_display;
 
-fn columns(area: Rect) -> (Rect, Rect, Rect) {
-    let metadata = if area.width >= 56 { 24 } else { 0 };
+fn columns(area: Rect, widths: Option<(u16, u16)>) -> (Rect, Rect, Rect) {
     let gutter = area.width.min(/*other*/ 4);
-    let title = Rect::new(
-        area.x + gutter,
-        area.y,
-        area.width - gutter - metadata,
-        area.height,
-    );
+    let (status_width, updated_width, gap) = match widths {
+        Some((status, updated)) => (status, updated, 2),
+        None => (0, 0, 0),
+    };
     let updated = Rect::new(
-        area.right() - metadata.min(/*other*/ 9),
+        area.right() - updated_width,
         area.y,
-        metadata.min(/*other*/ 9),
+        updated_width,
         area.height,
     );
     let status = Rect::new(
-        title.right() + metadata.min(/*other*/ 2),
+        updated.x - gap - status_width,
         area.y,
-        if metadata == 24 { 11 } else { 0 },
+        status_width,
         area.height,
     );
+    let title_x = area.x + gutter;
+    let title = Rect::new(title_x, area.y, status.x - gap - title_x, area.height);
     (title, status, updated)
 }
 
 impl AgentsOverviewView {
-    pub(super) fn render_center_rows(&self, area: Rect, buf: &mut Buffer) {
+    pub(super) fn render_center_rows(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        progress_in_footer: bool,
+    ) {
         let row_width = area.width;
         let area = Rect {
             width: row_width.saturating_sub(/*rhs*/ 1),
             ..area
         };
+        let indices = self.selectable_indices();
+        let mut state = self.state();
+        let padding = u16::from(area.height >= 3);
+        let viewport = row(area, padding, area.height - padding * 2);
+        state.list_width = viewport.width;
+        state.page_height = usize::from(viewport.height);
         if area.is_empty() {
             return;
         }
-        let indices = self.selectable_indices();
-        let mut state = self.state();
         if indices.is_empty() {
             line(
                 if state.connection_notice.is_some() {
@@ -53,7 +63,11 @@ impl AgentsOverviewView {
                 } else if state.history.is_some() {
                     "No matching tasks"
                 } else if state.loading && self.rows.is_empty() {
-                    "Loading tasks…"
+                    if progress_in_footer {
+                        ""
+                    } else {
+                        "Loading tasks…"
+                    }
                 } else if state.refresh_failed {
                     "Could not load tasks"
                 } else if self.rows.is_empty() {
@@ -72,46 +86,45 @@ impl AgentsOverviewView {
         } else {
             selection_style()
         };
-        let entries = self.center_rows(&indices, state.grouping);
-        let selected = entries
-            .iter()
-            .position(|row| row.selection_index() == Some(self.selected))
-            .unwrap_or_default();
-        let padding = u16::from(area.height >= 3);
-        let viewport = row(area, padding, area.height - padding * 2);
+        let opening = state.opening_task.map(|task| task.thread_id);
+        let status_for = |task: &AgentsOverviewRow| {
+            let (status, dot) = Self::status(task);
+            let label = if opening == Some(task.thread_id) {
+                "Opening…"
+            } else {
+                status
+            };
+            (label, dot)
+        };
+        let entries = self.center_rows(&indices, &state);
+        let reference = chrono::Utc::now();
+        let age = |task: &AgentsOverviewRow| {
+            format_relative_time(
+                reference,
+                chrono::DateTime::from_timestamp(task.thread.updated_at, /*nsecs*/ 0),
+            )
+        };
+        let widths = (state.list_width >= STATUS_COLUMNS_MIN_WIDTH).then(|| {
+            let mut status_width = "Status".width();
+            let mut updated_width = "Updated".width();
+            for task in indices.iter().filter_map(|&index| self.rows.get(index)) {
+                status_width = status_width.max(status_for(task).0.width());
+                updated_width = updated_width.max(age(task).width());
+            }
+            (status_width.min(11) as u16, updated_width.min(9) as u16)
+        });
         if padding > 0 && self.dock_focused.is_none() {
-            let (title, status, updated) = columns(row(area, /*offset*/ 0, /*height*/ 1));
+            let (title, status, updated) = columns(row(area, /*offset*/ 0, /*height*/ 1), widths);
             line("Tasks".dim(), title, buf);
             line("Status".dim(), status, buf);
             Line::from("Updated".dim())
                 .right_aligned()
                 .render(updated, buf);
         }
-        let reference = chrono::Utc::now();
-        let height = usize::from(viewport.height);
-        state.page_height = height;
-        let mut start = state.scroll.min(entries.len().saturating_sub(height));
-        if selected < start {
-            start = if height > 1
-                && selected > 0
-                && matches!(entries[selected - 1], TaskListRow::Group(_))
-            {
-                selected - 1
-            } else {
-                selected
-            };
-        }
-        let last_selected_row =
-            if height > 1 && matches!(entries.get(selected + 1), Some(TaskListRow::Context(_))) {
-                selected + 1
-            } else {
-                selected
-            };
-        if last_selected_row >= start + height {
-            start = last_selected_row.saturating_add(1).saturating_sub(height);
-        }
-        state.scroll = start;
-        for (offset, entry) in entries.iter().skip(start).take(height).enumerate() {
+        let (_, page) = visible_page(&entries, self.selected, &mut state);
+        let has_previous = page.start > 0;
+        let has_next = page.end < entries.len();
+        for (offset, entry) in entries[page].iter().enumerate() {
             let rect = row(viewport, offset as u16, /*height*/ 1);
             let background = Rect {
                 width: row_width,
@@ -130,7 +143,7 @@ impl AgentsOverviewView {
                         Style::default().dim()
                     };
                     buf.set_style(background, style);
-                    let (status, _) = Self::status(task);
+                    let (status, _) = status_for(task);
                     let branch = task
                         .thread
                         .git_info
@@ -233,7 +246,7 @@ impl AgentsOverviewView {
                 Style::default()
             };
             buf.set_style(background, style);
-            let (status, mut dot) = Self::status(task);
+            let (status, mut dot) = status_for(task);
             let idle = matches!(
                 task.group,
                 AgentsOverviewGroup::Ready | AgentsOverviewGroup::Finished
@@ -258,7 +271,7 @@ impl AgentsOverviewView {
                 ),
                 buf,
             );
-            let (mut title, status_area, updated) = columns(rect);
+            let (mut title, status_area, updated) = columns(rect, widths);
             if task.has_voice && title.width >= 8 {
                 let badge = Rect::new(
                     title.right() - 8,
@@ -295,11 +308,7 @@ impl AgentsOverviewView {
             line(task_title, title, buf);
             line(Line::from(status).style(style), status_area, buf);
             if !updated.is_empty() {
-                let age = format_relative_time(
-                    reference,
-                    chrono::DateTime::from_timestamp(task.thread.updated_at, /*nsecs*/ 0),
-                );
-                Line::from(age)
+                Line::from(age(task))
                     .style(if index == self.selected {
                         style
                     } else {
@@ -309,10 +318,10 @@ impl AgentsOverviewView {
                     .render(updated, buf);
             }
         }
-        if padding > 0 && start > 0 {
+        if padding > 0 && has_previous {
             line("↑".dim(), row(area, /*offset*/ 0, /*height*/ 1), buf);
         }
-        if padding > 0 && start + height < entries.len() {
+        if padding > 0 && has_next {
             line(
                 "↓".dim(),
                 row(

@@ -30,6 +30,28 @@ use codex_app_server_protocol::WindowsSandboxSetupMode;
 pub(super) const SHUTDOWN_FIRST_EXIT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
 
 impl App {
+    pub(super) fn finish_thread_input_drain(
+        &mut self,
+        tui: &mut tui::Tui,
+        transition: ThreadTransition,
+    ) {
+        if tui
+            .discard_pending_input_after_thread_transition()
+            .is_pending()
+        {
+            self.pending_input_drain = Some(transition);
+            return;
+        }
+        self.pending_input_drain = None;
+        if let ThreadTransition::PromptReverted(thread_id) = transition
+            && self.chat_widget.thread_id() == Some(thread_id)
+        {
+            self.chat_widget
+                .set_queue_autosend_suppressed(/*suppressed*/ false);
+            self.chat_widget.emit_prompt_edit_thread_event();
+        }
+    }
+
     pub(crate) fn handle_event<'a>(
         &'a mut self,
         tui: &'a mut tui::Tui,
@@ -59,7 +81,10 @@ impl App {
         } else {
             event
         };
-        // Release the shortcut's input guard even when a fork is rejected below.
+        // Release queued input guards even when the transition is rejected below.
+        if matches!(event, AppEvent::RevertSessionForPromptEdit { .. }) {
+            self.backtrack.revert_queued = false;
+        }
         if matches!(event, AppEvent::ForkCurrentSession { .. }) {
             self.chat_widget.fork_in_progress = false;
         }
@@ -113,6 +138,7 @@ impl App {
                     | AppEvent::StartQueuedSavedChat
                     | AppEvent::OpenSidebarAgent { .. }
                     | AppEvent::OpenSidebarDocument { .. }
+                    | AppEvent::OpenModelSidebarDocument { .. }
                     | AppEvent::SidebarDocumentResolved { .. }
                     | AppEvent::SidebarDocumentLoaded { .. }
                     | AppEvent::SidebarFilesLoaded { .. }
@@ -883,10 +909,7 @@ impl App {
                     }
                     if from_locked_thread || from_agents_overview {
                         // Repeated fork shortcuts must not act on the resulting view.
-                        if let Err(err) = tui.discard_pending_input_before_interactive_screen() {
-                            tracing::warn!(%err, "failed to discard input after forking");
-                        }
-                        tui.schedule_screen_size_recheck(Duration::ZERO);
+                        self.finish_thread_input_drain(tui, ThreadTransition::DiscardTypeahead);
                     }
                 } else {
                     self.chat_widget.add_error_message(
@@ -924,12 +947,12 @@ impl App {
                     self.chat_widget.add_error_message(
                         "Wait for permissions to update before editing this prompt.".into(),
                     );
-                    tui.frame_requester().schedule_frame();
+                    self.finish_thread_input_drain(tui, ThreadTransition::DiscardTypeahead);
                     return Ok(AppRunControl::Continue);
                 }
                 let Some(index) = self.transcript_cells.iter().position(|cell| Arc::ptr_eq(cell, &selected_cell)) else {
                     self.restore_backtrack_prompt_after_revert_error(prompt, "the selected prompt is no longer visible");
-                    tui.frame_requester().schedule_frame();
+                    self.finish_thread_input_drain(tui, ThreadTransition::DiscardTypeahead);
                     return Ok(AppRunControl::Continue);
                 };
                 let nth_user_message = crate::app_backtrack::user_count(&self.transcript_cells[..index]);
@@ -994,7 +1017,7 @@ impl App {
                     Ok(selection) => selection,
                     Err(err) => {
                         self.restore_backtrack_prompt_after_revert_error(prompt, err);
-                        tui.frame_requester().schedule_frame();
+                        self.finish_thread_input_drain(tui, ThreadTransition::DiscardTypeahead);
                         return Ok(AppRunControl::Continue);
                     }
                 };
@@ -1006,7 +1029,7 @@ impl App {
                     if matches!(&err, codex_app_server_client::TypedRequestError::Server { source, .. }
                         if matches!(source.code, -32602..=-32600)) {
                         self.restore_backtrack_prompt_after_revert_error(prompt, err);
-                        tui.frame_requester().schedule_frame();
+                        self.finish_thread_input_drain(tui, ThreadTransition::DiscardTypeahead);
                         return Ok(AppRunControl::Continue);
                     }
                     self.chat_widget.restore_user_message_to_composer(prompt);
@@ -1089,9 +1112,9 @@ impl App {
                     self.last_thread_usage_status_cell = None;
                     self.pending_thread_usage_history_refresh = false;
                     self.backtrack_render_pending = !tui.is_owned_screen();
-                    self.chat_widget.set_queue_autosend_suppressed(/*suppressed*/ false);
-                    self.chat_widget.emit_prompt_edit_thread_event();
-                    tui.frame_requester().schedule_frame();
+                    // Input was blocked through the transcript reset. A queued Enter must
+                    // not submit the prompt we just restored for editing.
+                    self.finish_thread_input_drain(tui, ThreadTransition::PromptReverted(thread_id));
                 }
             }
             AppEvent::BeginInitialHistoryReplayBuffer => {
@@ -1235,6 +1258,7 @@ impl App {
                 self.finish_initial_history_replay_buffer(tui);
             }
             AppEvent::ConsolidateAgentMessage {
+                emitted_cells,
                 phase,
                 interrupted_item,
                 source,
@@ -1250,6 +1274,7 @@ impl App {
                 self.handle_consolidate_agent_message(
                     tui,
                     cell,
+                    emitted_cells,
                     scrollback_reflow,
                     deferred_history_cell,
                 )?;
@@ -1276,7 +1301,7 @@ impl App {
                     if hidden {
                         self.finish_required_stream_reflow(tui)?;
                     } else {
-                        self.replace_agent_message(tui, index..index + 1, cell, crate::app_event::ConsolidationScrollbackReflow::Required)?;
+                        self.replace_agent_message(tui, index..index + 1, /*fragments*/ 1, cell, crate::app_event::ConsolidationScrollbackReflow::Required)?;
                     }
                     let previous = self.transcript_cells.iter().rev().find(|cell| {
                         (cell.as_any().is::<history_cell::AgentMarkdownCell>() && !cell.raw_lines().is_empty())
@@ -3757,16 +3782,29 @@ impl App {
                     Box::pin(self.open_document(tui, app_server, source, link)).await?;
                 }
             }
+            AppEvent::OpenModelSidebarDocument { backend, thread_id, document } => {
+                let pending = self.sidebars.entry(Some(thread_id)).or_default()
+                    .pending_documents.entry(backend).or_default();
+                const MAX_PENDING_PER_THREAD: usize = 8;
+                pending.retain(|request| request.path != document.path);
+                if pending.len() == MAX_PENDING_PER_THREAD {
+                    pending.pop_front();
+                }
+                pending.push_back(document);
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::SidebarDocumentResolved { backend_id, parent, source, request, original_path, path, location, } => {
+                let requested = self.sidebars.get_mut(&Some(parent))
+                    .and_then(|pane| pane.focus_document_request.take_if(|id| *id == request))
+                    .is_some();
+                if requested {
+                    tui.frame_requester().schedule_frame();
+                }
                 if backend_id == app_server.backend_id()
                     && self.sidebar_parent() == Some(parent)
-                    && let Some(pane) = self.sidebars.get_mut(&Some(parent))
+                    && self.sidebars.contains_key(&Some(parent))
                 {
                     // Late opens can add their tabs without taking back the user's focus.
-                    let requested = pane.focus_document_request == Some(request);
-                    if requested {
-                        pane.focus_document_request = None;
-                    }
                     let focus = requested
                         && self.current_displayed_thread_id() == Some(source)
                         && self.document_preview_available(tui, app_server);
@@ -3778,12 +3816,21 @@ impl App {
                 }
             }
             AppEvent::SidebarDocumentLoaded { backend_id, parent, tab, request, result } => {
+                let model_load = self.model_preview_load == Some(request);
+                if model_load {
+                    self.model_preview_load = None;
+                    tui.frame_requester().schedule_frame();
+                }
                 if let Some(doc) = self.sidebars.get_mut(&Some(parent)).and_then(|pane| pane.documents.get_mut(&tab))
                     && doc.backend == backend_id
-                    && doc.watch.as_ref().is_some_and(|(id, _)| *id == request)
                 {
-                    doc.loaded(result);
-                    tui.frame_requester().schedule_frame();
+                    if model_load && doc.model_loading() && app_server.backend_id() == backend_id {
+                        doc.finish_model_load(app_server, result).await;
+                        tui.frame_requester().schedule_frame();
+                    } else if doc.watch.as_ref().is_some_and(|(id, _)| *id == request) {
+                        doc.loaded(result);
+                        tui.frame_requester().schedule_frame();
+                    }
                 }
             }
             AppEvent::SidebarFilesLoaded { backend_id, parent, request, page } => {
@@ -4510,6 +4557,7 @@ impl App {
         app_server: &mut AppServerSession,
         mode: ExitMode,
     ) -> AppRunControl {
+        self.reconnect.cloud_resume = None;
         for (request_id, (source, task)) in self.dynamic_tool_tasks.drain() {
             if ThreadId::from_string(&source)
                 .is_ok_and(|id| self.agents_overview.pending_archives.contains_key(&id))

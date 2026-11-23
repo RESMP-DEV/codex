@@ -293,6 +293,10 @@ mod sidebar_close;
 mod sidebar_document;
 mod sidebar_files;
 pub(crate) mod sidebar_loading;
+mod sidebar_model_documents;
+#[cfg(all(test, not(windows)))]
+#[path = "app/sidebar_open_in_codex_tests.rs"]
+mod sidebar_open_in_codex_tests;
 mod sidebar_subagents;
 mod startup;
 pub(crate) mod startup_bootstrap;
@@ -518,6 +522,12 @@ impl AppExitInfo {
 pub use exit_summary::DisconnectInfo;
 pub use exit_summary::ResumableThread;
 
+#[derive(Clone, Copy)]
+enum ThreadTransition {
+    PromptReverted(ThreadId),
+    DiscardTypeahead,
+}
+
 #[derive(Debug)]
 pub(crate) enum AppRunControl {
     Continue,
@@ -611,6 +621,7 @@ pub(crate) struct App {
     transcript_reflow: TranscriptReflowState,
     initial_history_replay_buffer: Option<InitialHistoryReplayBuffer>,
     pending_thread_switch_resets: usize,
+    pending_input_drain: Option<ThreadTransition>,
     pub(crate) scrollback_has_older_history: bool,
 
     pub(crate) enhanced_keys_supported: bool,
@@ -684,6 +695,7 @@ pub(crate) struct App {
     side_threads: HashMap<ThreadId, SideThreadState>,
     saved_openings: sidebar_loading::Openings,
     sidebars: HashMap<Option<ThreadId>, sidebar::SidebarPane>,
+    model_preview_load: Option<uuid::Uuid>,
     /// A parked parent view survives child cleanup until its own replay finishes.
     side_companions: HashMap<ThreadId, SideCompanion>,
     zoomed_thread: Option<ThreadId>,
@@ -887,6 +899,12 @@ impl App {
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
+        if matches!(event, TuiEvent::Draw) && tui::tmux_mouse_disabled() {
+            self.sidebar_press = None;
+            self.divider_drag = None;
+            self.chat_widget.end_composer_drag();
+            self.chat_widget.rendered_selection.borrow_mut().end_drag();
+        }
         match &event {
             TuiEvent::Draw
             | TuiEvent::Mouse(crossterm::event::MouseEvent {
@@ -1105,12 +1123,28 @@ impl App {
             return Ok(AppRunControl::Exit(ExitReason::UserRequested));
         }
         let screen_size = tui.screen_size_for_event(&event)?;
-        if !matches!(
-            &event,
-            TuiEvent::Key(_) | TuiEvent::Mouse(_) | TuiEvent::Paste(_) | TuiEvent::FocusLost
-        ) {
+        let draws_history = matches!(
+            event,
+            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained
+        );
+        if draws_history && self.model_preview_load.is_none() {
+            self.model_preview_load = self
+                .start_queued_model_document(tui, app_server, screen_size.width)
+                .await;
+        }
+        // Reflow and paint must agree on width. Final inserts still use the last
+        // painted width until consolidation completes. Offline sessions drop those events.
+        let defer_inline_draw = draws_history
+            && self.overlay.is_none()
+            && !self.reconnect.offline
+            && !tui.is_owned_screen()
+            && self.chat_widget.has_pending_stream_consolidation()
+            && !self.chat_widget.has_active_modal();
+        if draws_history {
             self.expire_pending_key_chord(tui);
-            self.handle_draw_pre_render(tui, screen_size)?;
+            if !defer_inline_draw {
+                self.handle_draw_pre_render(tui, screen_size)?;
+            }
         }
 
         let dismiss_chord = match &event {
@@ -1354,10 +1388,11 @@ impl App {
             _ => {}
         }
 
-        let draws_history = matches!(
-            event,
-            TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained
-        );
+        if defer_inline_draw {
+            tui.defer_screen_size(screen_size);
+            tui.frame_requester().schedule_frame();
+            return Ok(AppRunControl::Continue);
+        }
         if self.overlay.is_some() {
             let _ = self
                 .handle_backtrack_overlay_event(tui, app_server, event)

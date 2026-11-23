@@ -95,6 +95,13 @@ impl ChatWidget {
         contexts
     }
 
+    pub(crate) fn set_key_chord_pending(&mut self, pending: bool) {
+        self.bottom_pane.key_chord_pending = pending;
+        if pending && !self.has_active_modal() {
+            self.bottom_pane.record_composer_activity_at(Instant::now());
+        }
+    }
+
     pub(crate) fn take_key_chord_reset(&mut self) -> bool {
         std::mem::take(&mut self.bottom_pane.key_chord_reset_requested)
     }
@@ -656,12 +663,9 @@ impl ChatWidget {
     fn finish_paste_burst_tick(&mut self, frame_requester: FrameRequester, flushed: bool) -> bool {
         if flushed {
             self.refresh_startup_recovery();
-            // A paste just flushed; request an immediate redraw and skip this frame.
-            self.request_redraw();
-            true
-        } else if self.is_in_paste_burst() {
-            // While capturing a burst, schedule a follow-up tick and skip this frame
-            // to avoid redundant renders between ticks.
+        }
+        // Paint the flushed input on this frame unless an editor is still buffering.
+        if self.is_in_paste_burst() {
             frame_requester.schedule_frame_in(
                 crate::bottom_pane::ChatComposer::recommended_paste_flush_delay(),
             );

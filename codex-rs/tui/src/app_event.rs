@@ -555,6 +555,11 @@ pub(crate) enum AppEvent {
         source: ThreadId,
         link: crate::markdown_render::FileLink,
     },
+    OpenModelSidebarDocument {
+        backend: crate::backend_id::BackendId,
+        thread_id: ThreadId,
+        document: crate::open_in_codex::DocumentRequest,
+    },
     SidebarDocumentResolved {
         backend_id: crate::backend_id::BackendId,
         parent: ThreadId,
@@ -1434,8 +1439,7 @@ pub(crate) enum AppEvent {
     /// Finish buffering initial resume replay after all replay events have been queued.
     EndInitialHistoryReplayBuffer,
 
-    /// Replace the contiguous run of streaming `AgentMessageCell`s at the end of
-    /// the transcript with a single `AgentMarkdownCell` that stores the raw
+    /// Replace this answer's streaming `AgentMessageCell`s with a single `AgentMarkdownCell` that stores the raw
     /// markdown source and re-renders from it on resize.
     ///
     /// Emitted by `ChatWidget::flush_answer_stream_with_separator` after stream
@@ -1447,6 +1451,8 @@ pub(crate) enum AppEvent {
     /// `deferred_history_cell` lets callers add the final stream tail to the
     /// transcript without first writing its provisional render to scrollback.
     ConsolidateAgentMessage {
+        /// Bounds the search across notices, including when the stream emitted no cells.
+        emitted_cells: usize,
         phase: Option<codex_protocol::models::MessagePhase>,
         interrupted_item: Option<(String, String)>,
         source: String,

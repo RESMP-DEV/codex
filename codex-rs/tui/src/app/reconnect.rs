@@ -21,6 +21,7 @@ pub(super) struct ReconnectState {
     pub(super) failed: bool,
     pub(super) presentation: ReconnectPresentation,
     pub(super) seen_version_notice: Option<String>,
+    pub(super) cloud_resume: Option<super::resume_preparation::CloudResume>,
 }
 
 pub(super) struct Reconnected {
@@ -423,6 +424,7 @@ impl App {
         self.app_server_backend_id = Some(session.backend_id());
         *app_event_rx = rx;
         self.pending_thread_switch_resets = 0;
+        self.backtrack.revert_queued = false;
         for (parent, pane) in &mut self.sidebars {
             pane.focus_document_request = None;
             pane.agents.pending_link = None;

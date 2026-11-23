@@ -1430,7 +1430,14 @@ impl RmcpClient {
         Ok(())
     }
 
-    async fn create_pending_transport(
+    // Keep the transport future's polling code in this crate for both startup and recovery.
+    fn create_pending_transport(
+        transport_recipe: &TransportRecipe,
+    ) -> BoxFuture<'_, Result<PendingTransport>> {
+        Box::pin(Self::create_pending_transport_inner(transport_recipe))
+    }
+
+    async fn create_pending_transport_inner(
         transport_recipe: &TransportRecipe,
     ) -> Result<PendingTransport> {
         match transport_recipe {
@@ -2002,7 +2009,14 @@ impl RmcpClient {
             })
     }
 
-    async fn reinitialize_after_session_expiry(
+    fn reinitialize_after_session_expiry<'a>(
+        &'a self,
+        failed_service: &'a Arc<RunningService<RoleClient, ElicitationClientService>>,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(self.reinitialize_after_session_expiry_inner(failed_service))
+    }
+
+    async fn reinitialize_after_session_expiry_inner(
         &self,
         failed_service: &Arc<RunningService<RoleClient, ElicitationClientService>>,
     ) -> Result<()> {

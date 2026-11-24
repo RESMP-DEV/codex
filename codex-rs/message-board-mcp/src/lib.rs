@@ -2,12 +2,15 @@
 //! Bound adapters fix caller identity; HTTP validates it against the configured host.
 //! Storage, permissions and notification delivery remain owned by the board.
 
+mod app_server;
 mod http;
 mod local;
 
+pub use app_server::AppServerNotifications;
 pub use http::serve_http;
 pub use local::LocalServer;
 pub use local::launch_in_memory;
+pub use local::launch_in_memory_with_app_server;
 
 use codex_attachment_store::InlineAttachmentStore;
 use codex_message_board::AgentMessageBoard;
@@ -126,7 +129,7 @@ impl ServerHandler for MessageBoardMcpServer {
         };
         let result = match executor.handle(call).await {
             Ok(output) => {
-                let value = output.code_mode_result(&payload);
+                let value = output.code_mode_result(&payload).into_json();
                 let mut result = if value.is_object() {
                     CallToolResult::structured(value)
                 } else {

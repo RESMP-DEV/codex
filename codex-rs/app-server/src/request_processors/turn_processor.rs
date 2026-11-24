@@ -216,14 +216,13 @@ impl TurnRequestProcessor {
             EnsureConversationListenerResult::Attached => {}
             EnsureConversationListenerResult::ConnectionClosed => return Ok(None),
         }
-        let result =
-            thread
-                .guardian_review(cancellation)
-                .await
-                .map_err(|err| match err.details() {
-                    CodexErrorDetails::InvalidRequest(message) => invalid_request(message.clone()),
-                    _ => internal_error(format!("Guardian review failed: {err}")),
-                })?;
+        let result = thread
+            .guardian_review(&params.tool_call, cancellation)
+            .await
+            .map_err(|err| match err.details() {
+                CodexErrorDetails::InvalidRequest(message) => invalid_request(message.clone()),
+                _ => internal_error(format!("Guardian review failed: {err}")),
+            })?;
         Ok(Some(
             ThreadGuardianReviewResponse {
                 call_id: result.call_id,
@@ -473,6 +472,24 @@ impl TurnRequestProcessor {
         Ok((thread_id, thread))
     }
 
+    async fn thread_workspace_kind(&self, thread: &CodexThread) -> Option<String> {
+        let db = thread.state_db()?;
+        let thread_id = thread.startup_metadata().thread_id;
+        // Saving a new thread consumes its staged assignment, so read staging first.
+        let staged_project_id = self
+            .thread_manager
+            .thread_store()
+            .read_pending_thread_metadata(thread_id)
+            .await
+            .ok()?
+            .and_then(|patch| patch.project_id.flatten());
+        let assigned = db
+            .thread_has_project(thread_id, staged_project_id.as_deref())
+            .await
+            .ok()?;
+        Some(if assigned { "project" } else { "projectless" }.to_owned())
+    }
+
     async fn ensure_direct_input_allowed(
         &self,
         request_id: &ConnectionRequestId,
@@ -647,6 +664,14 @@ impl TurnRequestProcessor {
             .inspect_err(|error| {
                 self.track_error_response(&request_id, error, /*error_type*/ None);
             })?;
+        // TUI composer prompts carry a client message ID. Helper requests omit it.
+        let inferred_workspace_kind = if app_server_client_name.as_deref() == Some("codex-tui")
+            && params.client_user_message_id.is_some()
+        {
+            self.thread_workspace_kind(&thread).await
+        } else {
+            None
+        };
         Self::set_app_server_client_info(
             thread.as_ref(),
             app_server_client_name,
@@ -729,6 +754,7 @@ impl TurnRequestProcessor {
                 TurnInputRequest::new(input)
                     .with_thread_settings(thread_settings)
                     .on_start(TurnStartOptions {
+                        inferred_workspace_kind,
                         turn_trigger: params.turn_trigger,
                         parent_turn_id: params.parent_turn_id,
                         root_turn_id: params.root_turn_id,

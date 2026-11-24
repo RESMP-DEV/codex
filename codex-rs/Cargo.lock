@@ -1900,18 +1900,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codex-agent-extension"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "codex-core",
- "codex-protocol",
- "core_test_support",
- "pretty_assertions",
- "tokio",
-]
-
-[[package]]
 name = "codex-agent-graph-store"
 version = "0.0.0"
 dependencies = [
@@ -2147,6 +2135,7 @@ dependencies = [
  "codex-memories-extension",
  "codex-memories-write",
  "codex-message-board",
+ "codex-message-board-mcp",
  "codex-model-provider",
  "codex-model-provider-info",
  "codex-models-manager",
@@ -2923,7 +2912,9 @@ dependencies = [
  "futures",
  "opentelemetry",
  "pretty_assertions",
+ "serde",
  "serde_json",
+ "serde_with",
  "tokio",
  "tokio-util",
  "tracing",
@@ -3153,6 +3144,7 @@ dependencies = [
  "eventsource-stream",
  "futures",
  "http 1.4.0",
+ "http-body-util",
  "hyper-util",
  "iana-time-zone",
  "image",
@@ -5394,7 +5386,6 @@ dependencies = [
  "codex-http-client",
  "codex-install-context",
  "codex-login",
- "codex-mcp",
  "codex-mermaid",
  "codex-message-history",
  "codex-model-provider",
@@ -5662,6 +5653,7 @@ name = "codex-utils-image"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
+ "blake3",
  "codex-utils-cache",
  "divan",
  "image",
@@ -5781,16 +5773,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "winapi",
-]
-
-[[package]]
-name = "codex-utils-readiness"
-version = "0.0.0"
-dependencies = [
- "assert_matches",
- "thiserror 2.0.18",
- "time",
- "tokio",
 ]
 
 [[package]]
@@ -7623,9 +7605,9 @@ dependencies = [
 
 [[package]]
 name = "etherparse"
-version = "0.21.0"
+version = "0.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17304d06addb3283cdc4bd528e42dd95e73c8ee2d6492ffce415e93660885449"
+checksum = "c78ea1640fbca18d7d2c7459be6db63705ca8cce8a18be4045f4ad7a1e7c4311"
 dependencies = [
  "arrayvec",
 ]

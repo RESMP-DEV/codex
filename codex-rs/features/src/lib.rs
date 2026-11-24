@@ -156,6 +156,8 @@ pub enum Feature {
     CodeMode,
     /// Expose ranked tool discovery inside JavaScript code mode.
     CodeModeToolSearch,
+    /// Omit duplicate MCP text fallbacks when Code Mode prints the original result.
+    CodeModeMcpResultDedup,
     /// Removed compatibility flag for the configurable code-mode exec yield timeout.
     CodeModeBufferedExec,
     /// Run JavaScript code mode in the standalone host process.
@@ -414,6 +416,8 @@ pub enum Feature {
     ExternalMigration,
     /// Enable extension-backed image generation.
     ImageGeneration,
+    /// Load the image generation tool definition on demand in code mode.
+    DeferImageGeneration,
     /// Allow the image-generation tool to request a backend-assembled GIF.
     ImageGenerationAnimation,
     /// Omit inline image and audio content from app-server item notifications.
@@ -467,6 +471,8 @@ pub enum Feature {
     GuardianRootHandoffContext,
     /// Review state-changing MAv2 calls and preserve native calls in Guardian history.
     GuardianNativeMultiAgentHistory,
+    /// Frame the current native agent call as a distinct Guardian approval request.
+    GuardianNativeActionFraming,
     /// Include the verified enclosing invocation in nested Guardian approvals.
     GuardianNestedApprovalContext,
     /// Include completed node_repl or cua_repl Code Mode responses in Guardian reviews.
@@ -680,6 +686,10 @@ impl Features {
 
     pub fn enabled(&self, f: Feature) -> bool {
         self.enabled.contains(&f)
+    }
+
+    pub fn defer_image_generation_enabled(&self) -> bool {
+        self.enabled(Feature::DeferImageGeneration)
     }
 
     /// Whether to advertise GIF output in the image-generation tool.
@@ -1391,6 +1401,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::CodeModeToolSearch,
         key: "code_mode_tool_search",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::CodeModeMcpResultDedup,
+        key: "code_mode_mcp_result_dedup",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -2123,6 +2139,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::DeferImageGeneration,
+        key: "defer_image_generation",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
         id: Feature::ImageGenerationAnimation,
         key: "image_generation_animation",
         stage: Stage::UnderDevelopment,
@@ -2287,6 +2309,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GuardianNativeMultiAgentHistory,
         key: "guardian_native_multi_agent_history",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::GuardianNativeActionFraming,
+        key: "guardian_native_action_framing",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

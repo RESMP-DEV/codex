@@ -183,11 +183,7 @@ impl App {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.finish_loading();
-            state.connection_notice = Some(if self.reconnect.failed {
-                "Reconnect failed — agent list is stale; relaunch to retry"
-            } else {
-                "Reconnecting — agent list is stale"
-            });
+            state.connection_notice = Some(self.offline_overview_notice());
         }
         if app_server.thread_params_mode() == crate::app_server_session::ThreadParamsMode::Cloud {
             let owner = app_server.backend_id();
@@ -1510,12 +1506,11 @@ impl App {
         {
             // Bootstrap's fallback model may be seeded from the client. Resolve tiers
             // against the server catalog when config/read cleared the model.
-            config.model = self
-                .model_catalog
-                .models
+            let defaults = self.model_catalog.default_models();
+            config.model = defaults
                 .iter()
                 .find(|model| model.is_default)
-                .or_else(|| self.model_catalog.models.first())
+                .or_else(|| defaults.first())
                 .map(|model| model.model.clone());
         }
         Some((config, remote_cwd))

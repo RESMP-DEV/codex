@@ -96,9 +96,10 @@ impl App {
                 || "Thread ID unavailable.".to_string(),
                 |id| format!("Thread ID {id}"),
             );
+            self.transcript_view.jump_to_latest();
             self.chat_widget.add_info_message(
                 thread,
-                Some("Reconnect to send feedback or save a ZIP.".into()),
+                Some("Reconnect and retry /feedback.".into()),
             );
             return Ok(AppRunControl::Continue);
         }
@@ -1074,8 +1075,8 @@ impl App {
                 self.chat_widget.restore_user_message_to_composer(prompt);
                 self.chat_widget.set_queue_autosend_suppressed(/*suppressed*/ true);
                 self.abort_thread_event_listener(thread_id);
-                if let Some(mut rx) = self.active_thread_rx.take() {
-                    while let Ok(event) = rx.try_recv() {
+                if let Some(channel) = self.thread_event_channels.get_mut(&thread_id) {
+                    while let Ok(event) = channel.receiver.try_recv() {
                         if let ThreadBufferedEvent::Notification(notification) = event {
                             self.chat_widget.handle_server_notification(*notification, Some(ReplayKind::ThreadSnapshot));
                         }
@@ -1251,7 +1252,8 @@ impl App {
                 self.transcript_view.jump_to_latest();
                 tui.frame_requester().schedule_frame();
             }
-            AppEvent::InsertHistoryCell(cell) => {
+            AppEvent::InsertHistoryCell(mut cell) => {
+                self.prepare_collab_history(app_server, cell.as_mut());
                 self.insert_history_cell(tui, cell);
             }
             AppEvent::TurnTipReady { thread_id, turn_id } => {
@@ -1737,8 +1739,8 @@ impl App {
                 self.enqueue_thread_history_entry_response(thread_id, event)
                     .await?;
             }
-            AppEvent::DiffResult(cwd, text) => {
-                if &cwd != self.chat_widget.session_cwd() {
+            AppEvent::DiffResult { thread_id, cwd, text } => {
+                if thread_id != self.chat_widget.thread_id() || &cwd != self.chat_widget.session_cwd() {
                     return Ok(AppRunControl::Continue);
                 }
                 // Clear the in-progress state in the bottom pane

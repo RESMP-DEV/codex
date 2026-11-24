@@ -1840,6 +1840,50 @@ async fn reload_user_config_layer_updates_base_and_selected_profile_layers() {
     );
 }
 
+#[test_case("startup", true; "sync and async hooks match")]
+#[test_case("resume", false; "only async hook matches")]
+#[tokio::test]
+async fn cancelled_turn_defers_only_blocking_session_start_hooks(
+    sync_matcher: &str,
+    deferred: bool,
+) -> anyhow::Result<()> {
+    let session = make_session_with_config(|config| {
+        config.bypass_hook_trust = true;
+        config.features.enable(Feature::CodexHooks).unwrap();
+        config.config_layer_stack = config
+            .config_layer_stack
+            .with_user_config(
+                &config.codex_home.join(CONFIG_TOML_FILE),
+                toml::from_str(&format!(
+                    r#"[[hooks.SessionStart]]
+matcher = "startup"
+hooks = [{{ type = "command", command = "echo async", async = true }}]
+
+[[hooks.SessionStart]]
+matcher = "{sync_matcher}"
+hooks = [{{ type = "command", command = "echo startup" }}]
+"#
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+    })
+    .await?;
+    let turn = session.new_default_turn().await;
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    cancellation.cancel();
+
+    assert_eq!(
+        crate::hook_runtime::run_pending_session_start_hooks(&session, &turn, &cancellation).await,
+        deferred
+    );
+    assert_eq!(
+        session.pending_session_start_source().await.is_some(),
+        deferred
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn reload_user_config_layer_refreshes_hooks() -> anyhow::Result<()> {
     let session = make_session_with_config(|config| {
@@ -5000,6 +5044,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
+            spawn_service_tier_override: None,
             personality: config.personality,
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
@@ -6587,6 +6632,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
+            spawn_service_tier_override: None,
             personality: config.personality,
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
@@ -6938,6 +6984,7 @@ async fn make_session_with_config_and_rx(
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
+            spawn_service_tier_override: None,
             personality: config.personality,
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
@@ -7079,6 +7126,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
+            spawn_service_tier_override: None,
             personality: config.personality,
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
@@ -8953,6 +9001,7 @@ where
             collaboration_mode,
             reasoning_summary: config.model_reasoning_summary,
             service_tier: None,
+            spawn_service_tier_override: None,
             personality: config.personality,
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,

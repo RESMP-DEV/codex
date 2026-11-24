@@ -693,8 +693,7 @@ async fn enqueue_primary_thread_session_replays_buffered_approval_after_attach()
     .await?;
 
     let rx = app
-        .active_thread_rx
-        .as_mut()
+        .active_thread_rx_mut()
         .expect("primary thread receiver should be active");
     let event = time::timeout(Duration::from_millis(50), rx.recv())
         .await
@@ -821,8 +820,7 @@ async fn resolved_buffered_approval_does_not_become_actionable_after_drain() -> 
     while app_event_rx.try_recv().is_ok() {}
 
     let rx = app
-        .active_thread_rx
-        .as_mut()
+        .active_thread_rx_mut()
         .expect("primary thread receiver should be active");
     let event = time::timeout(Duration::from_millis(50), rx.recv())
         .await
@@ -1168,13 +1166,11 @@ async fn enqueue_thread_event_does_not_block_when_channel_full() -> Result<()> {
     .await
     .expect("enqueue_thread_notification blocked on a full channel")?;
 
-    let mut rx = app
+    let rx = &mut app
         .thread_event_channels
         .get_mut(&thread_id)
         .expect("missing thread channel")
-        .receiver
-        .take()
-        .expect("missing receiver");
+        .receiver;
 
     time::timeout(Duration::from_millis(50), rx.recv())
         .await
@@ -1222,8 +1218,7 @@ async fn active_thread_drain_yields_after_frame_deadline_without_dropping_events
         }
     );
     assert!(
-        app.active_thread_rx
-            .as_ref()
+        app.active_thread_rx()
             .is_some_and(|receiver| !receiver.is_empty()),
         "an expired frame deadline should preserve queued notifications"
     );
@@ -1234,8 +1229,7 @@ async fn active_thread_drain_yields_after_frame_deadline_without_dropping_events
 
     app.drain_active_thread_events(&mut tui).await?;
     assert!(
-        app.active_thread_rx
-            .as_ref()
+        app.active_thread_rx()
             .is_some_and(tokio::sync::mpsc::Receiver::is_empty),
         "the next foreground frame should deliver the preserved notification"
     );
@@ -1312,8 +1306,7 @@ async fn selected_side_thread_close_is_handled_by_foreground_event_owner() -> Re
     assert_eq!(app.active_thread_id, Some(side_thread_id));
     drain_app_events(&mut app, &mut tui, &mut app_server, &mut events).await?;
     let event = app
-        .active_thread_rx
-        .as_mut()
+        .active_thread_rx_mut()
         .expect("selected side thread should retain its receiver")
         .try_recv()
         .expect("thread closure should remain queued for the foreground loop");
@@ -1323,7 +1316,7 @@ async fn selected_side_thread_close_is_handled_by_foreground_event_owner() -> Re
     assert_eq!(app.active_thread_id, Some(primary_thread_id));
     assert!(!app.side_threads.contains_key(&side_thread_id));
     assert!(!app.thread_event_channels.contains_key(&side_thread_id));
-    assert!(app.active_thread_rx.is_some());
+    assert!(app.active_thread_rx().is_some());
     drain_app_events(&mut app, &mut tui, &mut app_server, &mut events).await?;
     app.refresh_owned_transcript(&mut tui)?;
     assert!(buffer_text(tui.terminal.previous_buffer()).contains("parent-24"));
@@ -1359,8 +1352,7 @@ async fn active_history_batch_is_delivered_without_replay_buffering() -> Result<
         .get_mut(&thread_id)
         .expect("missing thread channel");
     assert!(channel.store.lock().await.buffer.is_empty());
-    let mut receiver = channel.receiver.take().expect("missing receiver");
-    let delivered = time::timeout(Duration::from_millis(50), receiver.recv())
+    let delivered = time::timeout(Duration::from_millis(50), channel.receiver.recv())
         .await
         .expect("timed out waiting for history batch")
         .expect("missing history batch");
@@ -1406,8 +1398,8 @@ async fn replay_thread_snapshot_renders_only_retained_agent_message_deltas() {
         }
     }
 
-    app.store_active_thread_receiver().await;
-    let (_receiver, snapshot) = app
+    app.save_active_thread_state().await;
+    let snapshot = app
         .activate_thread_for_replay(thread_id)
         .await
         .expect("detached thread should reactivate for replay");
@@ -1480,7 +1472,7 @@ async fn replay_thread_snapshot_restores_draft_and_queued_input() {
         .capture_thread_input_state()
         .expect("expected thread input state");
 
-    app.store_active_thread_receiver().await;
+    app.save_active_thread_state().await;
 
     let snapshot = {
         let channel = app
@@ -1558,7 +1550,7 @@ async fn replay_thread_snapshot_restores_the_matching_safety_buffer_prompt() {
         .capture_thread_input_state()
         .expect("expected thread input state");
 
-    app.store_active_thread_receiver().await;
+    app.save_active_thread_state().await;
     let snapshot = {
         let channel = app
             .thread_event_channels
@@ -1977,7 +1969,7 @@ async fn replay_thread_snapshot_restores_pending_pastes_for_submit() {
         .capture_thread_input_state()
         .expect("expected thread input state");
 
-    app.store_active_thread_receiver().await;
+    app.save_active_thread_state().await;
 
     let snapshot = {
         let channel = app
@@ -2268,43 +2260,6 @@ async fn token_usage_update_refreshes_status_line_with_runtime_context_window() 
 }
 
 #[tokio::test]
-async fn collab_receiver_notification_caches_thread_without_app_server_read() {
-    let mut app = make_test_app().await;
-    let receiver_thread_id =
-        ThreadId::from_string("00000000-0000-0000-0000-000000000123").expect("valid thread id");
-
-    app.handle_thread_event_now(ThreadBufferedEvent::Notification(Box::new(
-        ServerNotification::ItemStarted(ItemStartedNotification::new(
-            ThreadId::new().to_string(),
-            "turn-1".to_string(),
-            ThreadItemPayload::CollabAgentToolCall {
-                id: "wait-1".to_string(),
-                tool: codex_app_server_protocol::CollabAgentTool::Wait,
-                status: codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
-                sender_thread_id: ThreadId::new().to_string(),
-                receiver_thread_ids: vec![receiver_thread_id.to_string()],
-                prompt: None,
-                model: None,
-                reasoning_effort: None,
-                agents_states: HashMap::new(),
-            },
-            /*started_at_ms*/ 0,
-        )),
-    )));
-
-    assert_eq!(
-        app.agent_navigation.get(&receiver_thread_id),
-        Some(&AgentPickerThreadEntry {
-            agent_nickname: None,
-            agent_role: None,
-            agent_path: None,
-            is_running: false,
-            is_closed: false,
-        })
-    );
-}
-
-#[tokio::test]
 async fn collab_receiver_notification_does_not_cache_not_found_thread() {
     let mut app = make_test_app().await;
     let receiver_thread_id =
@@ -2397,6 +2352,11 @@ async fn archived_untracked_threads_do_not_appear_in_agent_picker() -> Result<()
     );
     app.thread_event_channels
         .insert(archived_thread_id, ThreadEventChannel::new(/*capacity*/ 1));
+    let unloaded = ThreadId::new();
+    let metadata = crate::multi_agents::AgentMetadata {
+        agent_nickname: Some("Kepler".into()),
+        agent_role: Some("explorer".into()),
+    };
     let request_id = app
         .agent_navigation
         .begin_picker_refresh(primary_thread_id)
@@ -2408,11 +2368,15 @@ async fn archived_untracked_threads_do_not_appear_in_agent_picker() -> Result<()
             request_id,
             Ok(crate::app_event::AgentPickerThreadRefresh {
                 threads: Vec::new(),
-                archived_thread_ids: std::collections::HashSet::from([archived_thread_id]),
+                archived_threads: HashMap::from([
+                    (archived_thread_id, Default::default()),
+                    (unloaded, metadata.clone()),
+                ]),
             }),
         )
         .is_none()
     );
+    assert_eq!(app.chat_widget.collab_agent_metadata(unloaded), metadata);
     assert_eq!(
         app.thread_event_channels[&archived_thread_id].attachment(),
         ThreadEventAttachment::ReplayOnly
@@ -8612,8 +8576,7 @@ async fn active_side_thread_renders_live_mcp_startup_notifications() {
         )
         .await;
         let event = app
-            .active_thread_rx
-            .as_mut()
+            .active_thread_rx_mut()
             .expect("side thread receiver")
             .try_recv()
             .expect("startup notification");
@@ -9304,7 +9267,6 @@ async fn make_test_app() -> Box<App> {
         sidebar_press: None,
         abandoned_side_threads: HashSet::new(),
         active_thread_id: None,
-        active_thread_rx: None,
         primary_thread_id: None,
         last_subagent_backfill_attempt: None,
         primary_session_configured: None,
@@ -9454,7 +9416,6 @@ pub(super) async fn make_test_app_with_channels() -> (
             sidebar_press: None,
             abandoned_side_threads: HashSet::new(),
             active_thread_id: None,
-            active_thread_rx: None,
             primary_thread_id: None,
             last_subagent_backfill_attempt: None,
             primary_session_configured: None,

@@ -133,6 +133,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.3.4",
  "once_cell",
+ "serde",
  "version_check",
  "zerocopy",
 ]
@@ -3260,6 +3261,7 @@ dependencies = [
  "codex-model-provider",
  "codex-otel",
  "codex-plugin",
+ "codex-plugin-archive-verification",
  "codex-protocol",
  "codex-runtime-agent-instance",
  "codex-shell-command",
@@ -4239,6 +4241,7 @@ dependencies = [
  "codex-protocol",
  "codex-rmcp-client",
  "codex-runtime-agent-instance",
+ "codex-uds",
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
  "codex-utils-path-uri",
@@ -4713,6 +4716,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-plugin-archive-verification"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "app_test_support",
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "codex-app-server-protocol",
+ "codex-config",
+ "codex-core-plugins",
+ "codex-exec-server",
+ "codex-http-client",
+ "codex-login",
+ "codex-otel",
+ "codex-utils-path-uri",
+ "hex",
+ "http 1.4.0",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "codex-plugin-host"
 version = "0.0.0"
 dependencies = [
@@ -5178,6 +5209,20 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "codex-statsig"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "codex-http-client",
+ "http 1.4.0",
+ "oai-statsig-rust-client",
+ "pretty_assertions",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]
@@ -5908,7 +5953,6 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
- "codex-http-client",
  "codex-otel",
  "codex-protocol",
  "codex-utils-absolute-path",
@@ -11273,6 +11317,27 @@ name = "numtoa"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6aa2c4e539b869820a2b82e1aef6ff40aa85e65decdd5185e83fb4b1249cd00f"
+
+[[package]]
+name = "oai-statsig-rust-client"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5adc8fe6756bcf80f8039f2312efe1a6f268406f1e9647e8e5ed16ef4fcf60d"
+dependencies = [
+ "ahash",
+ "arc-swap",
+ "bytes",
+ "dashmap",
+ "http 1.4.0",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
 
 [[package]]
 name = "oauth2"

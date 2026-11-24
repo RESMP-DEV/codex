@@ -50,7 +50,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::error::ProtocolError;
 
 #[tokio::test]
-async fn diff_result_matches_the_server_session_cwd() -> Result<()> {
+async fn diff_result_matches_the_server_session_thread_and_cwd() -> Result<()> {
     use codex_utils_path_uri::LegacyAppPathString;
     use codex_utils_path_uri::PathUri;
 
@@ -67,12 +67,26 @@ async fn diff_result_matches_the_server_session_cwd() -> Result<()> {
     let cwd = PathUri::try_from(LegacyAppPathString::from_string(foreign_cwd))?;
     let mut session = test_thread_session(ThreadId::new(), app.config.cwd.to_path_buf());
     session.cwd = cwd.clone();
+    let thread_id = Some(session.thread_id);
     app.chat_widget.handle_thread_session(session);
-    let stale = AppEvent::DiffResult(app.config.cwd.clone().into(), "old diff".into());
-    Box::pin(app.handle_event(&mut tui, &mut server, stale)).await?;
-    assert!(app.overlay.is_none());
+    for (thread_id, cwd) in [
+        (thread_id, app.config.cwd.clone().into()),
+        (Some(ThreadId::new()), cwd.clone()),
+    ] {
+        let stale = AppEvent::DiffResult {
+            thread_id,
+            cwd,
+            text: "old diff".into(),
+        };
+        Box::pin(app.handle_event(&mut tui, &mut server, stale)).await?;
+        assert!(app.overlay.is_none());
+    }
 
-    let current = AppEvent::DiffResult(cwd, "current diff".into());
+    let current = AppEvent::DiffResult {
+        thread_id,
+        cwd,
+        text: "current diff".into(),
+    };
     Box::pin(app.handle_event(&mut tui, &mut server, current)).await?;
     assert!(app.overlay.is_some());
     Ok(())
@@ -939,7 +953,7 @@ async fn cloud_resume_picker_reconciles_admitted_steers() -> Result<()> {
                 completed(other, ongoing, directive.clone()),
             ] {
                 app.enqueue_thread_notification(other, notification).await?;
-                let event = app.active_thread_rx.as_mut().unwrap().recv().await.unwrap();
+                let event = app.active_thread_rx_mut().unwrap().recv().await.unwrap();
                 app.handle_thread_event_now(event);
             }
             drain_app_events(&mut app, &mut tui, &mut server, &mut events).await?;
@@ -985,7 +999,7 @@ async fn cloud_resume_picker_reconciles_admitted_steers() -> Result<()> {
                 ),
             ] {
                 app.enqueue_thread_notification(other, notification).await?;
-                let event = app.active_thread_rx.as_mut().unwrap().recv().await.unwrap();
+                let event = app.active_thread_rx_mut().unwrap().recv().await.unwrap();
                 app.handle_thread_event_now(event);
             }
             drain_app_events(&mut app, &mut tui, &mut server, &mut events).await?;
@@ -1021,7 +1035,7 @@ async fn cloud_resume_picker_reconciles_admitted_steers() -> Result<()> {
                 turn_completed_notification(other, ongoing, TurnStatus::Completed),
             ] {
                 app.enqueue_thread_notification(other, notification).await?;
-                let event = app.active_thread_rx.as_mut().unwrap().recv().await.unwrap();
+                let event = app.active_thread_rx_mut().unwrap().recv().await.unwrap();
                 app.handle_thread_event_now(event);
             }
             drain_app_events(&mut app, &mut tui, &mut server, &mut events).await?;
@@ -1121,7 +1135,7 @@ async fn cloud_resume_picker_reconciles_admitted_steers() -> Result<()> {
     ] {
         app.enqueue_thread_notification(original, notification)
             .await?;
-        let event = app.active_thread_rx.as_mut().unwrap().recv().await.unwrap();
+        let event = app.active_thread_rx_mut().unwrap().recv().await.unwrap();
         app.handle_thread_event_now(event);
     }
     drain_app_events(&mut app, &mut tui, &mut server, &mut events).await?;
@@ -6464,7 +6478,11 @@ async fn change_directory_scenario() -> Result<()> {
     let skills = AppEvent::SkillsListLoaded { cwd, result };
     let (cwd, plugins) = (current.clone(), Some(vec![]));
     let plugins = AppEvent::PluginMentionsLoaded { cwd, plugins };
-    let diff = AppEvent::DiffResult(current.clone().abs().into(), "stale diff".to_string());
+    let diff = AppEvent::DiffResult {
+        thread_id: Some(original),
+        cwd: current.clone().abs().into(),
+        text: "stale diff".to_string(),
+    };
     let branch = AppEvent::SyncThreadGitBranch {
         thread_id: original,
         branch: "stale".to_string(),

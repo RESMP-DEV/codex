@@ -161,6 +161,9 @@ mod restored_history_prewarm;
 #[path = "scenarios_retained_tool_outputs.rs"]
 mod retained_tool_outputs;
 
+#[path = "scenarios_encrypted_hooks.rs"]
+mod encrypted_hooks;
+
 #[path = "scenarios_exec_tools.rs"]
 mod exec_tools;
 #[path = "scenarios_incremental_tools.rs"]
@@ -2387,6 +2390,7 @@ async fn multi_agent_catalog_parameters(
     let test = test_codex()
         .with_config(move |config| {
             configure_scenario_catalog(config);
+            config.multi_agent_v2.expose_spawn_agent_service_tier = true;
             config.multi_agent_v2.disable_native_tools = disable_native_tools;
             config.workspace_roots = vec![config.cwd.clone()];
         })

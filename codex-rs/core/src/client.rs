@@ -131,6 +131,7 @@ use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::client_common::SamplingStream;
+use crate::client_common::provider_allows_service_tier;
 use crate::context::BaseInstructionsFragment;
 use crate::context::ContextualUserFragment;
 use crate::cyber_access_program;
@@ -1353,13 +1354,7 @@ impl ModelClient {
         let service_tier = model_info
             .service_tier_for_request(service_tier)
             .filter(|tier| {
-                // Bedrock requires an advertised tier, including for flex, which the
-                // generic OpenAI resolver permits without catalog support.
-                !self.state.provider.info().is_amazon_bedrock()
-                    || model_info
-                        .service_tiers
-                        .iter()
-                        .any(|supported| supported.id == *tier)
+                provider_allows_service_tier(self.state.provider.info(), model_info, tier)
             });
         if !include_internal {
             let captures_result_bodies = self.captures_result_bodies();
@@ -1626,7 +1621,11 @@ impl ModelClient {
         let start = Instant::now();
         let result = match tokio::time::timeout(
             websocket_connect_timeout,
-            ApiWebSocketResponsesClient::new(api_provider, api_auth).connect(
+            ApiWebSocketResponsesClient::new(
+                with_default_stream_exclusions(api_provider),
+                api_auth,
+            )
+            .connect(
                 http_client_factory,
                 headers,
                 codex_login::default_client::default_headers(),
@@ -2241,7 +2240,7 @@ impl ResponsesHttpExecutor<'_> {
             }
             let client = ApiResponsesClient::new(
                 transport,
-                client_setup.api_provider,
+                with_default_stream_exclusions(client_setup.api_provider),
                 client_setup.api_auth,
             )
             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
@@ -2981,6 +2980,20 @@ fn build_responses_headers(
         headers.insert(X_CODEX_TURN_STATE_HEADER, header_value);
     }
     headers
+}
+
+/// Apply Responses stream defaults after resolving provider headers so explicit exclusions win.
+fn with_default_stream_exclusions(mut provider: ApiProvider) -> ApiProvider {
+    // Text and custom tool input deltas don't need sequence numbers.
+    // Reasoning replay only needs the ciphertext on the finished item.
+    // Negotiate separately so older servers still recognize x-codex-exclude.
+    provider
+        .headers
+        .entry("x-codex-exclude-stream-fields")
+        .or_insert(HeaderValue::from_static(
+            "delta.sequence_number,reasoning.added.encrypted_content",
+        ));
+    provider
 }
 
 fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: bool) {

@@ -141,6 +141,7 @@ impl App {
                     | AppEvent::ConfirmDaemonUpdate(_)
                     | AppEvent::RunDaemonUpdate(_)
                     | AppEvent::InsertHistoryCell(_)
+                    | AppEvent::CompleteBackgroundCommand(_)
                     | AppEvent::CommitRealtimeTranscriptHistory
                     | AppEvent::ParkSideCompanion { .. }
                     | AppEvent::SideCreated { .. }
@@ -346,10 +347,10 @@ impl App {
             AppEvent::ChooseNewSessionCheckout { name }
             | AppEvent::NewSession { name }
             | AppEvent::NewSessionInCurrentWorktree { name } => {
-                self.start_fresh_session(
+                crate::boxed_future!(self.start_fresh_session(
                     tui, app_server, FreshSessionStart::NewConversation,
                     /*initial_user_message*/ None, name,
-                )
+                ))
                 .await;
                 if self.chat_widget.has_misalignment_policy_violation() {
                     self.chat_widget.show_misalignment_policy_precaution();
@@ -373,13 +374,13 @@ impl App {
                         "Read {name} and let’s continue where we left off.\n\nSaved conversation: {}",
                         path.display(),
                     );
-                    self.start_fresh_session(
+                    crate::boxed_future!(self.start_fresh_session(
                         tui,
                         app_server,
                         FreshSessionStart::PreserveCurrentView(None),
                         /*initial_user_message*/ None,
                         /*new_thread_name*/ None,
-                    )
+                    ))
                     .await;
                     if self
                         .chat_widget
@@ -611,6 +612,9 @@ impl App {
                     app_server.cancel_older_history_page(thread_id, &cursor);
                     if self.chat_widget.thread_id() == Some(thread_id) {
                         self.transcript_view.history = TranscriptHistoryState::Failed;
+                        if self.transcript_reflow.refill_deadline.is_some() {
+                            self.transcript_reflow.schedule_immediate();
+                        }
                         if let Some(Overlay::Transcript(overlay)) = self.overlay.as_mut() {
                             overlay.set_history_state(TranscriptHistoryState::Failed);
                         }
@@ -677,13 +681,13 @@ impl App {
                 self.clear_terminal_ui(tui, /*redraw_header*/ false)?;
                 self.reset_app_ui_state_after_clear();
 
-                self.start_fresh_session(
+                crate::boxed_future!(self.start_fresh_session(
                     tui,
                     app_server,
                     FreshSessionStart::PreserveCurrentView(Some(ThreadStartSource::Clear)),
                     /*initial_user_message*/ None,
                     name,
-                )
+                ))
                 .await;
             }
             AppEvent::RawOutputModeChanged { enabled } => {
@@ -758,13 +762,24 @@ impl App {
                         ));
                     }
                     Err(err)
-                        if err
-                            .downcast_ref::<crate::named_session_lookup::AmbiguousSessionName>()
-                            .is_some() =>
+                        if app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud
+                            && matches!(
+                                err.downcast_ref::<TypedRequestError>(),
+                                Some(TypedRequestError::Server { method, source })
+                                    if method == "thread/read"
+                                        && source.message == "Open this cloud conversation before reading its transcript."
+                            ) =>
                     {
-                        self.chat_widget.add_error_message(err.to_string());
+                        self.chat_widget.add_error_message(
+                            "Run /resume without an ID and select the Cloud chat from the picker."
+                                .to_string(),
+                        );
                     }
-                    Err(err) => return Err(err),
+                    Err(err) => {
+                        if !self.recover_transport_error(&err) {
+                            self.chat_widget.add_error_message(err.to_string());
+                        }
+                    }
                 }
             }
             AppEvent::ResumeBackendSession(_)
@@ -971,15 +986,12 @@ impl App {
                 let selection: Result<(String, Vec<Turn>)> = async {
                     let channel = self.thread_event_channels.get(&thread_id)
                         .ok_or_else(|| color_eyre::eyre::eyre!("the selected thread is no longer available"))?;
-                    let (start_item, loaded_tail, latest_turn_id) = {
+                    let (loaded, latest_turn_id) = {
                         let store = channel.store.lock().await;
-                        (
-                            store.turns.iter().find_map(|turn| turn.items.first()
-                                .map(|item| (turn.id.clone(), item.id().to_string()))),
-                            store.turns.last().map(|turn| turn.id.clone()),
-                            store.latest_turn_id.clone(),
-                        )
+                        let loaded = crate::app_backtrack::loaded_prompt_boundaries(&store.turns);
+                        (loaded, store.latest_turn_id.clone())
                     };
+                    let anchor = loaded.iter().find(|(_, item)| item.is_some()).or_else(|| loaded.last());
                     let mut thread = app_server.thread_read(thread_id, /*include_turns*/ false).await?;
                     app_server.hydrate_initial_thread_history(
                         &mut thread,
@@ -987,45 +999,23 @@ impl App {
                         /*item_cursor*/ None,
                         /*config*/ None,
                         /*local_settings*/ None,
-                        start_item.as_ref().map(|(turn_id, _)| turn_id).or(loaded_tail.as_ref()).map_or(
+                        anchor.map_or(
                             crate::app_server_session::HistoryHydrationScope::Complete,
-                            |turn_id| crate::app_server_session::HistoryHydrationScope::ThroughTurn(turn_id),
+                            |(turn_id, _)| crate::app_server_session::HistoryHydrationScope::ThroughTurn(turn_id),
                         ),
                     ).await?;
                     if thread.turns.last().map(|turn| &turn.id) != latest_turn_id.as_ref() {
                         color_eyre::eyre::bail!("thread history changed; reload the session before editing this prompt");
                     }
-                    // With no retained visible items, the next prompt follows the metadata-only tail.
-                    let start_item = start_item.or_else(|| loaded_tail.as_ref().and_then(|tail| {
-                        thread.turns.iter().position(|turn| &turn.id == tail).and_then(|index| {
-                            thread.turns[index + 1..].iter().find_map(|turn| turn.items.first()
-                                .map(|item| (turn.id.clone(), item.id().to_string())))
-                        })
-                    }));
                     let before_turn_id = crate::app_backtrack::backtrack_revert_before_turn_id(
-                        &thread.turns,
-                        start_item.as_ref(),
+                        &mut thread.turns,
+                        &loaded,
                         nth_user_message,
                         &mut prompt,
                     )?;
-                    // Keep the store aligned with the displayed prefix, including retained live turns.
-                    let cut = thread.turns.iter().position(|turn| turn.id == before_turn_id)
-                        .ok_or_else(|| color_eyre::eyre::eyre!("selected turn disappeared"))?;
-                    thread.turns.truncate(cut);
-                    if let Some((turn_id, item_id)) = &start_item {
-                        for turn in &mut thread.turns {
-                            if &turn.id == turn_id {
-                                if let Some(index) = turn.items.iter().position(|item| item.id() == item_id) {
-                                    turn.items.drain(..index);
-                                }
-                                break;
-                            }
-                            turn.items.clear();
-                        }
-                    }
                     Ok((before_turn_id, thread.turns))
                 }.await;
-                let (before_turn_id, retained_turns) = match selection {
+                let (before_turn_id, mut retained_turns) = match selection {
                     Ok(selection) => selection,
                     Err(err) => {
                         self.restore_backtrack_prompt_after_revert_error(prompt, err);
@@ -1033,7 +1023,7 @@ impl App {
                         return Ok(AppRunControl::Continue);
                     }
                 };
-                let reverted = match app_server.revert_thread(thread_id, before_turn_id, &retained_turns).await {
+                let reverted = match app_server.revert_thread(thread_id, before_turn_id).await {
                     Ok(reverted) => reverted,
                     Err(err) => {
                     // Validation and unsupported-method errors leave history unchanged. Other
@@ -1067,6 +1057,8 @@ impl App {
                     Err(color_eyre::eyre::eyre!("app-server disconnected"))
                 }).await
                     .wrap_err("history was reverted, but refreshing the session timed out; resume this session to reload it")??;
+                app_server.refresh_reverted_history(thread_id, &reverted, &mut retained_turns).await
+                    .wrap_err("history was reverted, but refreshing retained items failed; resume this session to reload it")?;
                 // Preserve the widget and unrelated threads; only replace this replay store.
                 self.chat_widget.restore_thread_input_state(
                     /*input_state*/ None,
@@ -1256,6 +1248,7 @@ impl App {
                 self.prepare_collab_history(app_server, cell.as_mut());
                 self.insert_history_cell(tui, cell);
             }
+            AppEvent::CompleteBackgroundCommand(cell) => self.complete_background_command(tui, cell),
             AppEvent::TurnTipReady { thread_id, turn_id } => {
                 self.turn_tips.ready(thread_id, &turn_id, self.transcript_cells.last());
                 tui.frame_requester().schedule_frame();
@@ -2341,7 +2334,7 @@ impl App {
                 match result {
                 Ok(response) => {
                     let rate_limit_reset_credits = response.rate_limit_reset_credits.clone();
-                    let snapshots = if accepted
+                    let snapshots = if accepted && self.chat_widget.uses_account_quota()
                     {
                         self.chat_widget.apply_usage_notice_read(request_id);
                         self.chat_widget.update_backend_banner(&response);
@@ -2388,8 +2381,9 @@ impl App {
                             tui.frame_requester().schedule_frame();
                         }
                         RateLimitRefreshOrigin::StatusCommand { request_id } => {
-                            self.chat_widget
-                                .finish_status_rate_limit_refresh(request_id, snapshots);
+                            if self.chat_widget.finish_status_rate_limit_refresh(request_id, snapshots) {
+                                self.refresh_status_history(tui)?;
+                            }
                         }
                         RateLimitRefreshOrigin::UsageMenu { request_id } => {
                             self.chat_widget.finish_usage_menu_rate_limit_refresh(
@@ -2439,8 +2433,9 @@ impl App {
                             );
                         }
                         RateLimitRefreshOrigin::StatusCommand { request_id } => {
-                            self.chat_widget
-                                .finish_status_rate_limit_refresh(request_id, Vec::new());
+                            if self.chat_widget.finish_status_rate_limit_refresh(request_id, Vec::new()) {
+                                self.refresh_status_history(tui)?;
+                            }
                         }
                         RateLimitRefreshOrigin::UsageMenu { request_id } => {
                             self.chat_widget.finish_usage_menu_rate_limit_refresh(
@@ -2653,7 +2648,7 @@ impl App {
             }
             AppEvent::VoiceControl { thread_id, control } => {
                 if thread_id == self.chat_widget.thread_id() || self.voice_owner_thread_id().is_some() {
-                    self.control_voice(control);
+                    crate::boxed_future!(self.control_voice(control)).await;
                 }
             }
             AppEvent::RealtimeSessionLockStopped { thread_id } => {
@@ -3208,9 +3203,35 @@ impl App {
                 }
                 self.chat_widget.on_plugin_mentions_loaded(plugins);
             }
-            AppEvent::OpenRealtimeSettings => self.chat_widget.open_realtime_settings(),
+            AppEvent::OpenRealtimeSettings => {
+                if crate::boxed_future!(self.ensure_voice_account()).await {
+                    self.chat_widget.open_realtime_settings();
+                }
+            }
             AppEvent::OpenRealtimeSoundDevices => self.chat_widget.open_realtime_sound_devices(),
-            AppEvent::OpenRealtimeVoices => self.open_realtime_voices(app_server).await,
+            AppEvent::OpenRealtimeVoices | AppEvent::PersistRealtimeVoiceSelection { .. }
+                if self.voice_settings_pending =>
+            {
+                self.chat_widget.add_info_message(
+                    "Voice settings request in progress.".to_owned(),
+                    /*hint*/ None,
+                );
+            }
+            AppEvent::OpenRealtimeVoices => self.load_realtime_voices(app_server),
+            AppEvent::RealtimeVoicesLoaded { origin, result } => {
+                self.voice_settings_pending = false;
+                if origin == self.active_thread_id {
+                    match result {
+                        Ok(settings) => {
+                            self.chat_widget.open_realtime_voices(settings);
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to read voice settings");
+                            self.chat_widget.add_error_message("Failed to read voice settings".to_owned());
+                        }
+                    }
+                }
+            }
             AppEvent::OpenRealtimeDevicePicker { kind } => self.list_realtime_devices(kind),
             AppEvent::OpenRealtimeInputChannels { device } => self.chat_widget.open_realtime_input_channels(device),
             AppEvent::RealtimeDevicesListed { origin, kind, result } => {
@@ -3228,7 +3249,22 @@ impl App {
                 self.persist_realtime_input_channel(channel).await;
             }
             AppEvent::PersistRealtimeVoiceSelection { voice } => {
-                self.persist_realtime_voice(app_server, voice).await;
+                self.persist_realtime_voice(app_server, voice);
+            }
+            AppEvent::RealtimeVoiceSaved { origin, result } => {
+                self.voice_settings_pending = false;
+                if origin == self.active_thread_id {
+                    match result {
+                        Ok(name) => self.chat_widget.add_info_message(
+                            format!("Voice set to {name}."),
+                            /*hint*/ None,
+                        ),
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to save voice");
+                            self.chat_widget.add_error_message("Failed to save voice".to_owned());
+                        }
+                    }
+                }
             }
             AppEvent::ToggleCloudServiceTier { thread_id, tier } => {
                 if self.active_thread_id == Some(thread_id)
@@ -3697,6 +3733,7 @@ impl App {
             AppEvent::DiscoverSidebarAgents(root) => {
                 if self.primary_thread_id == Some(root) && !self.reconnect.offline {
                     self.refresh_agent_picker_threads(app_server, root);
+                    tui.frame_requester().schedule_frame();
                 }
             }
             AppEvent::AgentPickerThreadsLoaded {
@@ -3742,6 +3779,9 @@ impl App {
                     side.close_request = None;
                     match (action, result) {
                         (sidebar_close::Action::Archive, Ok(())) => {
+                            self.invalidate_saved_chat_discovery(
+                                app_server, target, /*removed*/ true, /*displayed*/ true,
+                            );
                             sidebar_close::forget_archived(self, tui, app_server, target).await?;
                         }
                         (sidebar_close::Action::CloseTab, Ok(())) => {
@@ -3776,9 +3816,13 @@ impl App {
             AppEvent::StartQueuedSavedChat => {
                 if let Some(target) = self.waiting_saved_chat()
                     && target.backend_id == app_server.backend_id()
-                    && self.wants_saved_chat(target)
                 {
-                    Box::pin(self.open_saved_chat(tui, app_server, target)).await?;
+                    let wanted = self.wants_saved_chat(target);
+                    self.sidebar_mut().opening = None;
+                    if wanted {
+                        Box::pin(self.open_saved_chat(tui, app_server, target)).await?;
+                    }
+                    tui.frame_requester().schedule_frame();
                 }
             }
             AppEvent::OpenSidebarAgent { backend, source, agent } => {
@@ -3876,12 +3920,22 @@ impl App {
             AppEvent::SavedSideChatsLoaded { backend_id, parent, request, result } => {
                 use crate::app_event::SavedSideChatData;
                 use crate::sidebar_chooser::Discovery;
+                let displayed = self.app_server_backend_id.is_none_or(|id| id == backend_id)
+                    && self.current_displayed_thread_id() == Some(parent);
+                let can_cycle = displayed && self.can_cycle_scrollback_chats();
                 if let Some(pane) = self.sidebars.get_mut(&Some(parent))
-                    && pane.discovery.request() == Some(request)
+                    && let Discovery::Loading { request: pending, cycle, .. } = &mut pane.discovery
+                    && *pending == request
                 {
+                    let cycle = std::mem::take(cycle) && can_cycle;
                     match result {
                         _ if backend_id != app_server.backend_id() => pane.set_discovery(Discovery::Idle),
-                        Err(error) => pane.set_discovery(Discovery::Failed(error)),
+                        Err(error) => {
+                            if cycle {
+                                self.chat_widget.add_error_message(format!("Failed to load saved side chats: {error}"));
+                            }
+                            pane.set_discovery(Discovery::Failed(error));
+                        }
                         Ok(SavedSideChatData::LatestPrompts(prompts)) => {
                             pane.latest_prompts = prompts;
                             pane.set_discovery(Discovery::Idle);
@@ -3889,6 +3943,12 @@ impl App {
                         Ok(SavedSideChatData::Choices(chats)) => {
                             pane.update_saved_chats(chats);
                             self.refresh_visible_side_chat_prompts(tui, app_server, parent, request);
+                            if self.sidebar_parent() == Some(parent) && self.scrollback_side_chats_enabled() {
+                                self.sync_side_thread_ui();
+                            }
+                            if cycle {
+                                Box::pin(self.advance_conversation(tui, app_server)).await;
+                            }
                         }
                     }
                     tui.frame_requester().schedule_frame();
@@ -4802,7 +4862,7 @@ impl App {
             }
             Err(err) => {
                 self.chat_widget
-                    .add_error_message(format!("Failed to delete current thread: {err}"));
+                    .add_error_message(format!("Failed to delete current thread: {err:#}"));
                 AppRunControl::Continue
             }
         })

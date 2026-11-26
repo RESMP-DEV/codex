@@ -116,7 +116,9 @@ async fn picker_side_worktree_fork_and_cd_run_on_the_production_stack() -> Resul
     // A trailing bare Escape must not consume the first character of the fresh edit.
     terminal.write_input(b"\x1b[27u\x1b[27u\r\x1b[27u\x1b[27u\r\x1b")?;
     terminal.wait_for_screen("Conversation reverted to this point")?;
-    terminal.write_input(b" Revised.")?;
+    // Leave the leading space unmarked to exercise Escape, then explicitly
+    // end the paste so the next Enter is an unambiguous submit.
+    terminal.write_input(b" \x1b[200~Revised.\x1b[201~")?;
     terminal.wait_for_screen("Reply with the marker requested by this test. Revised.")?;
     let _edited_reply = responses::mount_sse_once_match(
         &server,
@@ -135,7 +137,7 @@ async fn picker_side_worktree_fork_and_cd_run_on_the_production_stack() -> Resul
     // Repeat through the real event loop, whose dev-build frames share the production stack.
     for attempt in 1..=3 {
         submit(&mut terminal, "/side")?;
-        terminal.wait_for_screen("Side from main thread")?;
+        terminal.wait_for_screen("from main thread")?;
         terminal.ensure_running()?;
         terminal.write_input(b"\x03")?;
         terminal.wait_for_screen("STACK_SAVED_HISTORY")?;

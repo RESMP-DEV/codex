@@ -16,7 +16,7 @@ impl ChatWidget {
     /// requested a redraw.
     pub(super) fn set_status(
         &mut self,
-        header: String,
+        header: impl Into<StatusHeader>,
         details: Option<String>,
         details_capitalization: StatusDetailsCapitalization,
         details_max_lines: usize,
@@ -27,12 +27,12 @@ impl ChatWidget {
             && self.status_state.retry_status_header.is_none()
         {
             (
-                compaction::COMPACTION_HEADER.to_string(),
+                compaction::COMPACTION_HEADER.to_string().into(),
                 Some(compaction::COMPACTION_DETAILS.to_string()),
                 STATUS_DETAILS_DEFAULT_MAX_LINES,
             )
         } else {
-            (header, details, details_max_lines)
+            (header.into(), details, details_max_lines)
         };
         let details = details
             .filter(|details| !details.is_empty())
@@ -46,7 +46,7 @@ impl ChatWidget {
                 }
             });
         self.status_state.set_status(StatusIndicatorState {
-            header: header.clone(),
+            header: header.text.clone(),
             details: details.clone(),
             details_max_lines,
         });
@@ -75,7 +75,7 @@ impl ChatWidget {
     /// Convenience wrapper around [`Self::set_status`];
     /// updates the status indicator header and clears any existing details, returning whether the
     /// visible status indicator requested a redraw.
-    pub(super) fn set_status_header(&mut self, header: String) -> bool {
+    pub(super) fn set_status_header(&mut self, header: impl Into<StatusHeader>) -> bool {
         self.set_status(
             header,
             /*details*/ None,
@@ -266,7 +266,7 @@ impl ChatWidget {
             self.thread_name.clone(),
             self.forked_from,
             rate_limit_snapshots.as_slice(),
-            self.plan_type,
+            self.quota_plan,
             Local::now(),
             self.status_model_display_name(),
             collaboration_mode,
@@ -306,17 +306,18 @@ impl ChatWidget {
         });
     }
 
+    /// Returns whether terminal history needs to show a corrected account label.
     pub(crate) fn finish_status_rate_limit_refresh(
         &mut self,
         request_id: u64,
         snapshots: Vec<RateLimitSnapshot>,
-    ) {
+    ) -> bool {
         let Some(index) = self
             .refreshing_status_outputs
             .iter()
             .position(|(pending_request_id, _)| *pending_request_id == request_id)
         else {
-            return;
+            return false;
         };
         for snapshot in snapshots {
             self.on_rate_limit_snapshot(Some(snapshot));
@@ -328,8 +329,10 @@ impl ChatWidget {
             .values()
             .cloned()
             .collect();
-        handle.finish_rate_limit_refresh(&rate_limit_snapshots, Local::now());
+        let plan_changed =
+            handle.finish_rate_limit_refresh(&rate_limit_snapshots, self.quota_plan, Local::now());
         self.request_redraw();
+        plan_changed
     }
 
     pub(super) fn open_status_line_setup(&mut self) {

@@ -60,6 +60,7 @@ use crate::tools::registry::ToolExposure;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::router::ToolRouter;
 use crate::tools::tool_namespaces_info::collect_tool_namespaces_info;
+use codex_config::types::ImageGenerationSettings;
 use codex_connectors::apps_config_from_layer_stack;
 use codex_extension_api::ExtensionData;
 use codex_features::Feature;
@@ -83,7 +84,6 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::IndirectNamespacePrefixes;
 use codex_tools::ResponsesApiNamespaceTool;
 use codex_tools::TOOL_SEARCH_TOOL_NAME;
-use codex_tools::ToolCall as ExtensionToolCall;
 use codex_tools::ToolEnvironmentMode;
 use codex_tools::ToolExecutor;
 use codex_tools::ToolExposures;
@@ -101,7 +101,6 @@ use std::collections::btree_map::Entry;
 use std::sync::Arc;
 use tracing::instrument;
 
-const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
 
 #[derive(Clone, Copy)]
@@ -326,9 +325,7 @@ pub(crate) fn append_source_tools(
     model_info: &ModelInfo,
     registry: &mut ToolRegistry,
     mcp_tools: Vec<RegisteredTool>,
-    extension_tool_executors: impl IntoIterator<
-        Item = Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>,
-    >,
+    extension_tool_executors: impl IntoIterator<Item = Arc<dyn ToolExecutor>>,
     dynamic_tools: &[DynamicToolSpec],
 ) -> Vec<ToolSpec> {
     for tool in mcp_tools {
@@ -352,7 +349,7 @@ pub(crate) fn append_source_tools(
 pub(crate) fn extension_tool_executors<'a>(
     session: &'a Session,
     step_store: &'a ExtensionData,
-) -> impl Iterator<Item = Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>> + 'a {
+) -> impl Iterator<Item = Arc<dyn ToolExecutor>> + 'a {
     session
         .services
         .extensions
@@ -852,13 +849,11 @@ fn agent_type_description(
     }
 }
 
-fn is_hidden_by_code_mode_only(
-    turn_context: &TurnContext,
-    model_info: &ModelInfo,
+pub(super) fn is_hidden_by_code_mode_only(
+    tool_mode: ToolMode,
     tool_name: &ToolName,
     exposure: ToolExposure,
 ) -> bool {
-    let tool_mode = effective_tool_mode(turn_context, model_info);
     tool_mode == ToolMode::CodeModeOnly
         && exposure.is_available_in_code_mode()
         && codex_code_mode::is_code_mode_nested_tool(&codex_tools::code_mode_name_for_tool_name(
@@ -873,8 +868,7 @@ fn is_directly_visible(
 ) -> bool {
     tool.exposure.is_direct()
         && !is_hidden_by_code_mode_only(
-            turn_context,
-            model_info,
+            effective_tool_mode(turn_context, model_info),
             &tool.runtime.tool_name(),
             tool.exposure,
         )
@@ -1322,7 +1316,12 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
     let subagent_messages = features.subagent_async_messages_enabled
         && turn_context.session_source.parent_thread_id().is_some();
     if root_messages || subagent_messages {
-        registry.add_with_exposure(SendMessageToUserAsyncHandler, ToolExposure::DirectModelOnly);
+        let exposure = if features.async_messages_in_code_mode {
+            ToolExposure::Direct
+        } else {
+            ToolExposure::DirectModelOnly
+        };
+        registry.add_with_exposure(SendMessageToUserAsyncHandler, exposure);
     }
 
     if features.enabled(Feature::RequestPermissionsTool) {
@@ -1627,7 +1626,7 @@ fn append_tool_search_executor(
 fn append_extension_tool_executors(
     turn_context: &TurnContext,
     model_info: &ModelInfo,
-    executors: impl IntoIterator<Item = Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>>,
+    executors: impl IntoIterator<Item = Arc<dyn ToolExecutor>>,
     registry: &mut ToolRegistry,
 ) -> Option<ToolName> {
     let standalone_web_search_enabled = standalone_web_search_enabled(turn_context, model_info);
@@ -1640,7 +1639,7 @@ fn append_extension_tool_executors(
         if is_standalone_web_search && (!standalone_web_search_enabled || !web_search_mode_on) {
             continue;
         }
-        if tool_name == ToolName::namespaced(IMAGE_GEN_NAMESPACE, IMAGEGEN_TOOL_NAME)
+        if tool_name == ToolName::namespaced(ImageGenerationSettings::NAMESPACE, IMAGEGEN_TOOL_NAME)
             && !image_generation_available(turn_context, model_info)
         {
             continue;

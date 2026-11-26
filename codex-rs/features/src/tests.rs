@@ -252,11 +252,22 @@ fn guardian_v3_feature_config_resolves_base_and_profile_toggles() {
 }
 
 #[test]
+fn guardian_v3_shadow_does_not_enable_live_review() {
+    let features: FeaturesToml =
+        toml::from_str("[guardianv3]\nshadow_enabled = true").expect("Guardian V3 shadow settings");
+    assert_eq!(
+        features.entries(),
+        BTreeMap::from([("guardianv3.shadow_enabled".to_owned(), true)])
+    );
+}
+
+#[test]
 fn guardian_v3_prompt_settings_do_not_implicitly_enable_the_feature() {
     let features: FeaturesToml = toml::from_str(
         r#"
 [guardianv3]
 message_board_in_memory = true
+shadow_board_limit_mib = 32
 [guardianv3.housekeeper]
 routing_instructions = "Group related deployment evidence."
 batch_timeout_ms = 15000
@@ -270,6 +281,8 @@ retrieval_instructions = "Search before assessing deployments."
     assert_eq!(
         features.guardianv3,
         Some(FeatureToml::Config(crate::GuardianV3ConfigToml {
+            shadow_board_limit_mib: std::num::NonZeroU32::new(32),
+            shadow_enabled: None,
             enabled: None,
             message_board_in_memory: Some(true),
             housekeeper: Some(crate::GuardianV3HousekeeperConfigToml {
@@ -285,7 +298,8 @@ retrieval_instructions = "Search before assessing deployments."
 }
 
 #[test]
-fn guardian_v3_rejects_a_zero_batch_timeout() {
+fn guardian_v3_rejects_zero_limits() {
+    assert!(toml::from_str::<FeaturesToml>("[guardianv3]\nshadow_board_limit_mib = 0").is_err());
     assert!(
         toml::from_str::<FeaturesToml>("[guardianv3.housekeeper]\nbatch_timeout_ms = 0").is_err()
     );
@@ -789,10 +803,12 @@ fn from_sources_ignores_removed_apply_patch_freeform_feature_key() {
 }
 
 #[test]
-fn from_sources_accepts_and_ignores_removed_personality_feature_values() {
+fn from_sources_accepts_and_ignores_removed_boolean_feature_values() {
     for enabled in [false, true] {
-        let features_toml: FeaturesToml = toml::from_str(&format!("personality = {enabled}"))
-            .expect("legacy personality feature should deserialize");
+        let features_toml: FeaturesToml = toml::from_str(&format!(
+            "personality = {enabled}\nskill_search = {enabled}"
+        ))
+        .expect("legacy feature values should deserialize");
         let source = FeatureConfigSource {
             features: Some(&features_toml),
             ..Default::default()

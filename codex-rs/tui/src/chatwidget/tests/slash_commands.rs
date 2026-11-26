@@ -12,7 +12,7 @@ fn force_pet_image_support(chat: &mut ChatWidget) {
 
 fn force_tmux_pet_image_unsupported(chat: &mut ChatWidget) {
     chat.set_pet_image_support_for_tests(crate::pets::PetImageSupport::Unsupported(
-        crate::pets::PetImageUnsupportedReason::Tmux,
+        crate::pets::PetImageUnsupportedReason::RequiresVirtualPlacement,
     ));
 }
 
@@ -24,7 +24,7 @@ fn force_terminal_pet_image_unsupported(chat: &mut ChatWidget) {
 
 fn force_old_iterm2_pet_image_unsupported(chat: &mut ChatWidget) {
     chat.set_pet_image_support_for_tests(crate::pets::PetImageSupport::Unsupported(
-        crate::pets::PetImageUnsupportedReason::Iterm2TooOld,
+        crate::pets::PetImageUnsupportedReason::UpgradeRequired,
     ));
 }
 
@@ -2594,8 +2594,8 @@ async fn copy_shortcut_can_be_remapped() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let ctrl_v_pastes_text = cfg!(windows)
         || (cfg!(target_os = "linux")
-            && !crate::clipboard_copy::is_ssh_session()
-            && !crate::clipboard_copy::is_wsl_session());
+            && !crate::terminal_capabilities::is_ssh_session()
+            && !crate::terminal_capabilities::is_wsl_session());
     for (code, modifiers) in [
         (KeyCode::Char('v'), KeyModifiers::CONTROL),
         (KeyCode::Char('V'), KeyModifiers::CONTROL),

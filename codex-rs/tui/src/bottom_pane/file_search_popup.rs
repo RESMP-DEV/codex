@@ -1,8 +1,6 @@
 //! Display file completions while preserving the full path used for insertion.
 //! Narrow rows retain the filename; fuzzy highlights refer to the displayed text.
 
-use std::path::PathBuf;
-
 use codex_file_search::FileMatch;
 use codex_utils_fuzzy_match::fuzzy_match;
 use ratatui::buffer::Buffer;
@@ -96,11 +94,10 @@ impl FileSearchPopup {
         self.state.ensure_visible(len, len.min(MAX_POPUP_ROWS));
     }
 
-    pub(crate) fn selected_match(&self) -> Option<&PathBuf> {
+    pub(crate) fn selected_match(&self) -> Option<&FileMatch> {
         self.state
             .selected_idx
             .and_then(|idx| self.matches.get(idx))
-            .map(|file_match| &file_match.path)
     }
 
     pub(crate) fn calculate_required_height(&self) -> u16 {
@@ -194,6 +191,7 @@ mod tests {
     use super::*;
     use codex_file_search::MatchType;
     use pretty_assertions::assert_eq;
+    use std::path::PathBuf;
 
     fn file_match(index: usize) -> FileMatch {
         FileMatch {
@@ -218,24 +216,26 @@ mod tests {
                 .into_iter()
                 .map(|name| parent.join(name))
                 .collect();
+            let root = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(root.path().join(&parent)).unwrap();
+            for path in &paths {
+                std::fs::write(root.path().join(path), "").unwrap();
+            }
+            let mut matches = codex_file_search::run(
+                "parser",
+                vec![root.path().to_path_buf()],
+                codex_file_search::FileSearchOptions {
+                    index_unit: Some(codex_file_search::IndexUnit::Scalar),
+                    ..Default::default()
+                },
+                /*cancel_flag*/ None,
+            )
+            .unwrap()
+            .matches;
+            matches.sort_by(|a, b| a.path.cmp(&b.path));
             let mut popup = FileSearchPopup::new();
             popup.set_query("parser");
-            popup.set_matches(
-                "parser",
-                paths
-                    .iter()
-                    .enumerate()
-                    .map(|(index, path)| {
-                        let mut matched = file_match(index);
-                        matched.path = path.clone();
-                        matched.indices =
-                            fuzzy_match(&path.to_string_lossy(), "parser").map(|(indices, _)| {
-                                indices.into_iter().map(|index| index as u32).collect()
-                            });
-                        matched
-                    })
-                    .collect(),
-            );
+            popup.set_matches("parser", matches);
             for (selected, path) in paths.iter().enumerate() {
                 for width in [28, 40, 80] {
                     let area = Rect::new(
@@ -262,20 +262,14 @@ mod tests {
                         text.contains("parser_alpha.rs") && text.contains("parser_beta.rs"),
                         "{text}"
                     );
-                    assert_eq!(popup.selected_match(), Some(path));
+                    assert_eq!(popup.selected_match().map(|m| &m.path), Some(path));
                     let unselected_y = if selected == 0 { 2 } else { 1 };
-                    let parser_x = (0..width.saturating_sub(/*rhs*/ 5))
-                        .find(|&x| {
-                            (x..x + 6)
-                                .map(|column| buf[(column, unselected_y)].symbol())
-                                .eq(["p", "a", "r", "s", "e", "r"])
-                        })
-                        .expect("visible filename match");
-                    assert!(
-                        buf[(parser_x, unselected_y)]
-                            .modifier
-                            .contains(ratatui::style::Modifier::BOLD)
-                    );
+                    let highlighted: String = (0..width)
+                        .map(|x| &buf[(x, unselected_y)])
+                        .filter(|cell| cell.modifier.contains(ratatui::style::Modifier::BOLD))
+                        .map(ratatui::buffer::Cell::symbol)
+                        .collect();
+                    assert_eq!(highlighted, "parser");
                     if selected == 0 {
                         snapshots.push(format!("{components:?}, width {width}\n{text}"));
                     }

@@ -1,5 +1,13 @@
-//! Statsig HTTP requests use the caller's Codex routing and network policy.
-//! Decoded responses are bounded; status handling and retries stay in the SDK.
+//! Codex's account-scoped store of Statsig evaluations and its policy-aware HTTP adapter.
+
+mod evaluations;
+mod telemetry;
+
+pub use codex_backend_client::StatsigBootstrapContext;
+pub use evaluations::DynamicConfig;
+pub use evaluations::Gate;
+pub use evaluations::StatsigIdentity;
+pub use evaluations::StatsigRuntime;
 
 use std::time::Duration;
 
@@ -81,6 +89,8 @@ impl HttpClient for StatsigHttpClient {
 fn map_error(error: HttpError, timeout: Duration) -> StatsigError {
     if error.is_timeout() {
         StatsigError::NetworkTimeout(timeout)
+    } else if matches!(error, HttpError::Policy(_)) {
+        StatsigError::Network(telemetry::POLICY_DENIED.into())
     } else {
         StatsigError::Network(error.without_url().to_string())
     }

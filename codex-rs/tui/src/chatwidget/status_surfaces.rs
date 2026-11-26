@@ -305,8 +305,7 @@ impl ChatWidget {
     pub(crate) fn desired_program_status(&self) -> ProgramStatus {
         if let Some(kind) = self.bottom_pane.program_status_blocked_kind() {
             ProgramStatus::Blocked(kind)
-        } else if self.bottom_pane.is_task_running()
-            || self.is_user_turn_pending_or_running()
+        } else if self.is_user_turn_pending_or_running()
             || (self.status_state.program_status_after_turn == ProgramStatus::Done
                 && self
                     .current_goal_status
@@ -329,7 +328,7 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn iterm_session_detail(&self, status: ProgramStatus) -> Option<&str> {
+    pub(super) fn session_status_detail(&self, status: ProgramStatus) -> Option<&str> {
         (status == ProgramStatus::Working && self.bottom_pane.is_task_running())
             .then_some(self.status_state.current_status.header.as_str())
             .filter(|detail| *detail != "Working")

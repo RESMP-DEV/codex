@@ -71,6 +71,7 @@ use codex_api::SseTelemetry;
 use codex_api::StreamOptions;
 use codex_api::TransportError;
 use codex_api::WebsocketTelemetry;
+pub use codex_api::X_CODEX_TURN_METADATA_HEADER;
 use codex_api::auth_header_telemetry;
 use codex_api::build_session_headers;
 use codex_api::create_text_param_for_request;
@@ -171,7 +172,6 @@ pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 pub const X_CODEX_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
 pub const X_CODEX_ROUTING_HINT_HEADER: &str = "x-codex-routing-hint";
 pub const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
-pub const X_CODEX_TURN_METADATA_HEADER: &str = "x-codex-turn-metadata";
 pub const X_CODEX_PARENT_THREAD_ID_HEADER: &str = "x-codex-parent-thread-id";
 pub const X_CODEX_WINDOW_ID_HEADER: &str = "x-codex-window-id";
 pub const X_OPENAI_MEMGEN_REQUEST_HEADER: &str = "x-openai-memgen-request";
@@ -343,6 +343,9 @@ impl RequestRouteTelemetry {
     }
 }
 
+/// Installed on the reviewer using the reviewed thread’s MAv2 review settings.
+pub(crate) struct QuoteGuardianReplies;
+
 /// A session-scoped client for model-provider API calls.
 ///
 /// This holds configuration and state that should be shared across turns within a Codex session
@@ -356,6 +359,7 @@ impl RequestRouteTelemetry {
 /// call site.
 #[derive(Debug, Clone)]
 pub struct ModelClient {
+    quote_guardian_replies: bool,
     usage_attribution_policy: UsageAttributionPolicy,
     state: Arc<ModelClientState>,
     agent_identity_policy: AgentIdentityAuthPolicy,
@@ -684,6 +688,7 @@ impl ModelClient {
             && !crate::guardian::is_basic_session_source(&session_source)
             && !memory_consolidation;
         Self {
+            quote_guardian_replies: false,
             state: Arc::new(ModelClientState {
                 thread_id,
                 context_ids,
@@ -1365,6 +1370,14 @@ impl ModelClient {
                 }
             }
         }
+        // Project only the request copy. Reviewer history keeps native IDs for deduplication.
+        if self.quotes_guardian_replies() {
+            for item in &mut input {
+                if let Some(output) = codex_guardian_context::subagent_reply_output(item) {
+                    *item = output;
+                }
+            }
+        }
         let client_metadata = responses_metadata.client_metadata(include_internal);
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
@@ -1505,6 +1518,16 @@ impl ModelClient {
             .filter(|config| config.model == model && self.uses_codex_backend(auth))
             .map(|config| config.headers.clone())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn with_guardian_reply_rendering(mut self, enabled: bool) -> Self {
+        self.quote_guardian_replies =
+            enabled && crate::guardian::is_basic_session_source(&self.state.session_source);
+        self
+    }
+
+    pub(crate) fn quotes_guardian_replies(&self) -> bool {
+        self.quote_guardian_replies
     }
 
     fn uses_codex_backend(&self, auth: Option<&CodexAuth>) -> bool {

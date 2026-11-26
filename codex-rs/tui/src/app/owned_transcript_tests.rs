@@ -853,6 +853,51 @@ async fn owned_transcript_keeps_text_out_of_the_pet_columns() -> Result<()> {
             assert_eq!(buffer[(x, y)].symbol(), " ");
         }
     }
+    let text = buffer_text(buffer);
+    tui.terminal.virtual_image_base = Some(0x80_0000);
+    app.render_owned_transcript(&mut tui, size)?;
+    let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
+    assert_eq!(buffer_text(buffer), text);
+    let reserved = buffer
+        .content
+        .chunks(usize::from(size.width))
+        .map(|row| {
+            row[usize::from(width)..]
+                .iter()
+                .map(|cell| {
+                    if cell.diff_option == ratatui::buffer::CellDiffOption::Skip {
+                        '█'
+                    } else {
+                        ' '
+                    }
+                })
+                .collect::<String>()
+        })
+        .filter(|row| row.contains('█'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!("virtual_pet_columns", reserved);
+    // The fork progress frame paints text without a subsequent pet image pass.
+    app.chat_widget.fork_in_progress = true;
+    app.render_chat_widget_frame(&mut tui, Size::new(/*width*/ 28, size.height))?;
+    let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
+    let visible: String = buffer
+        .content
+        .iter()
+        .filter(|cell| cell.diff_option != ratatui::buffer::CellDiffOption::Skip)
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+    assert!(visible.contains("Forking conversation…"));
+    app.chat_widget.fork_in_progress = false;
+    app.chat_widget.disable_ambient_pet_for_session();
+    app.render_owned_transcript(&mut tui, size)?;
+    let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&tui.terminal);
+    assert!(
+        buffer
+            .content
+            .iter()
+            .all(|cell| cell.diff_option != ratatui::buffer::CellDiffOption::Skip)
+    );
     tui.set_owned_screen(/*owned*/ false)?;
     Ok(())
 }
@@ -1802,6 +1847,7 @@ mod browsing;
 #[tokio::test]
 async fn find_refreshes_live_details_before_searching_the_first_query() -> Result<()> {
     let mut app = crate::app::test_support::make_test_app().await;
+    app.local_settings.tui.collapse_turn_details = false;
     crate::chatwidget::tests::helpers::set_active_cell(
         &mut app.chat_widget,
         Box::new(crate::exec_cell::new_active_exec_command(
@@ -2401,7 +2447,6 @@ async fn clickable_transcript_foreground_follows_mouse_motion() -> Result<()> {
     let mut tui = crate::tui::test_support::make_test_tui()?;
     tui.set_owned_screen(/*owned*/ true)?;
     let size = tui.terminal.size()?;
-    app.local_settings.tui.collapse_turn_details = true;
     app.transcript_cells = vec![
         user_cell("See https://prompt.example/ for context."),
         Arc::new(history_cell::AgentMarkdownCell::new(

@@ -13,24 +13,23 @@ fn streamed_message_matches_completed(streamed: &str, completed: &str) -> bool {
     streamed == completed || streamed.strip_suffix('\n') == Some(completed)
 }
 
-fn latest_summary_line(text: &str) -> Option<String> {
-    text.lines().rev().find_map(|line| {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("<!--") {
-            return None;
-        }
-        let line = line.trim_start_matches('#').trim();
-        let line = if let Some(stripped) = line.strip_prefix("**") {
-            let (bold, trailing) = stripped.split_once("**")?;
-            format!("{bold}{trailing}")
-        } else {
-            line.to_string()
-        };
-        (!line.is_empty()).then_some(line)
-    })
-}
-
 impl ChatWidget {
+    /// Finish the visible line and remember the latest one for the next sample.
+    fn refresh_reasoning_heading(&mut self) -> bool {
+        let item_id = self.status_state.reasoning_item_id.as_deref();
+        let part = self.reasoning_summary_parts.len();
+        if let Some(row) = self.bottom_pane.status_widget_mut() {
+            row.extend_reasoning(item_id, part, &self.reasoning_buffer);
+        }
+        if let Some(heading) = StatusHeader::from_summary(item_id, part, &self.reasoning_buffer)
+            && self.reasoning_header.as_ref() != Some(&heading)
+        {
+            self.reasoning_header = Some(heading);
+            return true;
+        }
+        false
+    }
+
     pub(super) fn on_reasoning_item_started(&mut self, id: String) {
         if self.status_state.reasoning_resume_turn_id.take().is_some()
             && self.status_state.reasoning_item_id.as_ref() != Some(&id)
@@ -54,8 +53,7 @@ impl ChatWidget {
         {
             return;
         }
-        self.reasoning_header =
-            latest_summary_line(&self.reasoning_buffer).or(self.reasoning_header.take());
+        self.refresh_reasoning_heading();
         if let Some(header) = self.reasoning_header.clone() {
             self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Thinking;
             self.set_status_header(header);
@@ -195,12 +193,12 @@ impl ChatWidget {
                 .unwrap_or(true)
     }
 
-    /// Restore the status indicator only after commentary completion is pending,
+    /// Restore the status indicator only after message completion is pending,
     /// the turn is still running, and all stream queues have drained.
     ///
     /// This gate prevents flicker while normal output is still actively
     /// streaming, but still restores a visible "working" affordance when a
-    /// commentary block ends before the turn itself has completed.
+    /// message ends before the turn itself has completed.
     pub(super) fn maybe_restore_status_indicator_after_stream_idle(&mut self) {
         if !self.status_state.pending_status_indicator_restore
             || !self.bottom_pane.is_task_running()
@@ -300,7 +298,13 @@ impl ChatWidget {
         message: &str,
         phase: Option<MessagePhase>,
     ) {
-        if self.stream_controller.is_none() && !message.is_empty() {
+        if !message.trim().is_empty()
+            && self
+                .stream_controller
+                .as_ref()
+                .is_none_or(|stream| !stream.has_text())
+        {
+            self.stream_controller = None;
             let displayed =
                 parse_assistant_markdown(message, self.config.cwd.as_path()).visible_markdown;
             self.handle_streaming_delta(displayed);
@@ -451,28 +455,28 @@ impl ChatWidget {
             return;
         }
 
-        self.reasoning_header =
-            latest_summary_line(&self.reasoning_buffer).or(self.reasoning_header.take());
-        let Some(header) = self.reasoning_header.as_deref() else {
+        let changed = self.refresh_reasoning_heading();
+        let Some(header) = &self.reasoning_header else {
             // No usable summary has arrived yet.
             return;
         };
 
         let status = &self.status_state.current_status;
-        if self.status_state.terminal_title_status_kind == TerminalTitleStatusKind::Thinking
-            && status.header == header
+        if !changed
+            && self.status_state.terminal_title_status_kind == TerminalTitleStatusKind::Thinking
+            && status.header == header.text
             && status.details.is_none()
             && status.details_max_lines == STATUS_DETAILS_DEFAULT_MAX_LINES
             && self
                 .bottom_pane
                 .status_widget()
-                .is_none_or(|status| status.header() == header)
+                .is_none_or(|status| status.header() == header.text)
         {
             return;
         }
 
         // Update the shimmer header to the extracted reasoning chunk header.
-        let header = header.to_string();
+        let header = header.clone();
         self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Thinking;
         if !self.set_status_header(header) {
             self.request_redraw();
@@ -485,11 +489,13 @@ impl ChatWidget {
             self.reasoning_summary_parts
                 .push(std::mem::take(&mut self.reasoning_buffer));
         }
+        let item_id = self.status_state.reasoning_item_id.as_deref();
         self.reasoning_header = self
             .reasoning_summary_parts
             .iter()
+            .enumerate()
             .rev()
-            .find_map(|part| latest_summary_line(part))
+            .find_map(|(index, part)| StatusHeader::from_summary(item_id, index, part))
             .or(self.reasoning_header.take());
         if !self.reasoning_summary_parts.is_empty() {
             let reasoning_parts = std::mem::take(&mut self.reasoning_summary_parts);
@@ -563,9 +569,7 @@ impl ChatWidget {
 
     /// Handle completion of an `AgentMessage` turn item.
     ///
-    /// Commentary completion sets a deferred restore flag so the status row
-    /// returns once stream queues are idle. Final-answer completion (or absent
-    /// phase for legacy models) clears the flag to preserve historical behavior.
+    /// An unphased message can finish while the turn still has work to do.
     pub(super) fn on_agent_message_item_completed(
         &mut self,
         item: AgentMessageItem,
@@ -755,7 +759,9 @@ impl ChatWidget {
         }
         self.status_state.pending_status_indicator_restore = item.questions.is_some()
             || match item.phase {
-                // Models that don't support preambles only output AgentMessageItems on turn completion.
+                None if self.turn_lifecycle.agent_turn_running && !self.statusline_disconnected => {
+                    true
+                }
                 Some(MessagePhase::FinalAnswer) | None => {
                     !self.input_queue.pending_steers.is_empty()
                 }
@@ -784,7 +790,7 @@ impl ChatWidget {
     ///
     /// `scope` selects paced, catch-up, or replay draining. While lines are actively streaming
     /// we hide the status row to avoid duplicate "in progress" affordances. We only re-show
-    /// the row after commentary completion once stream queues are idle.
+    /// the row after message completion once stream queues are idle.
     pub(crate) fn run_commit_tick_with_scope(&mut self, scope: CommitTickScope) {
         let now = Instant::now();
         let outcome = run_commit_tick(

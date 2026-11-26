@@ -80,6 +80,7 @@ use crate::resume_picker::SessionSelection;
 use crate::resume_picker::SessionTarget;
 use crate::session_state::ThreadSessionState;
 use crate::startup_draft::StartupDraftPump;
+use crate::terminal_capabilities::user_agent;
 #[cfg(test)]
 use crate::test_support::PathBufExt;
 #[cfg(test)]
@@ -159,7 +160,6 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelUpgrade;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_rollout::StateDbHandle;
-use codex_terminal_detection::user_agent;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_approval_presets::builtin_permission_profile_for_active_permission_profile;
 use color_eyre::eyre::Result;
@@ -290,12 +290,14 @@ mod sidebar;
 mod sidebar_close;
 mod sidebar_document;
 mod sidebar_files;
+mod sidebar_input;
 pub(crate) mod sidebar_loading;
 mod sidebar_model_documents;
 #[cfg(all(test, not(windows)))]
 #[path = "app/sidebar_open_in_codex_tests.rs"]
 mod sidebar_open_in_codex_tests;
 mod sidebar_subagents;
+mod sidebar_visibility;
 mod startup;
 pub(crate) mod startup_bootstrap;
 mod startup_prompts;
@@ -568,6 +570,7 @@ pub(crate) struct App {
     statusline_metrics: crate::statusline_metrics::StatuslineMetrics,
     provider_writes: HashMap<crate::backend_id::BackendId, crate::model_catalog::ProviderWrite>,
     feature_write_lock: Arc<tokio::sync::Mutex<()>>,
+    voice_settings_pending: bool,
     config_notification_test_generation: u64,
     config_notification_test_pending: Option<u64>,
     model_catalog: Arc<ModelCatalog>,
@@ -896,14 +899,15 @@ impl App {
         app_server: &mut AppServerSession,
         event: TuiEvent,
     ) -> Result<AppRunControl> {
-        if matches!(event, TuiEvent::Draw) && tui::tmux_mouse_disabled() {
+        if matches!(event, TuiEvent::Draw) && tui::mouse_capture_disabled() {
             self.sidebar_press = None;
-            self.divider_drag = None;
             self.chat_widget.end_composer_drag();
             self.chat_widget.rendered_selection.borrow_mut().end_drag();
         }
         match &event {
+            // A terminal can report focus between mouse-down and mouse-up.
             TuiEvent::Draw
+            | TuiEvent::FocusGained
             | TuiEvent::Mouse(crossterm::event::MouseEvent {
                 kind: MouseEventKind::Up(_) | MouseEventKind::Moved,
                 ..
@@ -918,6 +922,8 @@ impl App {
             }
             _ => self.sidebar_press = None,
         }
+        self.transcript_view.primary_selection = tui.primary_selection_available();
+        self.transcript_view.bidi_layout = tui.terminal.bidi_layout;
         self.transcript_view.agent_links = self
             .side_retention_enabled(tui)
             .then(|| app_server.backend_id());
@@ -1323,7 +1329,7 @@ impl App {
             }
         }
         if let TuiEvent::Key(key_event) = &event
-            && self.handle_voice_toggle_key(tui, *key_event)
+            && self.handle_voice_toggle_key(tui, *key_event).await
         {
             return Ok(AppRunControl::Continue);
         }
@@ -1335,7 +1341,8 @@ impl App {
             && self.keymap.chat.toggle_voice_mute.is_pressed(*key_event)
         {
             if !self.chat_widget.handle_startup_submission_key(*key_event) {
-                self.control_voice(crate::app_event::VoiceControl::Mute);
+                self.control_voice(crate::app_event::VoiceControl::Mute)
+                    .await;
             }
             return Ok(AppRunControl::Continue);
         }
@@ -1481,7 +1488,8 @@ impl App {
                     }
                     self.chat_widget.pre_draw_tick();
                     self.refresh_agents_overview_usage(app_server, tui.frame_requester());
-                    let rendered_area = self.render_chat_widget_frame(tui, screen_size)?;
+                    let rendered_area =
+                        self.render_chat_frame(tui, screen_size, /*preserve_pet*/ true)?;
                     if tui.is_owned_screen()
                         && self.transcript_view.history
                             != crate::pager_overlay::TranscriptHistoryState::Failed
@@ -1568,7 +1576,7 @@ impl App {
     }
 
     fn preview_image_protocol(&self, tui: &tui::Tui) -> Option<crate::pets::ImageProtocol> {
-        match tui.herdr_kitty_graphics {
+        match tui.probed_kitty_graphics {
             Some(true) => Some(crate::pets::ImageProtocol::Kitty),
             Some(false) => None,
             None => self.chat_widget.pet_image_support().protocol(),
@@ -1585,10 +1593,20 @@ impl App {
     }
 
     fn render_chat_widget_frame(&mut self, tui: &mut tui::Tui, screen_size: Size) -> Result<Rect> {
+        self.render_chat_frame(tui, screen_size, /*preserve_pet*/ false)
+    }
+
+    fn render_chat_frame(
+        &mut self,
+        tui: &mut tui::Tui,
+        screen_size: Size,
+        preserve_pet: bool,
+    ) -> Result<Rect> {
+        self.chat_widget.bidi_layout = tui.terminal.bidi_layout;
         self.chat_widget
             .set_sparkle_terminal_focus(tui.is_terminal_focused());
         if tui.is_owned_screen() {
-            return self.render_owned_transcript(tui, screen_size);
+            return self.render_owned_frame(tui, screen_size, preserve_pet);
         }
         self.prepare_frame_images(tui);
         self.chat_widget
@@ -1615,13 +1633,14 @@ impl App {
             self.maybe_run_resize_reflow(tui, screen_size)?;
         }
         let hud = self.workspace_hud(tui, screen_size.into());
+        self.chat_widget.begin_steer_hint_draw();
+        let mut rendered_area = Rect::default();
         self.with_chat_widget_frame(screen_size.width, |desired_height, chat_widget| {
             let desired_height = if dashboard_visible {
                 screen_size.height
             } else {
                 desired_height
             };
-            let mut rendered_area = Rect::default();
             tui.draw_with_resize_reflow(desired_height, screen_size, hud, |frame| {
                 let area = frame.area();
                 rendered_area = area;
@@ -1634,9 +1653,10 @@ impl App {
                     frame.set_cursor_style(chat_widget.cursor_style(area));
                     frame.set_cursor_position((x, y));
                 }
-            })?;
-            Ok(rendered_area)
-        })
+            })
+        })?;
+        self.chat_widget.finish_steer_hint_draw();
+        Ok(rendered_area)
     }
 
     fn with_chat_widget_frame<T>(
@@ -1644,7 +1664,17 @@ impl App {
         width: u16,
         render: impl FnOnce(u16, &dyn Renderable) -> T,
     ) -> T {
-        let chat_widget = self.chat_widget.as_renderable();
+        let footer = self.scrollback_cycle_footer(width);
+        let chat_widget = match &footer {
+            Some(footer) => self.chat_widget.as_renderable_with_options(
+                crate::bottom_pane::ComposerRenderOptions {
+                    footer: Some(footer),
+                    command_popup_placement: crate::bottom_pane::CommandPopupPlacement::Hidden,
+                    ..Default::default()
+                },
+            ),
+            None => self.chat_widget.as_renderable(),
+        };
         render(chat_widget.desired_height(width), &chat_widget)
     }
 }

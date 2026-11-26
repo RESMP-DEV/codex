@@ -1,6 +1,6 @@
 use crate::FeatureConfig;
 use crate::FeatureToml;
-use codex_network_proxy::CredentialProviderConfig;
+use codex_network_policy_types::CredentialProviderConfig;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_utils_redacted_string::RedactedString;
 use schemars::JsonSchema;
@@ -34,7 +34,7 @@ pub struct ToolRegistryConfigToml {
     pub turn_metadata_includes_tool_info: Option<bool>,
 }
 
-/// Controls which agents can send async user messages.
+/// Controls which agents can send async user messages and how they call the tool.
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageToUserAsyncConfigToml {
@@ -46,6 +46,9 @@ pub struct SendMessageToUserAsyncConfigToml {
     /// and the model catalog. Defaults to false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagents: Option<bool>,
+    /// Keep async user messages top-level only (default). Set to false to follow the session's tool mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_only: Option<bool>,
 }
 
 impl FeatureConfig for SendMessageToUserAsyncConfigToml {
@@ -335,11 +338,17 @@ where
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GuardianV3ConfigToml {
-    /// Keep each fresh root's Guardian board in memory until the runtime closes. Defaults to false.
+    /// Maximum evidence per root shadow board in MiB. Defaults to 32. Ignored in project config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadow_board_limit_mib: Option<NonZeroU32>,
+    /// Defaults to true for shadow boards and false for live boards. False disables shadow reviews.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_board_in_memory: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// Run shadow reviews alongside Guardian V2 without changing approval decisions. Ignored in project config.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadow_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub housekeeper: Option<GuardianV3HousekeeperConfigToml>,
     #[serde(skip_serializing_if = "Option::is_none")]

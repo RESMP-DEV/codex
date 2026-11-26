@@ -50,6 +50,7 @@ codex-file-search = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-http-client = { workspace = true }
 codex-login = { workspace = true }
+codex-statsig = { workspace = true }
 codex-mermaid = { workspace = true }
 codex-message-history = { workspace = true }
 codex-model-provider = { workspace = true }
@@ -88,6 +89,7 @@ diffy = { workspace = true }
 dirs = { workspace = true }
 dunce = { workspace = true }
 http = { workspace = true }
+icu_properties = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png", "gif", "webp"] }
 itertools = { workspace = true }
 lazy_static = { workspace = true }
@@ -110,7 +112,6 @@ sha2 = { workspace = true }
 shlex = { workspace = true }
 strum = { workspace = true }
 strum_macros = { workspace = true }
-supports-color = { workspace = true }
 tempfile = { workspace = true }
 textwrap = { workspace = true }
 thiserror = { workspace = true }
@@ -154,10 +155,14 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSDateFormatter", "NSEnumerator", "NSFormatter", "NSLocale", "NSString"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31.3", features = ["socket"] }
+wl-clipboard-rs = { workspace = true }
 # Keep the same executor features as the credential store, which also uses zbus.
 zbus = "4.4.0"
 
 [target.'cfg(windows)'.dependencies]
+clipboard-win = "5.4.3"
+image = { workspace = true, features = ["bmp"] }
 which = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",

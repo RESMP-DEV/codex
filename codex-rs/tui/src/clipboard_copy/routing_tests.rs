@@ -19,7 +19,7 @@ fn local_tmux_preserves_native_html_when_terminal_silently_rejects_copy() {
         "**hello**",
         CopyFormat::Markdown,
         CopyEnvironment {
-            terminal_copy: ClipboardCopyMode::Tmux,
+            terminal_copy: ClipboardCopyMode::ClientBuffer,
             forwarded_x11: false,
             wsl_session: false,
         },
@@ -50,7 +50,7 @@ fn copy_uses_osc52_when_tmux_fails_even_if_native_copy_succeeds() {
         "hello",
         CopyFormat::PlainText,
         CopyEnvironment {
-            terminal_copy: ClipboardCopyMode::Tmux,
+            terminal_copy: ClipboardCopyMode::ClientBuffer,
             forwarded_x11: false,
             wsl_session: false,
         },
@@ -75,9 +75,68 @@ fn copy_uses_osc52_when_tmux_fails_even_if_native_copy_succeeds() {
 
 fn local_tmux_environment() -> CopyEnvironment {
     CopyEnvironment {
-        terminal_copy: ClipboardCopyMode::Tmux,
+        terminal_copy: ClipboardCopyMode::ClientBuffer,
         forwarded_x11: false,
         wsl_session: false,
+    }
+}
+
+#[test]
+fn terminal_only_copy_reports_the_send_result() {
+    let environment = CopyEnvironment {
+        terminal_copy: ClipboardCopyMode::PreferTerminal {
+            client_buffer: false,
+            native_for_large_copies: false,
+        },
+        forwarded_x11: false,
+        wsl_session: false,
+    };
+    for send in [Ok(()), Err("write failed".to_string())] {
+        let result = copy_to_clipboard_with(
+            "hello",
+            CopyFormat::Markdown,
+            environment,
+            |_| panic!("not in tmux"),
+            |text| {
+                assert_eq!(text, "hello");
+                send.clone()
+            },
+            |_, _| panic!("must not write to the container clipboard"),
+            |_| panic!("must not write to the WSL clipboard"),
+        );
+        assert_eq!(
+            result.map(|outcome| outcome.store(&mut None)),
+            send.map(|()| CopyStatus::Unconfirmed)
+        );
+    }
+}
+
+#[test]
+fn oversized_dev_container_copy_can_keep_native_ownership_without_confirming_delivery() {
+    let environment = CopyEnvironment {
+        terminal_copy: ClipboardCopyMode::PreferTerminal {
+            client_buffer: true,
+            native_for_large_copies: true,
+        },
+        ..local_tmux_environment()
+    };
+    for size in [OSC52_MAX_RAW_BYTES, OSC52_MAX_RAW_BYTES + 1] {
+        let text = "x".repeat(size);
+        let result = copy_to_clipboard_with(
+            &text,
+            CopyFormat::PlainText,
+            environment,
+            |_| Ok(()),
+            |_| panic!("no OSC 52 fallback expected"),
+            |actual, _| {
+                assert_eq!(actual, text);
+                Ok(Some(ClipboardLease::test()))
+            },
+            |_| panic!("must not target the WSL clipboard"),
+        );
+        let mut lease = None;
+        assert_eq!(result.unwrap().store(&mut lease), CopyStatus::Unconfirmed);
+        assert_eq!(lease.is_some(), size > OSC52_MAX_RAW_BYTES);
     }
 }
 
@@ -178,7 +237,7 @@ fn confirmed_copy_without_new_lease_preserves_native_ownership() {
 #[test]
 fn screen_forwards_one_complete_osc52_across_bounded_passthrough_strings() {
     for text in ["hello", &"世界".repeat(500)] {
-        let sequence = super::osc52_sequence(text, super::Osc52Target::Screen).unwrap();
+        let sequence = super::osc52_sequence(text, super::Osc52Target::ChunkedDcs).unwrap();
         let chunks = sequence
             .strip_prefix("\x1bP")
             .unwrap()

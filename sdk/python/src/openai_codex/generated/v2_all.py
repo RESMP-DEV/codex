@@ -100,6 +100,14 @@ class AccountUpdateReason(Enum):
     unknown = "unknown"
 
 
+class AccountVoiceOption(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    name: str
+    voice: str
+
+
 class ActivePermissionProfile(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -1062,6 +1070,14 @@ class McpToolConfiguredHookHandler(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    additional_context_limit: Annotated[
+        int | None,
+        Field(
+            alias="additionalContextLimit",
+            description="Approximate token threshold for spilling plaintext `additionalContext` to disk. Defaults to 2,500. For MCP hooks, `0` and values above 10,000 trigger a warning and use 10,000. Command hooks can disable spilling with `0` or set a higher threshold. The MCP ceiling mirrors the current default tool-output budget and may change in the future. Encrypted hook output has a separate byte limit.",
+            ge=0,
+        ),
+    ] = None
     input: dict[str, Any]
     on_failure: Annotated[ConfiguredHookFailurePolicy | None, Field(alias="onFailure")] = None
     server: str
@@ -3937,6 +3953,15 @@ class ProjectRoot(BaseModel):
 class ProjectSortKey(Enum):
     position = "position"
     recency_at = "recencyAt"
+
+
+class PromptWellbeingResult(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    input_item_id: Annotated[str, Field(alias="inputItemId")]
+    labels: list[str]
+    scores: dict[str, float]
 
 
 class OpenaiProviderSettings(BaseModel):
@@ -9362,7 +9387,7 @@ class HookMetadata1(BaseModel):
         int | None,
         Field(
             alias="additionalContextLimit",
-            description="Configured `additionalContext` spill threshold. `null` uses 2,500 tokens; `0` disables spilling.",
+            description="Configured `additionalContext` spill threshold. `null` uses 2,500 approximate tokens. Only command hooks support `0` (no spill) or values above 10,000.",
             ge=0,
         ),
     ] = None
@@ -9399,7 +9424,7 @@ class HookMetadata2(BaseModel):
         int | None,
         Field(
             alias="additionalContextLimit",
-            description="Configured `additionalContext` spill threshold. `null` uses 2,500 tokens; `0` disables spilling.",
+            description="Configured `additionalContext` spill threshold. `null` uses 2,500 approximate tokens. Only command hooks support `0` (no spill) or values above 10,000.",
             ge=0,
         ),
     ] = None
@@ -9436,7 +9461,7 @@ class PromptHookMetadata(BaseModel):
         int | None,
         Field(
             alias="additionalContextLimit",
-            description="Configured `additionalContext` spill threshold. `null` uses 2,500 tokens; `0` disables spilling.",
+            description="Configured `additionalContext` spill threshold. `null` uses 2,500 approximate tokens. Only command hooks support `0` (no spill) or values above 10,000.",
             ge=0,
         ),
     ] = None
@@ -9471,7 +9496,7 @@ class AgentHookMetadata(BaseModel):
         int | None,
         Field(
             alias="additionalContextLimit",
-            description="Configured `additionalContext` spill threshold. `null` uses 2,500 tokens; `0` disables spilling.",
+            description="Configured `additionalContext` spill threshold. `null` uses 2,500 approximate tokens. Only command hooks support `0` (no spill) or values above 10,000.",
             ge=0,
         ),
     ] = None
@@ -11901,6 +11926,9 @@ class AgentMessageModeration(BaseModel):
     )
     display: AgentMessageDisplay | None = None
     moderated: bool
+    prompt_wellbeing_results: Annotated[
+        list[PromptWellbeingResult] | None, Field(alias="promptWellbeingResults")
+    ] = None
 
 
 class AppInfo(BaseModel):

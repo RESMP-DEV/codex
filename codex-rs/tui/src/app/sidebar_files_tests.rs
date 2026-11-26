@@ -63,6 +63,7 @@ fn sidebar_files_chooser_matches_the_grouped_file_inventory() -> color_eyre::eyr
         name: "Reviewer".into(),
         symbol: "○",
         status: "Completed",
+        selectable: true,
     });
     pane.choice = pane.chat_tabs().file_start();
     pane.update_saved_chats(vec![ThreadId::new().into()]);
@@ -497,10 +498,7 @@ fn sidebar_files_keeps_remote_paths_for_the_owning_reader() {
         files.entries,
         vec![FileLink {
             path,
-            location: Some(SourceLocation {
-                line: 12,
-                column: 4
-            }),
+            location: Some(SourceLocation::single(/*line*/ 12, Some(4))),
         }],
     );
 }

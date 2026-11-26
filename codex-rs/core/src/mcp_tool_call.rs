@@ -1536,7 +1536,10 @@ fn build_confirmation_policies_request_meta(
             ("computer_use", confirmation_policies.computer_use.as_ref()),
         ] {
             if let Some(policy) = policy {
-                policies.insert(name.to_string(), serde_json::Value::String(policy.clone()));
+                policies.insert(
+                    name.to_string(),
+                    serde_json::Value::String(policy.to_string()),
+                );
             }
         }
     }
@@ -1957,7 +1960,7 @@ pub(crate) async fn request_mcp_tool_user_approval(
             .await;
         let cancellation_reason = response
             .as_ref()
-            .and_then(|accepted| accepted.response.answers.get(&question_id))
+            .and_then(|response| response.answers.get(&question_id))
             .filter(|answer| {
                 answer
                     .answers
@@ -1971,10 +1974,7 @@ pub(crate) async fn request_mcp_tool_user_approval(
                     .then_some(McpApprovalCancellationReason::Interrupted)
             });
         (
-            parse_mcp_tool_approval_response(
-                response.map(|accepted| accepted.response),
-                &question_id,
-            ),
+            parse_mcp_tool_approval_response(response, &question_id),
             cancellation_reason,
         )
     };

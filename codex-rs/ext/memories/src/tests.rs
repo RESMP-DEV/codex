@@ -276,8 +276,11 @@ async fn add_ad_hoc_note_tool_rejects_invalid_memory_update_xml() {
             model: "gpt-test".to_string(),
             codex_turn_metadata: None,
             truncation_policy: TruncationPolicy::Bytes(1024),
+            source: ToolCallSource::Direct,
             conversation_history: codex_extension_api::ConversationHistory::default(),
             turn_item_emitter: Arc::new(NoopTurnItemEmitter),
+            attachment_store: codex_core::passthrough_image_store(),
+            ephemeral: false,
             environments: Vec::new(),
             payload,
         })
@@ -636,10 +639,7 @@ async fn search_tool_rejects_legacy_single_query() {
     assert!(err.to_string().contains("query"));
 }
 
-fn memory_tool(
-    memory_root: &Path,
-    tool_name: &str,
-) -> Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>> {
+fn memory_tool(memory_root: &Path, tool_name: &str) -> Arc<dyn ToolExecutor> {
     let expected_tool_name = memory_tool_name(tool_name);
     crate::tools::memory_tools(
         LocalMemoriesBackend::from_memory_root(memory_root),

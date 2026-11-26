@@ -234,7 +234,14 @@ impl ChatWidget {
     }
 
     pub(crate) fn as_renderable(&self) -> RenderableItem<'_> {
-        let backdrop = self.as_backdrop_renderable();
+        self.as_renderable_with_options(crate::bottom_pane::ComposerRenderOptions::default())
+    }
+
+    pub(crate) fn as_renderable_with_options<'a>(
+        &'a self,
+        options: crate::bottom_pane::ComposerRenderOptions<'a>,
+    ) -> RenderableItem<'a> {
+        let backdrop = self.as_backdrop_renderable(options);
         match self.centered_dialog() {
             Some(dialog) => RenderableItem::Owned(Box::new(crate::bottom_pane::DialogOverlay {
                 backdrop,
@@ -248,7 +255,10 @@ impl ChatWidget {
         self.bottom_pane.centered_dialog()
     }
 
-    fn as_backdrop_renderable(&self) -> RenderableItem<'_> {
+    fn as_backdrop_renderable<'a>(
+        &'a self,
+        options: crate::bottom_pane::ComposerRenderOptions<'a>,
+    ) -> RenderableItem<'a> {
         if self
             .bottom_pane
             .selected_index_for_active_view(crate::app::AGENTS_OVERVIEW_VIEW_ID)
@@ -259,13 +269,13 @@ impl ChatWidget {
                     .selected_index_for_present_view(crate::app::AGENTS_OVERVIEW_VIEW_ID)
                     .is_some())
         {
-            return self
-                .bottom_pane_renderable(crate::bottom_pane::ComposerRenderOptions::default());
+            return self.bottom_pane_renderable(options);
         }
 
         let active_cell_right_reserve = self.ambient_pet_wrap_reserved_cols();
         let active_cell_renderable = match &self.transcript.active_cell {
             Some(cell) => RenderableItem::Owned(Box::new(TranscriptAreaRenderable {
+                bidi_layout: self.bidi_layout,
                 child: cell.as_ref(),
                 // The initial header becomes the first history cell, which has no leading separator.
                 top: if cell.as_any().is::<history_cell::SessionHeaderHistoryCell>() {
@@ -300,6 +310,7 @@ impl ChatWidget {
             flex.push(
                 /*flex*/ 1,
                 RenderableItem::Owned(Box::new(TranscriptAreaRenderable {
+                    bidi_layout: self.bidi_layout,
                     child: cell.as_ref(),
                     top: 1,
                     right: active_cell_right_reserve,
@@ -312,6 +323,7 @@ impl ChatWidget {
             flex.push(
                 /*flex*/ 1,
                 RenderableItem::Owned(Box::new(TranscriptAreaRenderable {
+                    bidi_layout: self.bidi_layout,
                     child: cell,
                     top: 1,
                     right: active_cell_right_reserve,
@@ -321,10 +333,9 @@ impl ChatWidget {
         }
         flex.push(
             /*flex*/ 0,
-            self.bottom_pane_renderable(crate::bottom_pane::ComposerRenderOptions::default())
-                .inset(Insets::tlbr(
-                    /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
-                )),
+            self.bottom_pane_renderable(options).inset(Insets::tlbr(
+                /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
+            )),
         );
         RenderableItem::Owned(Box::new(flex))
     }
@@ -366,6 +377,17 @@ impl ChatWidget {
             };
             options.rendered_selection = Some(&self.rendered_selection);
             options.image_previews = self.composer_images.as_ref();
+            if self.turn_lifecycle.agent_turn_running
+                && !self.statusline_disconnected
+                && self.bottom_pane.status_widget().is_none()
+                && self.input_queue.pending_steers.is_empty()
+                && (self.stream_controller.is_some() || self.plan_stream_controller.is_some())
+            {
+                options.stream_interrupt_key = self
+                    .bottom_pane
+                    .keymap()
+                    .primary_hint(KeymapContext::Chat, "interrupt_turn");
+            }
             options.warning_count = self.warning_display_state.count;
             options.textarea_right_reserve = right_reserve;
             options.separate_status_line = options.command_popup_placement
@@ -446,12 +468,27 @@ impl ChatWidget {
         (!lines.is_empty()).then_some(lines)
     }
 
+    /// Discard offscreen renders. Only a successful terminal draw changes key routing.
+    pub(crate) fn begin_steer_hint_draw(&self) {
+        self.bottom_pane.take_painted_steer_hint();
+    }
+
+    pub(crate) fn finish_steer_hint_draw(&mut self) {
+        self.turn_lifecycle.steer_hint =
+            if self.bottom_pane.take_painted_steer_hint() && self.no_modal_or_popup_active() {
+                SteerHint::Pending
+            } else {
+                SteerHint::Hidden
+            };
+    }
+
     pub(crate) fn note_rendered_width(&self, width: u16) {
         self.last_rendered_width.set(Some(width));
     }
 }
 
 struct TranscriptAreaRenderable<'a> {
+    bidi_layout: bool,
     child: &'a dyn HistoryCell,
     top: u16,
     right: u16,
@@ -468,7 +505,10 @@ struct PersistentActiveCellLayout<'a> {
 impl Renderable for TranscriptAreaRenderable<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let area = self.child_area(area);
-        let lines = self.child.display_hyperlink_lines(area.width);
+        let mut lines = self.child.display_hyperlink_lines(area.width);
+        if self.bidi_layout {
+            crate::terminal_hyperlinks::bidi::paint_rows(&mut lines, usize::from(area.width));
+        }
         let paragraph = HyperlinkParagraph::new(&lines, Style::default());
         let y = if area.height == 0 {
             0

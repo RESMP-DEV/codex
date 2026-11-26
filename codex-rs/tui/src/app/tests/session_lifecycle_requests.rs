@@ -1841,9 +1841,6 @@ pub(super) enum HistoryCapabilities {
     ConfigReadUnsupported(i64),
     ConfigReadFails,
     SuperBindingsUnsupported,
-    ConfigReadUnknownVoice,
-    VoiceCatalogCustom,
-    VoiceCatalogUnavailable,
 }
 
 /// Returns and resets `(thread/loaded/list, thread/read)` request counts.
@@ -2137,17 +2134,6 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                                     .to_string(),
                             },
                         })
-                    } else if history_capabilities == HistoryCapabilities::VoiceCatalogUnavailable
-                        && request.method == "thread/realtime/listVoices"
-                    {
-                        JSONRPCMessage::Error(JSONRPCError {
-                            id: request_id,
-                            error: JSONRPCErrorError {
-                                code: -32601,
-                                data: None,
-                                message: "method not found".to_string(),
-                            },
-                        })
                     } else if matches!(
                         history_capabilities,
                         HistoryCapabilities::ThreadStartFails
@@ -2284,26 +2270,9 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                                 },
                             })
                         } else {
-                            let unknown_voice = history_capabilities
-                                == HistoryCapabilities::ConfigReadUnknownVoice
-                                && matches!(&request, ClientRequest::ConfigRead { .. });
-                            let custom_voice_catalog = history_capabilities
-                                == HistoryCapabilities::VoiceCatalogCustom
-                                && matches!(
-                                    &request,
-                                    ClientRequest::ThreadRealtimeListVoices { .. }
-                                );
                             let mut result = embedded.request(request).await?;
                             if advertise_paginated && let Ok(value) = &mut result {
                                 value["thread"]["historyMode"] = serde_json::json!("paginated");
-                            }
-                            if unknown_voice && let Ok(value) = &mut result {
-                                value["config"]["realtime"]["voice"] =
-                                    serde_json::json!("future_voice");
-                            }
-                            if custom_voice_catalog && let Ok(value) = &mut result {
-                                value["voices"]["v3"] =
-                                    serde_json::json!(["maple", "cove", "juniper"]);
                             }
                             if background {
                                 let terminal = r#"{"data":[{"itemId":"x","processId":"x","command":"x","cwd":"/"}],"nextCursor":null}"#;
@@ -2903,8 +2872,8 @@ async fn delete_current_thread_navigates_only_after_success() -> Result<()> {
         assert_eq!(
             recorded_params(&requests, "thread/delete"),
             vec![
-                serde_json::json!({"threadId": missing_id.to_string()}),
-                serde_json::json!({"threadId": thread_id.to_string()}),
+                serde_json::json!({"threadId": missing_id.to_string(), "savedSideChatIds": null}),
+                serde_json::json!({"threadId": thread_id.to_string(), "savedSideChatIds": null}),
             ]
         );
         server.shutdown().await?;
@@ -3889,6 +3858,7 @@ async fn embedded_server_dispatches_only_its_own_dynamic_tools() -> Result<()> {
                 ServerRequest::DynamicToolCall {
                     request_id: AppServerRequestId::Integer(id),
                     params: codex_app_server_protocol::DynamicToolCallParams {
+                        supported_result_format: None,
                         thread_id: "thread-1".to_string(),
                         turn_id: "turn-1".to_string(),
                         call_id: "call-1".to_string(),
@@ -4032,6 +4002,7 @@ async fn check_dynamic_tool_requests(
                 ServerRequest::DynamicToolCall {
                     request_id: AppServerRequestId::Integer(100),
                     params: codex_app_server_protocol::DynamicToolCallParams {
+                        supported_result_format: None,
                         thread_id: thread_id.clone(),
                         turn_id: "turn-1".to_string(),
                         call_id: "call-1".to_string(),
@@ -4052,6 +4023,7 @@ async fn check_dynamic_tool_requests(
             ServerRequest::DynamicToolCall {
                 request_id: AppServerRequestId::Integer(101),
                 params: codex_app_server_protocol::DynamicToolCallParams {
+                    supported_result_format: None,
                     thread_id: thread_id.clone(),
                     turn_id: "turn-1".to_string(),
                     call_id: "call-2".to_string(),
@@ -4111,6 +4083,7 @@ async fn check_dynamic_tool_requests(
             ServerRequest::DynamicToolCall {
                 request_id: AppServerRequestId::Integer(102),
                 params: codex_app_server_protocol::DynamicToolCallParams {
+                    supported_result_format: None,
                     thread_id: thread_id.clone(),
                     turn_id: "turn-1".to_string(),
                     call_id: "call-3".to_string(),
@@ -4145,6 +4118,7 @@ async fn check_dynamic_tool_requests(
                 ServerRequest::DynamicToolCall {
                     request_id: AppServerRequestId::String(format!("rejected-{index}")),
                     params: codex_app_server_protocol::DynamicToolCallParams {
+                        supported_result_format: None,
                         thread_id: thread_id.clone(),
                         turn_id: "turn-1".to_string(),
                         call_id: format!("rejected-{index}"),
@@ -4224,6 +4198,7 @@ async fn check_dynamic_tool_requests(
         &app_server,
         AppServerRequestId::Integer(103),
         codex_app_server_protocol::DynamicToolCallParams {
+            supported_result_format: None,
             thread_id: creation_source.to_string(),
             turn_id: "turn-1".to_string(),
             call_id: "call-4".to_string(),
@@ -4348,6 +4323,7 @@ async fn check_dynamic_tool_requests(
         &app_server,
         AppServerRequestId::Integer(104),
         codex_app_server_protocol::DynamicToolCallParams {
+            supported_result_format: None,
             thread_id: thread_id.clone(),
             turn_id: "turn-1".to_string(),
             call_id: "call-5".to_string(),
@@ -4894,6 +4870,7 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
     let response = crate::dynamic_tools::execute(
         app_server.request_handle(),
         codex_app_server_protocol::DynamicToolCallParams {
+            supported_result_format: None,
             thread_id: started.session.thread_id.to_string(),
             turn_id: "source-turn".to_string(),
             call_id: "legacy-wait".to_string(),
@@ -5094,7 +5071,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
         model_context_window: None,
         collaboration_mode_kind: Default::default(),
     }))
-    .chain((0..120).map(|index| {
+    .chain((0..420).map(|index| {
         EventMsg::ItemCompleted(ItemCompletedEvent {
             content_token_count: None,
             thread_id,
@@ -5167,7 +5144,7 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
         .await?;
     app.transcript_cells = initial_cells;
     app.scrollback_has_older_history = app_server.has_older_history(thread_id);
-    app.local_settings.tui.terminal_resize_reflow_max_rows = Some(32);
+    app.local_settings.tui.terminal_resize_reflow_max_rows = Some(650);
     let initial_cell_count = app.transcript_cells.len();
     let initial_page_requests = recorded_params(&requests, "thread/items/list").len();
     let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -5229,27 +5206,76 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
     };
     // Keep the large dispatcher future off the Windows test thread's stack.
     Box::pin(app.handle_event(&mut tui, &mut app_server, request)).await?;
-    let loaded = loop {
-        match app_event_rx.recv().await {
-            Some(event @ AppEvent::OlderThreadHistoryLoaded { .. }) => break event,
-            Some(_) => {}
-            None => panic!("older history page channel closed"),
+    // Fail the second page, retry it, then hold the next response past the replay deadline.
+    let size = tui.terminal.last_known_screen_size;
+    for attempt in 1..=5 {
+        let mut loaded = loop {
+            match app_event_rx.recv().await {
+                Some(event @ AppEvent::OlderThreadHistoryLoaded { .. }) => break event,
+                Some(_) => {}
+                None => panic!("older history page channel closed"),
+            }
+        };
+        if attempt == 2
+            && let AppEvent::OlderThreadHistoryLoaded { result, .. } = &mut loaded
+        {
+            *result = Err("page unavailable".to_string());
         }
-    };
-    Box::pin(app.handle_event(&mut tui, &mut app_server, loaded)).await?;
+        Box::pin(app.handle_event(&mut tui, &mut app_server, loaded)).await?;
+        assert_eq!(
+            app.transcript_reflow.has_pending_reflow(),
+            matches!(attempt, 2 | 5),
+            "after page request {attempt}"
+        );
+        if attempt == 3 {
+            *app.transcript_reflow
+                .refill_deadline
+                .as_mut()
+                .expect("buffered page") = Instant::now();
+        }
+        if matches!(attempt, 2 | 3) {
+            app.maybe_run_resize_reflow(&mut tui, size)?;
+            let oldest = tui
+                .pending_history_lines_for_test()
+                .into_iter()
+                .map(|row| row.line.to_string())
+                .find(|line| line.contains("scrollback output"))
+                .expect("queued history");
+            if attempt == 2 {
+                insta::assert_snapshot!(oldest, @"• scrollback output 312");
+                while let Ok(event) = app_event_rx.try_recv() {
+                    assert!(!matches!(
+                        event,
+                        AppEvent::RequestOlderScrollbackHistory { .. }
+                    ));
+                }
+                assert!(app.request_older_history_page(&mut app_server, thread_id));
+            } else {
+                insta::assert_snapshot!(oldest, @"• scrollback output 212");
+                assert!(app_server.pending_older_history_cursor(thread_id).is_some());
+            }
+        }
+    }
 
     assert!(app.overlay.is_none());
-    assert!(app.transcript_cells.len() > initial_cell_count);
+    assert_eq!(app.transcript_cells.len(), initial_cell_count + 400);
     assert_eq!(
         recorded_params(&requests, "thread/items/list").len(),
-        initial_page_requests + 1
+        initial_page_requests + 5
     );
-    assert_eq!(
-        app.render_transcript_lines_for_reflow(/*width*/ 80)
-            .lines
-            .len(),
-        32
-    );
+    app.maybe_run_resize_reflow(&mut tui, size)?;
+    let queued = tui.pending_history_lines_for_test();
+    assert_eq!(queued.len(), 650);
+    let oldest_rows = queued[..4]
+        .iter()
+        .map(|row| row.line.to_string())
+        .collect::<Vec<_>>();
+    insta::assert_snapshot!(oldest_rows.join("\n"), @"
+    Earlier messages are available — press ⌃t to view the full transcript
+    • scrollback output 95
+
+    • scrollback output 96
+    ");
 
     app_server.shutdown().await?;
     proxy.await??;

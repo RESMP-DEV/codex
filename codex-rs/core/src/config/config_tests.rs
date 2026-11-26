@@ -101,7 +101,6 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::MultiAgentVersion;
-use codex_protocol::protocol::RealtimeVoice;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol_test_support::ContentItemTestExt;
 use codex_utils_path_uri::LegacyAppPathString;
@@ -1476,7 +1475,7 @@ fn config_toml_deserializes_model_availability_nux() {
             question_esc_back: true,
             raw_output_mode: false,
             fullscreen_transcript: true,
-            collapse_turn_details: false,
+            collapse_turn_details: true,
             sidebar_width_percent: None,
             mouse_scroll_speed: None,
             copy_on_select: Default::default(),
@@ -4823,7 +4822,7 @@ fn tui_config_missing_notifications_field_defaults_to_enabled() {
             question_esc_back: true,
             raw_output_mode: false,
             fullscreen_transcript: true,
-            collapse_turn_details: false,
+            collapse_turn_details: true,
             sidebar_width_percent: None,
             mouse_scroll_speed: None,
             copy_on_select: Default::default(),
@@ -6247,8 +6246,8 @@ async fn mcp_launch_cwds_follow_the_runtime_feature() -> anyhow::Result<()> {
     });
     let plugins_manager =
         plugins_manager_for_config(&config, auth_manager_from_optional_auth(/*auth*/ None));
-    assert!(!config.features.enabled(Feature::McpSharedReplCwd));
-    for enabled in [false, true, false] {
+    assert!(config.features.enabled(Feature::McpSharedReplCwd));
+    for enabled in [true, false, true] {
         let mut incoming = config.clone();
         incoming
             .features
@@ -12649,6 +12648,7 @@ async fn explicit_feature_config_is_normalized_by_requirements() -> std::io::Res
 [features]
 view_image = false
 shell_tool = true
+guardianv3.shadow_enabled = true
 "#,
     )?;
 
@@ -12661,6 +12661,7 @@ shell_tool = true
 [features]
 view_image = true
 shell_tool = false
+"guardianv3.shadow_enabled" = false
 "#,
             ),
         )
@@ -12669,6 +12670,7 @@ shell_tool = false
 
     assert!(config.features.enabled(Feature::ViewImage));
     assert!(!config.features.enabled(Feature::ShellTool));
+    assert!(!config.features.enabled(Feature::GuardianV3Shadow));
     assert!(
         !config
             .startup_warnings
@@ -14098,30 +14100,21 @@ experimental_realtime_ws_model = "realtime-test-model"
 }
 
 #[tokio::test]
-async fn realtime_config_partial_table_uses_realtime_defaults() -> std::io::Result<()> {
-    let cfg: ConfigToml = toml::from_str(
-        r#"
-[realtime]
-voice = "marin"
-"#,
-    )
-    .expect("TOML deserialization should succeed");
-
+async fn realtime_config_with_legacy_voice_uses_realtime_defaults() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
-    let config = Config::load_from_base_config_with_overrides(
-        cfg,
-        ConfigOverrides::default(),
-        codex_home.abs(),
-    )
-    .await?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "[realtime]\nvoice = \"marin\"",
+    )?;
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+        .strict_config(/*strict_config*/ true)
+        .build()
+        .await?;
 
-    assert_eq!(
-        config.realtime,
-        RealtimeConfig {
-            voice: Some(RealtimeVoice::Marin),
-            ..RealtimeConfig::default()
-        }
-    );
+    assert_eq!(config.realtime, RealtimeConfig::default());
     Ok(())
 }
 
@@ -14133,7 +14126,6 @@ async fn realtime_loads_from_config_toml() -> std::io::Result<()> {
 version = "v2"
 type = "transcription"
 transport = "webrtc"
-voice = "cedar"
 "#,
     )
     .expect("TOML deserialization should succeed");
@@ -14144,7 +14136,7 @@ voice = "cedar"
             version: Some(RealtimeWsVersion::V2),
             session_type: Some(RealtimeWsMode::Transcription),
             transport: Some(RealtimeTransport::WebRtc),
-            voice: Some(RealtimeVoice::Cedar),
+            ..RealtimeToml::default()
         })
     );
 
@@ -14162,7 +14154,6 @@ voice = "cedar"
             version: RealtimeWsVersion::V2,
             session_type: RealtimeWsMode::Transcription,
             transport: RealtimeTransport::WebRtc,
-            voice: Some(RealtimeVoice::Cedar),
         }
     );
     Ok(())

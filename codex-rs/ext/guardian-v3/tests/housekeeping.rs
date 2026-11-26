@@ -8,7 +8,9 @@ use codex_core::CodexThread;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_core::config::GuardianInferenceProvider;
+use codex_core::context::GuardianReviewEvidence;
 use codex_core::guardian_review::AttachedReviewer;
+use codex_core::guardian_review::PreserveReviewWrites;
 use codex_core::guardian_review::ReviewPreparationError;
 use codex_core::guardian_review::prepare_review_prewarm;
 use codex_extension_api::ExtensionData;
@@ -16,6 +18,8 @@ use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadReadyInput;
 use codex_extension_api::ThreadStopInput;
+use codex_extension_api::TurnLifecycleContributor;
+use codex_extension_api::TurnStopInput;
 use codex_features::Feature;
 use codex_features::GuardianV3HousekeeperConfigToml;
 use codex_guardian_reviewer::GUARDIAN_FOLLOWUP_REVIEW_REMINDER;
@@ -26,7 +30,6 @@ use codex_guardian_v3::Housekeeper;
 use codex_guardian_v3::LiveDelivery;
 use codex_guardian_v3::LiveRetrievalBinding;
 use codex_guardian_v3::PreparedReviewer;
-use codex_guardian_v3::RootEvidence;
 use codex_guardian_v3::local_board;
 use codex_history::CodexHarnessMetadata;
 use codex_history::HistoryInitialization;
@@ -41,10 +44,12 @@ use codex_message_board::SortDirection;
 use codex_message_board::UpsertChannelRequest;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::approvals::GuardianAssessmentStatus;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -59,6 +64,8 @@ use core_test_support::context_snapshot::ContextSnapshotOptions;
 use core_test_support::responses::*;
 use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::test_codex;
+use core_test_support::tracing::NamedTraceEvents;
+use core_test_support::wait_for_event_match;
 use core_test_support::wait_for_successful_turn;
 use pretty_assertions::assert_eq;
 use reviewer_tool_call::invoke;
@@ -640,6 +647,7 @@ async fn root_shutdown_waits_for_the_accepted_evidence_append() -> anyhow::Resul
     .await;
     let release_401 = server.gate_response_event(&unauthorized);
     let test = test_codex()
+        .with_thread_extension(PreserveReviewWrites)
         .with_home(Arc::clone(&home))
         .with_auth_manager(auth)
         .with_history_mode(ThreadHistoryMode::Paginated)
@@ -916,6 +924,7 @@ struct ReviewerFixture {
     child: Arc<CodexThread>,
     session: ExtensionData,
     lifecycle: Arc<dyn ThreadLifecycleContributor<Config>>,
+    turns: Arc<dyn TurnLifecycleContributor>,
     host: Arc<PausedClockHost>,
 }
 
@@ -926,6 +935,7 @@ async fn reviewer_fixture(
     let named = matches!(kind, ChildKind::Named);
     let url = prewarm.map(|server| format!("{}/v1", server.uri()));
     let builder = test_codex()
+        .with_thread_extension(PreserveReviewWrites)
         .with_pre_build_hook(|home| {
             std::fs::write(
                 home.join("config.toml"),
@@ -1006,12 +1016,14 @@ retrieval_instructions = "{RETRIEVAL}"
         config.approvals_reviewer = ApprovalsReviewer::AutoReview;
         config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
     }
+    let registry = registry.build();
     let fixture = ReviewerFixture {
         config,
         root: Arc::clone(&test.codex),
         child: child.thread,
         session: ExtensionData::new(root.to_string()),
-        lifecycle: Arc::clone(&registry.build().thread_lifecycle_contributors()[0]),
+        lifecycle: Arc::clone(&registry.thread_lifecycle_contributors()[0]),
+        turns: Arc::clone(&registry.turn_lifecycle_contributors()[0]),
         host,
         harness,
     };
@@ -1059,6 +1071,7 @@ impl ReviewerFixture {
         let test = self.harness.test();
         let root = test.session_configured.thread_id;
         let mut resume = test.start_thread_options().await;
+        resume.thread_extension_init.insert(PreserveReviewWrites);
         test.thread_manager
             .remove_thread(&root)
             .await
@@ -1101,11 +1114,14 @@ impl ReviewerFixture {
         Ok(())
     }
 
-    fn intake(&self) -> Arc<RootEvidence> {
-        self.root
-            .thread_extension_data()
-            .get::<RootEvidence>()
-            .expect("root intake")
+    async fn finish_turn(&self) {
+        self.turns
+            .on_turn_stop(TurnStopInput {
+                session_store: &self.session,
+                thread_store: self.root.thread_extension_data(),
+                turn_store: &ExtensionData::new("turn"),
+            })
+            .await;
     }
 
     async fn load_reviewer(
@@ -1140,21 +1156,15 @@ fn reply(id: &str, text: &str) -> String {
     sse(vec![ev_assistant_message(id, text), ev_completed(id)])
 }
 
-async fn reserve(
-    thread: &CodexThread,
-    evidence: &RootEvidence,
-) -> Result<PreparedReviewer, ReviewPreparationError> {
+async fn reserve(thread: &CodexThread) -> Result<PreparedReviewer, ReviewPreparationError> {
     let actor = thread
         .thread_extension_data()
         .get::<ActorReviewer>()
         .expect("reviewer installed");
-    let retrieval = Arc::clone(&actor).bind().retrieval;
-    let context = prepare_review_prewarm(thread, retrieval)
+    let context = prepare_review_prewarm(thread, actor.retrieval())
         .await
         .expect("review setup");
-    actor
-        .reserve(evidence, &context, &CancellationToken::new())
-        .await
+    actor.reserve(&context, &CancellationToken::new()).await
 }
 
 async fn run_turn(reviewer: &CodexThread, text: &str) -> anyhow::Result<()> {
@@ -1200,19 +1210,20 @@ async fn subscribed_evidence_reaches_the_retained_reviewer_when_it_becomes_idle(
             .get::<ActorReviewer>()
             .is_none()
     );
-    let intake = fixture.intake();
-    let first = reserve(&fixture.root, &intake).await?;
+    let first = reserve(&fixture.root).await?;
     let id = first.thread_id();
     let (reviewer, binding) = fixture.load_reviewer(id).await?;
     invoke(&binding, "subscribe", json!({"channel_name":"release"})).await?;
     let routing = fixture.mock_reply("route", CREATE_RELEASE).await;
     fixture.record(/*order*/ 1, REVOCATION).await?;
-    intake.request_catch_up().await?.await?;
+    let mut routed = NamedTraceEvents::subscribe("guardian_v3.housekeeping_routed");
+    fixture.finish_turn().await;
+    routed.next().await?;
     assert!(!has_revocation(&reviewer).await);
     first.finish(SessionDisposition::Reusable);
     wait_for_revocation(&reviewer).await?;
 
-    let second = reserve(&fixture.root, &intake).await?;
+    let second = reserve(&fixture.root).await?;
     assert_eq!(id, second.thread_id());
     let request = &fixture.verdict(&reviewer).await?;
     let routing_request = routing.single_request();
@@ -1236,7 +1247,7 @@ async fn subscribed_evidence_reaches_the_retained_reviewer_when_it_becomes_idle(
     );
 
     drop(second);
-    let third = reserve(&fixture.root, &intake).await?;
+    let third = reserve(&fixture.root).await?;
     assert_ne!(id, third.thread_id());
     let (replacement, binding) = fixture.load_reviewer(third.thread_id()).await?;
     assert!(has_revocation(&replacement).await);
@@ -1317,7 +1328,27 @@ async fn first_approval_reuses_the_prewarmed_root_reviewer() -> anyhow::Result<(
             }),
         )
         .await?;
+    let review_id = wait_for_event_match(&fixture.root, |event| match event {
+        EventMsg::GuardianAssessment(review)
+            if review.status == GuardianAssessmentStatus::Approved =>
+        {
+            Some(review.id.clone())
+        }
+        _ => None,
+    })
+    .await;
     wait_for_successful_turn(&fixture.root).await;
+    let reviews = fixture
+        .root
+        .thread_extension_data()
+        .get::<GuardianReviewEvidence>()
+        .expect("shared review evidence")
+        .snapshot();
+    let [saved] = reviews.as_slice() else {
+        anyhow::bail!("expected one saved GV3 verdict");
+    };
+    assert_eq!(saved.correlation["review_id"], review_id);
+    assert_eq!(saved.decision["status"], "approved");
     let output = responses
         .requests()
         .iter()
@@ -1350,19 +1381,22 @@ async fn first_approval_reuses_the_prewarmed_root_reviewer() -> anyhow::Result<(
 }
 
 #[tokio::test]
-async fn child_can_search_pending_evidence_on_first_review_after_root_reload() -> anyhow::Result<()>
-{
+async fn first_child_review_can_start_while_root_reload_is_still_routing() -> anyhow::Result<()> {
     core_test_support::skip_if_no_network!(Ok(()));
     let mut fixture = reviewer_fixture(ChildKind::Named, /*prewarm*/ None).await?;
     fixture.record(/*order*/ 1, REVOCATION).await?;
     fixture.stop(&fixture.root).await?;
     fixture.mock_reply("resume", CREATE_RELEASE).await;
+    fixture.host.pause_next.store(true, Ordering::SeqCst);
+    let mut routed = NamedTraceEvents::subscribe("guardian_v3.housekeeping_routed");
     fixture.resume_root().await?;
+    tokio::time::timeout(Duration::from_secs(15), fixture.host.started.notified()).await?;
 
-    let intake = fixture.intake();
-    intake.request_catch_up().await?.await?;
-    let first = reserve(&fixture.child, &intake).await?;
+    // Reserve while the board write is paused. The same reviewer can read it once published.
+    let first = reserve(&fixture.child).await?;
     let (_, binding) = fixture.load_reviewer(first.thread_id()).await?;
+    fixture.host.release.notify_one();
+    routed.next().await?;
     let result = invoke(&binding, "search_posts", json!({"query": REVOCATION})).await?;
     let preview = result["results"][0]["text_preview"]
         .as_str()
@@ -1380,7 +1414,7 @@ async fn child_keeps_searched_and_subscribed_evidence_after_root_reload() -> any
     const AFTER_RESUME: &str = "Keep the release on hold.";
 
     let mut fixture = reviewer_fixture(ChildKind::Named, /*prewarm*/ None).await?;
-    let original = fixture.intake();
+    let mut routed = NamedTraceEvents::subscribe("guardian_v3.housekeeping_routed");
     // Only a search of the unsubscribed audit channel can supply this instruction.
     let seed = json!({
         "routes": [["audit"], ["release"]],
@@ -1392,8 +1426,9 @@ async fn child_keeps_searched_and_subscribed_evidence_after_root_reload() -> any
     fixture.mock_reply("seed", &seed.to_string()).await;
     fixture.record(/*order*/ 1, AUDIT).await?;
     fixture.record(/*order*/ 2, "Plan the release.").await?;
-    original.request_catch_up().await?.await?;
-    let first = reserve(&fixture.child, &original).await?;
+    fixture.finish_turn().await;
+    routed.next().await?;
+    let first = reserve(&fixture.child).await?;
     let id = first.thread_id();
     let (reviewer, binding) = fixture.load_reviewer(id).await?;
     invoke(&binding, "subscribe", json!({"channel_name":"release"})).await?;
@@ -1426,7 +1461,7 @@ async fn child_keeps_searched_and_subscribed_evidence_after_root_reload() -> any
     fixture.record(/*order*/ 3, GRANT).await?;
     fixture.record(/*order*/ 4, REVOCATION).await?;
     fixture.host.pause_next.store(true, Ordering::SeqCst);
-    let pending = original.request_catch_up().await?;
+    fixture.finish_turn().await;
     tokio::time::timeout(Duration::from_secs(15), fixture.host.started.notified()).await?;
     {
         let shutdown = fixture.stop(&fixture.root);
@@ -1435,29 +1470,22 @@ async fn child_keeps_searched_and_subscribed_evidence_after_root_reload() -> any
         fixture.host.release.notify_one();
         shutdown.await?;
     }
-    assert!(pending.await.is_err());
 
-    // Reload starts the write before any review. Catch-up waits for the same write.
+    // Reload resumes at the surviving child's published position.
     fixture.mock_reply("resume", TO_RELEASE).await;
-    fixture.host.pause_next.store(true, Ordering::SeqCst);
     fixture.resume_root().await?;
-    tokio::time::timeout(Duration::from_secs(15), fixture.host.started.notified()).await?;
-    let current = fixture.intake();
-    let caught_up = current.request_catch_up().await?;
-    tokio::pin!(caught_up);
-    assert!(futures::poll!(caught_up.as_mut()).is_pending());
-    fixture.host.release.notify_one();
-    caught_up.await?;
+    let child = fixture.child.thread_extension_data();
+    let actor = child.get::<ActorReviewer>().expect("child reviewer");
+    let reviewer_root = actor.root_thread().await.expect("reloaded root");
+    assert!(Arc::ptr_eq(&reviewer_root, &fixture.root));
+    routed.next().await?;
     wait_for_revocation(&reviewer).await?;
 
     fixture.mock_reply("route", TO_RELEASE).await;
     fixture.record(/*order*/ 5, AFTER_RESUME).await?;
-    current.request_catch_up().await?.await?;
-    assert!(matches!(
-        reserve(&fixture.child, &original).await,
-        Err(ReviewPreparationError::EvidenceUnavailable)
-    ));
-    let second = reserve(&fixture.child, &current).await?;
+    fixture.finish_turn().await;
+    routed.next().await?;
+    let second = reserve(&fixture.child).await?;
     assert_eq!(id, second.thread_id());
     let request = fixture.verdict(&reviewer).await?;
     assert!(

@@ -1310,10 +1310,12 @@ async fn local_layers_keep_raw_paths_order_and_legacy_requirements() {
 }
 
 #[test]
-fn project_config_cannot_supply_guardian_v3_prompts_or_their_cap() {
+fn project_config_cannot_override_guardian_v3_prompts_limits_or_shadow_toggle() {
     let mut project: TomlValue = toml::toml! {
         [features.guardianv3]
         max_instruction_tokens = 1
+        shadow_board_limit_mib = 512
+        shadow_enabled = true
         [features.guardianv3.housekeeper]
         routing_instructions = "Use project routing"
         batch_timeout_ms = 15000
@@ -1340,6 +1342,8 @@ fn project_config_cannot_supply_guardian_v3_prompts_or_their_cap() {
         ignored,
         [
             "features.guardianv3.max_instruction_tokens",
+            "features.guardianv3.shadow_board_limit_mib",
+            "features.guardianv3.shadow_enabled",
             "features.guardianv3.housekeeper.routing_instructions",
             "features.guardianv3.reviewer.retrieval_instructions",
         ]
@@ -1359,15 +1363,46 @@ fn project_config_cannot_supply_guardian_v3_prompts_or_their_cap() {
 }
 
 #[test]
-fn project_config_cannot_change_system_proxy_routing_or_credential_masking() {
+fn project_config_ignores_positional_guardian_v3_settings() {
+    let mut project: TomlValue =
+        toml::from_str("features.guardianv3 = [512, true, true, true, {}, {}, 1]").unwrap();
+    let sanitize = |project: &mut TomlValue| {
+        sanitize_project_config(project, CredentialBrokerProjectState::Unconfigured, &[])
+    };
+    assert_eq!(sanitize(&mut project), ["features.guardianv3"]);
+    assert!(project["features"].get("guardianv3").is_none());
+
+    let mut project: TomlValue = toml::toml! {
+        [features.guardianv3]
+        enabled = true
+        housekeeper = ["Use project routing", 15000]
+        reviewer = ["Use project retrieval"]
+    }
+    .into();
+    assert_eq!(
+        sanitize(&mut project),
+        [
+            "features.guardianv3.housekeeper",
+            "features.guardianv3.reviewer"
+        ]
+    );
+    assert_eq!(
+        project,
+        toml::toml! { [features.guardianv3] enabled = true }.into()
+    );
+}
+
+#[test]
+fn project_config_cannot_change_protected_features() {
     for key in [
         "respect_system_proxy",
         "system_proxy_fallback",
         "credential_masking",
+        "guardianv3.shadow_enabled",
     ] {
         for enabled in [false, true] {
             let mut config: TomlValue =
-                toml::from_str(&format!("[features]\n{key} = {enabled}\nplugins = true"))
+                toml::from_str(&format!("[features]\n'{key}' = {enabled}\nplugins = true"))
                     .expect("valid project config");
             let ignored = sanitize_project_config(
                 &mut config,

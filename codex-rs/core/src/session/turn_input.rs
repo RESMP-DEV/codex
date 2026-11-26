@@ -25,11 +25,12 @@ use super::thread_settings;
 use super::turn_context::NewTurnContextOptions;
 use super::turn_context::TurnContext;
 use crate::WithTurnExtensionData;
+use crate::agent::helper_daybreak::goal::GoalDaybreakAdmission;
 use crate::agent::helper_daybreak::turn::HelperTurnAdmission;
 use crate::context::ContextualUserFragment;
 use crate::context::GuardianSenderMessages;
+use crate::context::world_state::AdditionalContextState;
 use crate::state::ActiveTurn;
-use crate::state::AdditionalContextFormat;
 use crate::state::TurnState;
 use crate::tasks::RegularTask;
 use codex_features::Feature;
@@ -109,6 +110,7 @@ impl TurnStartKind {
 struct PreparedTurnInputSettings {
     thread_settings_update: Option<SessionSettingsUpdate>,
     start_options: TurnStartOptions,
+    goal_daybreak: Option<Arc<GoalDaybreakAdmission>>,
 }
 
 impl PreparedTurnInputSettings {
@@ -139,6 +141,7 @@ impl PreparedTurnInputSettings {
         Ok(Self {
             thread_settings_update,
             start_options,
+            goal_daybreak: None,
         })
     }
 
@@ -189,6 +192,7 @@ impl PreparedTurnInputSettings {
             prompt_cache_ttl,
             cyber_access_program,
             helper_admission,
+            goal_daybreak: self.goal_daybreak.map(|admission| admission.0.clone()),
         };
         let turn_context = match kind {
             TurnStartKind::User | TurnStartKind::Recovery => Some(
@@ -300,12 +304,21 @@ pub(super) async fn handle_realtime_handoff(
 )]
 async fn handle_inner(
     session: &Arc<Session>,
-    request: WithTurnExtensionData<TurnInputRequest>,
+    mut request: WithTurnExtensionData<TurnInputRequest>,
     mode: TurnInputMode,
     submission_id: String,
     realtime_handoff_id: Option<uuid::Uuid>,
 ) -> CodexResult<TurnInputSubmission> {
     session.conversation.check_history_recovery()?;
+    let goal_daybreak = request
+        .turn_extension_init
+        .as_mut()
+        .and_then(codex_extension_api::ExtensionDataInit::remove::<GoalDaybreakAdmission>);
+    if goal_daybreak.is_some() {
+        // Only Core's goal-specific idle entry point can supply this attachment.
+        // It supplies no other data, so consuming it must not clear host defaults.
+        request.turn_extension_init = None;
+    }
     if request.request.start.service_tier.is_some()
         && crate::agent::host::host_child_uses_shared_service_tier(session)
     {
@@ -356,6 +369,7 @@ async fn handle_inner(
                 kind,
                 /*expected_previous_turn_id*/ None,
                 realtime_handoff_id,
+                goal_daybreak.filter(|_| kind == TurnStartKind::Automatic),
             )
             .await
         }
@@ -384,6 +398,7 @@ async fn handle_inner(
                 TurnStartKind::Recovery,
                 Some(expected_previous_turn_id),
                 realtime_handoff_id,
+                /*goal_daybreak*/ None,
             )
             .await
         }
@@ -438,6 +453,7 @@ pub(super) async fn handle_recovery(
         TurnStartKind::Recovery,
         /*expected_previous_turn_id*/ None,
         /*realtime_handoff_id*/ None,
+        /*goal_daybreak*/ None,
     )
     .await;
     if let Ok(TurnInputSubmission::Started { turn_id, .. }) = &result {
@@ -614,6 +630,7 @@ async fn start_if_idle(
     kind: TurnStartKind,
     expected_previous_turn_id: Option<String>,
     realtime_handoff_id: Option<uuid::Uuid>,
+    goal_daybreak: Option<Arc<GoalDaybreakAdmission>>,
 ) -> CodexResult<TurnInputSubmission> {
     let WithTurnExtensionData {
         mut request,
@@ -702,7 +719,7 @@ async fn start_if_idle(
         });
     }
 
-    let settings = match PreparedTurnInputSettings::prepare(
+    let mut settings = match PreparedTurnInputSettings::prepare(
         session,
         WithTurnExtensionData {
             request: thread_settings,
@@ -718,6 +735,7 @@ async fn start_if_idle(
             return Err(error);
         }
     };
+    settings.goal_daybreak = goal_daybreak;
     let turn_context = match settings
         .apply_started(session, submission_id.clone(), kind)
         .await
@@ -870,31 +888,23 @@ impl Session {
         else {
             return;
         };
-        let input = self.state.lock().await.additional_context.extend(
-            BTreeMap::from([(
+        let section = AdditionalContextState::new(
+            &BTreeMap::from([(
                 key.to_owned(),
                 AdditionalContextEntry::new(value, AdditionalContextKind::Untrusted),
             )]),
-            self.additional_context_format(),
+            self.enabled(Feature::UntrustedAsToolOutput),
             &task.turn_context.session_telemetry,
             &self.context_ids,
-        );
-        if !input.is_empty() {
-            self.input_queue
-                .extend_pending_input_for_turn_state(
-                    &turn.turn_state,
-                    input.into_iter().map(TurnInput::ResponseItem).collect(),
-                )
-                .await;
-        }
-    }
-
-    pub(super) fn additional_context_format(&self) -> AdditionalContextFormat {
-        if self.enabled(Feature::UntrustedAsToolOutput) {
-            AdditionalContextFormat::ToolOutputs
-        } else {
-            AdditionalContextFormat::Messages
-        }
+        )
+        .extending();
+        // Tool-produced context belongs after tool results and before the next prompt.
+        task.turn_context
+            .extension_data
+            .get_or_init(super::turn::PendingToolContext::default)
+            .lock()
+            .await
+            .push(section);
     }
 
     /// Called under the active-turn lock when registering a task (or a realtime transcript turn).

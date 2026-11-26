@@ -17,8 +17,86 @@ use crossterm::event::KeyModifiers;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
-async fn new_session_refreshes_account_for_the_started_provider() -> Result<()> {
-    let (mut app, _events, _ops) = make_test_app_with_channels().await;
+async fn session_lookup_distinguishes_missing_and_unreadable_rollouts() -> color_eyre::Result<()> {
+    use crate::resume_picker::SessionPickerAction;
+
+    let (mut app, mut events, _op_rx) = make_test_app_with_channels().await;
+    let config = &app.config;
+    let id = crate::tests::write_session_rollout(
+        config.codex_home.as_path(),
+        "2025-01-02T10-00-00",
+        "2025-01-02T10:00:00Z",
+        "saved session",
+        &config.model_provider_id,
+        config.cwd.as_path(),
+    )?;
+    let mut server = crate::start_embedded_app_server_for_picker(config).await?;
+    let mut lookup = async |action, id: ThreadId| {
+        crate::lookup_session_target_with_app_server(action, &mut server, config, &id.to_string())
+            .await
+    };
+    let missing = lookup(SessionPickerAction::Resume, ThreadId::new()).await?;
+    assert!(missing.is_none());
+
+    let target = lookup(SessionPickerAction::Resume, id)
+        .await?
+        .expect("saved session");
+    let path = target.path.expect("saved session has a rollout");
+    std::fs::write(&path, "")?;
+    let err = lookup(SessionPickerAction::Fork, id)
+        .await
+        .expect_err("unreadable session metadata");
+    let message = err.to_string().replace(path.to_str().unwrap(), "<rollout>");
+    insta::assert_snapshot!(message, @"thread/read failed: failed to read thread: thread-store internal error: failed to read session metadata <rollout>: thread-store internal error: failed to read session metadata <rollout>: rollout at <rollout> is empty (code -32603)");
+
+    let current = ThreadId::new();
+    app.active_thread_id = Some(current);
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let control = app
+        .handle_event(
+            &mut tui,
+            &mut server,
+            AppEvent::ResumeSessionByIdOrName(id.to_string()),
+        )
+        .await?;
+    assert!(matches!(control, AppRunControl::Continue));
+    assert_eq!(app.active_thread_id, Some(current));
+    assert!(next_history_message(&mut events).contains("thread/read failed"));
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cloud_resume_by_id_points_to_picker_for_unopened_chat() -> Result<()> {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    let (client, mut commands, _events) =
+        codex_app_server_client::CloudClient::channel(/*capacity*/ 1);
+    let mut server = AppServerSession::new(
+        crate::backend_id::BackendId::new(),
+        codex_app_server_client::AppServerClient::Cloud(client),
+        crate::ThreadParamsMode::Cloud,
+    );
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let event = AppEvent::ResumeSessionByIdOrName(ThreadId::new().to_string());
+    let (control, ()) = tokio::join!(app.handle_event(&mut tui, &mut server, event), async {
+        let command = commands.recv().await.expect("thread/read");
+        command
+            .response
+            .send(Ok(Err(JSONRPCErrorError {
+                code: -32000,
+                message: "Open this cloud conversation before reading its transcript.".into(),
+                data: None,
+            })))
+            .unwrap();
+    });
+    assert!(matches!(control?, AppRunControl::Continue));
+    insta::assert_snapshot!(next_history_message(&mut events), @"■ Run /resume without an ID and select the Cloud chat from the picker.");
+    Ok(())
+}
+
+#[tokio::test]
+async fn new_and_resumed_sessions_use_quota_for_the_active_provider() -> Result<()> {
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     crate::chatwidget::tests::helpers::set_fast_mode_test_catalog_for_models(
         &mut app.chat_widget,
         "gpt-5.5",
@@ -47,7 +125,7 @@ async fn new_session_refreshes_account_for_the_started_provider() -> Result<()> 
     std::fs::write(
         home.path().join("config.toml"),
         format!(
-            "model_provider = 'amazon-bedrock'\nmodel = 'gpt-5.5'\ncli_auth_credentials_store = 'file'\nchatgpt_base_url = {:?}\nmodel_catalog_json = {catalog_path:?}\nfeatures.apps = true\n\n[model_providers.alt]\nname = 'Alt'\nwire_api = 'responses'\nrequires_openai_auth = true\n",
+            "model_provider = 'amazon-bedrock'\nmodel = 'gpt-5.5'\ncli_auth_credentials_store = 'file'\nchatgpt_base_url = {:?}\nmodel_catalog_json = {catalog_path:?}\nfeatures.apps = true\n\n[model_providers.alt]\nname = 'Alt'\nwire_api = 'responses'\nrequires_openai_auth = true\n\n[model_providers.custom]\nname = 'Custom'\nrequires_openai_auth = false\n",
             backend.uri(),
         ),
     )?;
@@ -58,12 +136,25 @@ async fn new_session_refreshes_account_for_the_started_provider() -> Result<()> 
         endpoint: crate::resolve_remote_addr("ws://127.0.0.1:4500")?,
     };
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    for provider in [
-        "amazon-bedrock",
-        "openai",
-        "alt",
-        "openai",
-        "amazon-bedrock",
+    super::backend_banner_recovery_tests::mock_account_usage(/*used*/ 91)
+        .expect(/*r*/ 5)
+        .mount(&backend)
+        .await;
+    for (provider, saved_providers) in [
+        ("amazon-bedrock", &[][..]),
+        ("openai", &[]),
+        ("alt", &[]),
+        (
+            "openai",
+            &[
+                ("custom", false),
+                ("alt", true),
+                ("alt", false),
+                ("openai", true),
+            ],
+        ),
+        ("amazon-bedrock", &[]),
+        ("custom", &[("openai", true)]),
     ] {
         if app.chat_widget.config_ref().model_provider_id == "alt" {
             // The task list uses the client default, which is also the next provider.
@@ -160,6 +251,44 @@ async fn new_session_refreshes_account_for_the_started_provider() -> Result<()> 
                 chatgpt.then_some(codex_protocol::account::PlanType::Pro)
             )
         );
+        // Resume saved chats without changing the server default or its login.
+        for &(provider, shares_quota) in saved_providers {
+            if provider == "alt" && !shares_quota {
+                crate::config_update::write_config_batch(
+                    server.request_handle(),
+                    vec![crate::config_update::replace_config_value(
+                        "model_providers.alt.requires_openai_auth",
+                        false.into(),
+                    )],
+                )
+                .await?;
+            }
+            server_config.model_provider_id = provider.into();
+            let id =
+                create_history_rollout(&server_config, ThreadHistoryMode::Legacy, "Saved chat")?;
+            let resume = AppEvent::ResumeSessionByIdOrName(id.to_string());
+            Box::pin(app.handle_event(&mut tui, &mut server, resume)).await?;
+            app.drain_active_thread_events(&mut tui).await?;
+            assert_eq!(app.chat_widget.quota_provider_id(), provider);
+            assert_eq!(app.chat_widget.has_chatgpt_account(), chatgpt);
+            assert_eq!(
+                app.chat_widget.rate_limit_refresh_interval().is_some(),
+                chatgpt && shares_quota
+            );
+
+            // An explicit /usage read can complete even when automatic polling is off.
+            let origin = RateLimitRefreshOrigin::ResetPicker {
+                request_id: app.chat_widget.show_rate_limit_reset_loading_popup(),
+            };
+            app.refresh_rate_limits(&server, origin);
+            let read =
+                super::backend_banner_recovery_tests::next_rate_limits_loaded(&mut events).await?;
+            Box::pin(app.handle_event(&mut tui, &mut server, read)).await?;
+            assert_eq!(
+                app.chat_widget.usage_notice(/*width*/ 100).is_some(),
+                shares_quota
+            );
+        }
     }
     server.shutdown().await?;
     proxy.await??;

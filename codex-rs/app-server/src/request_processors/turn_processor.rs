@@ -8,6 +8,7 @@ use codex_app_server_protocol::ThreadGuardianReviewResponse;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadPrepareApprovedPlanParams;
 use codex_app_server_protocol::ThreadPrepareApprovedPlanResponse;
+use codex_core::guardian_review::RecordedReviewMode;
 use codex_protocol::AgentPath;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::AgentMessageInputContent;
@@ -16,7 +17,6 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageReference as CoreImageReference;
-use codex_protocol::protocol::RealtimeConversationVersion;
 use codex_protocol::protocol::TurnEnvironmentRequests;
 use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
@@ -216,8 +216,26 @@ impl TurnRequestProcessor {
             EnsureConversationListenerResult::Attached => {}
             EnsureConversationListenerResult::ConnectionClosed => return Ok(None),
         }
+        // Older servers silently ignore rootEvidence. Acknowledge it on success so clients
+        // can distinguish a worker review from one that used only the injected history.
+        let used_root_evidence = params.root_evidence.is_some();
+        // The startup flag installs the reviewer. A thread override cannot change it.
+        let mode = if self.config.features.enabled(Feature::GuardianV3) {
+            if used_root_evidence {
+                return Err(invalid_request(
+                    "Guardian V3 recorded review does not support rootEvidence",
+                ));
+            }
+            RecordedReviewMode::Attached(Box::pin(codex_guardian_v3::route_pending_history(
+                Arc::clone(&thread),
+            )))
+        } else {
+            RecordedReviewMode::Transcript {
+                root_evidence: params.root_evidence,
+            }
+        };
         let result = thread
-            .guardian_review(&params.tool_call, cancellation)
+            .review_recorded_call(&params.tool_call, mode, cancellation)
             .await
             .map_err(|err| match err.details() {
                 CodexErrorDetails::InvalidRequest(message) => invalid_request(message.clone()),
@@ -225,6 +243,7 @@ impl TurnRequestProcessor {
             })?;
         Ok(Some(
             ThreadGuardianReviewResponse {
+                used_root_evidence,
                 call_id: result.call_id,
                 assessment: ThreadGuardianAssessment {
                     outcome: result.assessment.outcome,
@@ -1369,8 +1388,6 @@ impl TurnRequestProcessor {
                 Some("initialItems")
             } else if params.model.is_some() {
                 Some("model")
-            } else if params.voice.is_some() {
-                Some("voice")
             } else if params.delegation_ack_filler.is_some() {
                 Some("delegationAckFiller")
             } else {
@@ -1387,23 +1404,6 @@ impl TurnRequestProcessor {
             .await?
         else {
             return Ok(None);
-        };
-        let voice = match params.voice {
-            Some(voice) => Some(Some(voice)),
-            None if !attaches_existing_call
-                && params.version == Some(RealtimeConversationVersion::V3) =>
-            {
-                let current = thread.config().await;
-                let latest = Box::pin(self.config_manager.load_latest_config_with_session_layers(
-                    &current.config_layer_stack,
-                    &current.cwd,
-                ))
-                .await
-                .map_err(|error| config_load_error(&error))?;
-                // Preserve a cleared preference instead of inheriting the thread's old voice.
-                Some(latest.realtime.voice)
-            }
-            None => None,
         };
         self.submit_core_op(
             request_id,
@@ -1454,7 +1454,6 @@ impl TurnRequestProcessor {
                     }
                 }),
                 version: params.version,
-                voice,
             }),
         )
         .await

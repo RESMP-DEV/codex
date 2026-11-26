@@ -970,6 +970,9 @@
             "command_sessions_world_state": {
               "type": "boolean"
             },
+            "compact_filesystem_context": {
+              "type": "boolean"
+            },
             "compaction_image_budget": {
               "type": "boolean"
             },
@@ -1421,6 +1424,9 @@
               "type": "boolean"
             },
             "standalone_web_search": {
+              "type": "boolean"
+            },
+            "statsig_gates": {
               "type": "boolean"
             },
             "steer": {
@@ -2544,11 +2550,21 @@
           "type": "integer"
         },
         "message_board_in_memory": {
-          "description": "Keep each fresh root's Guardian board in memory until the runtime closes. Defaults to false.",
+          "description": "Defaults to true for shadow boards and false for live boards. False disables shadow reviews.",
           "type": "boolean"
         },
         "reviewer": {
           "$ref": "#/definitions/GuardianV3ReviewerConfigToml"
+        },
+        "shadow_board_limit_mib": {
+          "description": "Maximum evidence per root shadow board in MiB. Defaults to 32. Ignored in project config.",
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "shadow_enabled": {
+          "description": "Run shadow reviews alongside Guardian V2 without changing approval decisions. Ignored in project config.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -2681,6 +2697,13 @@
         },
         {
           "properties": {
+            "additionalContextLimit": {
+              "description": "Approximate token threshold for spilling plaintext `additionalContext` to disk. Defaults to 2,500. For MCP hooks, `0` and values above 10,000 trigger a warning and use 10,000. Command hooks can disable spilling with `0` or set a higher threshold. The MCP ceiling mirrors the current default tool-output budget and may change in the future. Encrypted hook output has a separate byte limit.",
+              "format": "uint",
+              "maximum": 10000.0,
+              "minimum": 1.0,
+              "type": "integer"
+            },
             "input": {
               "additionalProperties": true,
               "default": {},
@@ -4736,9 +4759,6 @@
         },
         "version": {
           "$ref": "#/definitions/RealtimeConversationVersion"
-        },
-        "voice": {
-          "$ref": "#/definitions/RealtimeVoice"
         }
       },
       "type": "object"
@@ -4747,46 +4767,6 @@
       "enum": [
         "webrtc",
         "websocket"
-      ],
-      "type": "string"
-    },
-    "RealtimeVoice": {
-      "enum": [
-        "alloy",
-        "arbor",
-        "ash",
-        "aube",
-        "ballad",
-        "breeze",
-        "bubbie",
-        "cedar",
-        "coral",
-        "cove",
-        "echo",
-        "ember",
-        "haetsal",
-        "hanul",
-        "himari",
-        "juniper",
-        "leher",
-        "maple",
-        "marin",
-        "miko",
-        "neer",
-        "porto",
-        "rindo",
-        "rio",
-        "rivage",
-        "sage",
-        "selva",
-        "shimmer",
-        "sol",
-        "sonna",
-        "spruce",
-        "tinta",
-        "vale",
-        "verse",
-        "viola"
       ],
       "type": "string"
     },
@@ -5070,8 +5050,12 @@
     },
     "SendMessageToUserAsyncConfigToml": {
       "additionalProperties": false,
-      "description": "Controls which agents can send async user messages.",
+      "description": "Controls which agents can send async user messages and how they call the tool.",
       "properties": {
+        "direct_only": {
+          "description": "Keep async user messages top-level only (default). Set to false to follow the session's tool mode.",
+          "type": "boolean"
+        },
         "root_agent": {
           "description": "Sets the root agent's feature flag, just like the plain boolean shorthand. The model catalog can still enable the tool for the root when this is false.",
           "type": "boolean"
@@ -5548,8 +5532,8 @@
           "type": "boolean"
         },
         "collapse_turn_details": {
-          "default": false,
-          "description": "Summarize tool calls and collapse completed turns in the full-screen transcript. Defaults to `false`.",
+          "default": true,
+          "description": "Summarize tool calls and collapse completed turns in the full-screen transcript. Defaults to `true`.",
           "type": "boolean"
         },
         "copy_on_select": {
@@ -8386,6 +8370,9 @@
         "command_sessions_world_state": {
           "type": "boolean"
         },
+        "compact_filesystem_context": {
+          "type": "boolean"
+        },
         "compaction_image_budget": {
           "type": "boolean"
         },
@@ -8837,6 +8824,9 @@
           "type": "boolean"
         },
         "standalone_web_search": {
+          "type": "boolean"
+        },
+        "statsig_gates": {
           "type": "boolean"
         },
         "steer": {

@@ -268,7 +268,6 @@ pub(crate) enum CancellationEvent {
     NotHandled,
 }
 
-use crate::bottom_pane::prompt_args::parse_slash_name;
 pub(crate) use chat_composer::ChatComposer;
 pub(crate) use chat_composer::ChatComposerConfig;
 pub(crate) use chat_composer::ClipboardPasteTarget;
@@ -282,6 +281,7 @@ pub(crate) use chat_composer::ShellPrefixHandling;
 pub(crate) use chat_composer_history::HistoryEntry;
 
 use crate::status_indicator_widget::StatusDetailsCapitalization;
+use crate::status_indicator_widget::StatusHeader;
 use crate::status_indicator_widget::StatusIndicatorWidget;
 #[cfg(test)]
 pub(crate) use experimental_features_view::ExperimentalFeatureItem;
@@ -732,6 +732,10 @@ impl BottomPane {
         self.status.as_ref()
     }
 
+    pub(crate) fn status_widget_mut(&mut self) -> Option<&mut StatusIndicatorWidget> {
+        self.status.as_mut()
+    }
+
     pub(crate) fn status_elapsed(&self) -> Option<Duration> {
         self.is_task_running
             .then(|| self.status_timer.elapsed_at(Instant::now()))
@@ -1168,6 +1172,9 @@ impl BottomPane {
     fn pre_draw_tick_at(&mut self, now: Instant) {
         self.composer.sync_popups();
         self.maybe_show_delayed_prompts_at(now);
+        if let Some(status) = &mut self.status {
+            status.prepare_frame(now);
+        }
         self.tick_active_view(now);
         self.schedule_active_view_frame();
     }
@@ -1372,7 +1379,7 @@ impl BottomPane {
     /// was updated and requested a redraw.
     pub(crate) fn update_status(
         &mut self,
-        header: String,
+        header: impl Into<StatusHeader>,
         details: Option<String>,
         details_capitalization: StatusDetailsCapitalization,
         details_max_lines: usize,
@@ -1890,19 +1897,16 @@ impl BottomPane {
         self.is_task_running
     }
 
-    pub(crate) fn should_interrupt_running_task(&self, key_event: KeyEvent) -> bool {
-        let is_agent_command = self
-            .composer_text()
-            .lines()
-            .next()
-            .and_then(parse_slash_name)
-            .is_some_and(|(name, _, _)| matches!(name, "agents" | "subagents"));
+    pub(crate) fn take_painted_steer_hint(&self) -> bool {
+        self.pending_input_preview.painted_steer_hint.take()
+    }
 
+    pub(crate) fn should_interrupt_running_task(&self, key_event: KeyEvent) -> bool {
         self.keymap.chat.interrupt_turn.is_pressed(key_event)
             && !(self.shortcut_overlay_visible()
                 && key_hint::plain(KeyCode::Esc).is_press(key_event))
             && self.is_task_running
-            && !(is_agent_command && key_event.code == KeyCode::Esc)
+            && !(key_event.code == KeyCode::Esc && self.composer.is_agent_command())
             && self.no_modal_or_popup_active()
             && !self.composer_should_handle_vim_insert_escape(key_event)
     }
@@ -2687,6 +2691,7 @@ impl BottomPane {
             let composer: RenderableItem<'_> = if let Some(questions) = question_editor {
                 RenderableItem::Borrowed(questions.as_ref())
             } else if options.max_height.is_none()
+                && options.stream_interrupt_key.is_none()
                 && options.image_previews.is_none()
                 && options.textarea_right_reserve == 0
                 && options.warning_count == 0

@@ -99,6 +99,7 @@ members = [
     "model-provider-info",
     "mxc-sandbox",
     "models-manager",
+    "network-policy-types",
     "network-proxy",
     "ollama",
     "process-hardening",
@@ -135,6 +136,7 @@ members = [
     "utils/cargo-bin",
     "git-utils",
     "utils/cache",
+    "utils/cached-str",
     "utils/critical-path",
     "utils/git-discovery",
     "utils/head-tail-buffer",
@@ -285,6 +287,7 @@ codex-mcp-extension = { path = "ext/mcp" }
 codex-model-provider-info = { path = "model-provider-info" }
 codex-models-manager = { path = "models-manager" }
 codex-mxc-sandbox = { path = "mxc-sandbox" }
+codex-network-policy-types = { path = "network-policy-types" }
 codex-network-proxy = { path = "network-proxy" }
 codex-ollama = { path = "ollama" }
 codex-otel = { path = "otel" }
@@ -309,6 +312,7 @@ codex-shell-command = { path = "shell-command" }
 codex-skills-extension = { path = "ext/skills" }
 codex-skills = { path = "skills" }
 codex-state = { path = "state" }
+codex-statsig = { path = "statsig" }
 codex-terminal-detection = { path = "terminal-detection" }
 codex-test-binary-support = { path = "test-binary-support" }
 codex-thread-context-ids = { path = "thread-context-ids" }
@@ -323,6 +327,7 @@ codex-utils-absolute-path = { path = "utils/absolute-path" }
 codex-utils-approval-presets = { path = "utils/approval-presets" }
 codex-utils-audio = { path = "utils/audio" }
 codex-utils-cache = { path = "utils/cache" }
+codex-utils-cached-str = { path = "utils/cached-str" }
 codex-utils-cargo-bin = { path = "utils/cargo-bin" }
 codex-utils-cli = { path = "utils/cli" }
 codex-utils-critical-path = { path = "utils/critical-path" }
@@ -428,6 +433,7 @@ iana-time-zone = "0.1.64"
 icu_decimal = "2.1"
 icu_locale_core = "2.1"
 icu_provider = { version = "2.1", features = ["sync"] }
+icu_properties = "2.2"
 ignore = "0.4.30"
 image = { version = "^0.25.9", default-features = false }
 include_dir = "0.7.4"
@@ -536,6 +542,7 @@ sqlx-macros = { version = "=0.9.0", default-features = false, features = ["deriv
 # Preserve the target driver's query-description support without building it on the host.
 sqlx-sqlite = { version = "=0.9.0", default-features = false, features = ["offline"] }
 starlark = { version = "0.14.2", default-features = false }
+string_cache = "0.11"
 strum = "0.27.2"
 strum_macros = "0.28.0"
 supports-color = "3.0.2"
@@ -592,6 +599,7 @@ wildmatch = "2.6.1"
 winapi-util = "0.1.11"
 windows-sys = "0.61.2"
 winreg = "0.55.0"
+wl-clipboard-rs = "0.9.3"
 # Keep the zip 2.x feature set. In zip 9, `bzip2-rs` selects the bzip2-sys
 # backend we already build; the default selects libbz2-rs-sys instead.
 zip = { version = "9.0.0", default-features = false, features = [

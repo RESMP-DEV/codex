@@ -1419,6 +1419,8 @@ pub(crate) enum AppEvent {
     FollowTranscript,
 
     InsertHistoryCell(Box<dyn HistoryCell>),
+    /// Finish a command whose running cell has already been committed to history.
+    CompleteBackgroundCommand(Box<crate::exec_cell::ExecCell>),
     /// FIFO barrier after the completed turn's history insertions.
     TurnTipReady {
         thread_id: ThreadId,
@@ -1582,7 +1584,6 @@ pub(crate) enum AppEvent {
     /// Show the cyber auto-review notice after the model selection confirmation.
     CyberModelAutoReviewNotice,
 
-    /// Read the owning server preference before showing the voice picker.
     OpenRealtimeSettings,
     OpenRealtimeSoundDevices,
     OpenRealtimeVoices,
@@ -1605,9 +1606,16 @@ pub(crate) enum AppEvent {
         channel: Option<codex_config::config_toml::MicrophoneChannels>,
     },
 
-    /// Save the voice for subsequent conversations through the app server.
+    RealtimeVoicesLoaded {
+        origin: Option<ThreadId>,
+        result: anyhow::Result<codex_app_server_protocol::AccountVoiceSettingsReadResponse>,
+    },
     PersistRealtimeVoiceSelection {
-        voice: codex_protocol::protocol::RealtimeVoice,
+        voice: codex_app_server_protocol::AccountVoiceOption,
+    },
+    RealtimeVoiceSaved {
+        origin: Option<ThreadId>,
+        result: anyhow::Result<String>,
     },
 
     /// Toggle the service tier staged for the next Cloud submission.

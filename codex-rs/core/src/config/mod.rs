@@ -47,6 +47,7 @@ use codex_config::types::ApprovalsReviewer;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::History;
+use codex_config::types::ImageGenerationSettings;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_config::types::MemoriesConfig;
@@ -203,6 +204,8 @@ pub(crate) use runtime_refresh::RuntimeConfigRefresh;
 mod schema;
 mod token_budget_startup;
 mod windows_sandbox_config;
+pub use crate::statsig::HostIdentity as StatsigHostIdentity;
+pub use crate::statsig::StatsigSurface;
 pub use auth_keyring::bootstrap_auth_config;
 pub use auth_keyring::resolve_bootstrap_auth_keyring_backend_kind;
 pub use codex_agent_roles::AgentRoleConfig;
@@ -1539,6 +1542,22 @@ pub struct TerminalResizeReflowConfig {
     pub max_rows: TerminalResizeReflowMaxRows,
 }
 
+impl From<&Config> for ImageGenerationSettings {
+    fn from(config: &Config) -> Self {
+        Self {
+            provider: config.model_provider.clone(),
+            http_client_factory: config.http_client_factory(),
+            gif_enabled: config.features.image_generation_animation_enabled(),
+            deferred: config.features.defer_image_generation_enabled()
+                && !config
+                    .code_mode
+                    .excluded_tool_namespaces
+                    .iter()
+                    .any(|namespace| namespace == Self::NAMESPACE),
+        }
+    }
+}
+
 impl AuthManagerConfig for Config {
     fn codex_home(&self) -> PathBuf {
         self.codex_home.to_path_buf()
@@ -1829,6 +1848,12 @@ impl Config {
             && self
                 .features
                 .enabled(Feature::GuardianNativeMultiAgentHistory)
+    }
+
+    /// Both the reviewed thread and the reviewer must support encrypted agent history.
+    pub fn guardian_quotes_subagent_replies(&self, reviewer_provider_id: &str) -> bool {
+        self.guardian_native_multi_agent_history_enabled()
+            && reviewer_provider_id == OPENAI_PROVIDER_ID
     }
 
     pub(crate) fn multi_agent_version_override(&self) -> Option<MultiAgentVersion> {
@@ -2299,23 +2324,6 @@ impl Config {
         )
         .await
     }
-    /// This is a secondary way of creating [Config], which is appropriate when
-    /// the harness is meant to be used with a specific configuration that
-    /// ignores user settings. For example, the `codex exec` subcommand is
-    /// designed to use [AskForApproval::Never] exclusively.
-    ///
-    /// Further, [ConfigOverrides] contains some options that are not supported
-    /// in [ConfigToml], such as `cwd`, `codex_self_exe`, and `codex_linux_sandbox_exe`.
-    pub async fn load_with_cli_overrides_and_harness_overrides(
-        cli_overrides: Vec<(String, TomlValue)>,
-        harness_overrides: ConfigOverrides,
-    ) -> std::io::Result<Self> {
-        ConfigBuilder::default()
-            .cli_overrides(cli_overrides)
-            .harness_overrides(harness_overrides)
-            .build()
-            .await
-    }
 }
 
 pub fn resolve_profile_v2_config_path(
@@ -2326,53 +2334,6 @@ pub fn resolve_profile_v2_config_path(
         format!("{profile_name}{CONFIG_PROFILE_V2_SUFFIX}"),
         codex_home,
     )
-}
-
-/// DEPRECATED: Use [Config::load_with_cli_overrides()] instead because working
-/// with [ConfigToml] directly means that [ConfigRequirements] have not been
-/// applied yet, which risks failing to enforce required constraints.
-pub async fn load_config_as_toml_with_cli_overrides(
-    codex_home: &Path,
-    cwd: Option<&AbsolutePathBuf>,
-    cli_overrides: Vec<(String, TomlValue)>,
-    loader_overrides: LoaderOverrides,
-) -> std::io::Result<ConfigToml> {
-    load_config_as_toml_with_cli_and_loader_overrides(
-        codex_home,
-        cwd,
-        cli_overrides,
-        loader_overrides,
-    )
-    .await
-}
-
-/// DEPRECATED for most callers: prefer [Config::load_with_cli_overrides()] or
-/// [ConfigBuilder] because working with [ConfigToml] directly means
-/// [ConfigRequirements] have not been applied yet, which risks skipping
-/// required constraints.
-pub async fn load_config_as_toml_with_cli_and_loader_overrides(
-    codex_home: &Path,
-    cwd: Option<&AbsolutePathBuf>,
-    cli_overrides: Vec<(String, TomlValue)>,
-    loader_overrides: LoaderOverrides,
-) -> std::io::Result<ConfigToml> {
-    load_config_as_toml_with_cli_and_load_options(codex_home, cwd, cli_overrides, loader_overrides)
-        .await
-}
-
-/// DEPRECATED for most callers: prefer [Config::load_with_cli_overrides()] or
-/// [ConfigBuilder] because working with [ConfigToml] directly means
-/// [ConfigRequirements] have not been applied yet, which risks skipping
-/// required constraints.
-pub async fn load_config_as_toml_with_cli_and_load_options(
-    codex_home: &Path,
-    cwd: Option<&AbsolutePathBuf>,
-    cli_overrides: Vec<(String, TomlValue)>,
-    options: impl Into<ConfigLoadOptions>,
-) -> std::io::Result<ConfigToml> {
-    load_config_toml_with_layer_stack(codex_home, cwd, cli_overrides, options)
-        .await
-        .map(|result| result.config_toml)
 }
 
 /// Partially loaded config plus the layer stack used to derive it.
@@ -3475,7 +3436,7 @@ fn validate_multi_agent_v2_tool_namespace(namespace: Option<&str>) -> std::io::R
         "container",
         "file_search",
         "functions",
-        "image_gen",
+        ImageGenerationSettings::NAMESPACE,
         "multi_tool_use",
         "python",
         "python_user_visible",
@@ -5001,7 +4962,6 @@ impl Config {
                         version: realtime.version.unwrap_or(defaults.version),
                         session_type: realtime.session_type.unwrap_or(defaults.session_type),
                         transport: realtime.transport.unwrap_or(defaults.transport),
-                        voice: realtime.voice,
                     }
                 }),
             experimental_realtime_ws_backend_prompt: cfg.experimental_realtime_ws_backend_prompt,
@@ -5080,7 +5040,7 @@ impl Config {
                 .as_ref()
                 .map(|t| t.raw_output_mode)
                 .unwrap_or(false),
-            tui_collapse_turn_details: cfg.tui.as_ref().is_some_and(|tui| tui.collapse_turn_details),
+            tui_collapse_turn_details: cfg.tui.as_ref().is_none_or(|tui| tui.collapse_turn_details),
             tui_fullscreen_transcript: cfg
                 .tui
                 .as_ref()

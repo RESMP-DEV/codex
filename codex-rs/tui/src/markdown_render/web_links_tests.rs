@@ -3,6 +3,7 @@ use crate::markdown_render::MarkdownStyles;
 use crate::markdown_render::render_markdown_lines_with_width_cwd_and_hidden_link_destinations;
 use crate::markdown_render::render_streaming_markdown_lines_with_width_and_cwd;
 use crate::style::accent_color;
+use crate::terminal_capabilities::web_link_display;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::TerminalHyperlink;
 use crate::terminal_hyperlinks::visible_lines;
@@ -40,17 +41,20 @@ fn bare_urls_are_styled_without_coloring_surrounding_prose() {
 }
 
 #[test]
-fn bare_url_styling_preserves_tabs_and_unicode() {
-    let line = super::style_bare_web_urls(
-        "界\t(https://example.com).".bold(),
+fn bare_link_styling_preserves_tabs_and_unicode() {
+    let line = super::style_bare_links(
+        "界\t(https://example.com). لا src/a.ts:2-3".bold(),
         Style::new().fg(accent_color()).underlined(),
+        &|_| true,
+        "",
     );
     assert_eq!(
         line.line,
         Line::from(vec![
             "界\t(".bold(),
             "https://example.com".bold().fg(accent_color()).underlined(),
-            ").".bold(),
+            "). لا ".bold(),
+            "src/a.ts:2-3".bold().fg(accent_color()).underlined(),
         ]),
     );
 }
@@ -101,7 +105,7 @@ fn supporting_terminals_render_only_the_styled_label_and_keep_its_target() {
         TerminalName::GnomeTerminal,
         TerminalName::Vte,
     ] {
-        let display = WebLinkDisplay::for_terminal(&terminal(name), /*term*/ None);
+        let display = web_link_display(&terminal(name), /*term*/ None);
         for (markdown, label) in [
             (
                 "[label](https://example.com)",
@@ -167,7 +171,7 @@ fn unknown_terminals_and_multiplexers_keep_visible_destinations() {
             render(
                 markdown,
                 /*width*/ 80,
-                WebLinkDisplay::for_terminal(&terminal, term),
+                web_link_display(&terminal, term),
             ),
             expected,
         );
@@ -259,8 +263,8 @@ fn label_only_web_links_keep_targets_after_prose_and_table_wrapping() {
 
 #[test]
 fn streaming_and_full_render_agree_with_label_only_links() {
-    let markdown = "See [**label**](https://example.com).\n\n| Resource |\n| --- |\n| [`code`](https://example.com/code) |\n\nTrailing text.";
-    let display = WebLinkDisplay::LabelOnly;
+    let markdown = "See [**label**](https://example.com) and src/f.ts:42-44.\n\n| Resource |\n| --- |\n| [`code`](https://example.com/code) |\n| [source](./src/f.ts#L42-L44) |\n\nTrailing text.";
+    let hide_destination = &|_: &str| true;
     for width in [12, 40] {
         for end in 1..=markdown.len() {
             let prefix = &markdown[..end];
@@ -268,10 +272,16 @@ fn streaming_and_full_render_agree_with_label_only_links() {
                 prefix,
                 Some(width),
                 /*cwd*/ None,
-                &|destination| display.hide_destination(destination),
+                hide_destination,
                 crate::markdown_render::ListSpacing::AfterMultiline,
             );
-            assert_eq!(streamed.lines, render(prefix, width, display));
+            let full = render_markdown_lines_with_width_cwd_and_hidden_link_destinations(
+                prefix,
+                Some(width),
+                /*cwd*/ None,
+                hide_destination,
+            );
+            assert_eq!(streamed.lines, full);
         }
     }
 }
@@ -280,7 +290,7 @@ fn streaming_and_full_render_agree_with_label_only_links() {
 fn label_only_and_fallback_presentations_snapshot() {
     let markdown = "plain [plain](https://example.com) `code` [`code`](https://example.com)\n\n| Resource |\n| --- |\n| [docs](https://example.com/docs) |";
     let presentations = [TerminalName::Orca, TerminalName::Unknown].map(|name| {
-        let display = WebLinkDisplay::for_terminal(&terminal(name), /*term*/ None);
+        let display = web_link_display(&terminal(name), /*term*/ None);
         Text::from(visible_lines(render(markdown, /*width*/ 40, display)))
     });
     assert_debug_snapshot!(presentations);

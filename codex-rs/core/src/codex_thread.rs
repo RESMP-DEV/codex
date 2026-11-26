@@ -4,6 +4,7 @@ use crate::agent::api::AgentControl;
 use crate::config::ConstraintResult;
 use crate::context::ContextualUserFragment;
 use crate::context::GuardianReviewEvidence;
+use crate::cyber_access_program::ContinuationCyberAccessProgram;
 use crate::elicitation::ElicitationRegistration;
 use crate::session::SessionIo;
 use crate::session::SessionSettingsUpdate;
@@ -25,6 +26,7 @@ use codex_exec_server::SelectedCapabilityRootsStatus;
 use codex_extension_api::ConversationHistorySnapshot;
 use codex_extension_api::ThreadIdleCause;
 use codex_features::Feature;
+use codex_history::HistoryInitialization;
 use codex_history::RolloutItem;
 use codex_models_manager::ModelsManagerConfig;
 use codex_otel::SessionTelemetry;
@@ -103,6 +105,33 @@ use uuid::Uuid;
 use codex_rollout::state_db::StateDbHandle;
 
 static LIVE_THREADS: Gauge = Gauge::new("core.threads.live");
+
+/// The live settings needed to display a thread list or search result.
+#[derive(Debug, PartialEq)]
+pub struct ThreadViewSettings {
+    pub model: String,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub environments: Vec<ThreadEnvironmentView>,
+    pub session_source: SessionSource,
+}
+
+/// The selected workspace for display, without the environment's execution config.
+#[derive(Debug, PartialEq)]
+pub struct ThreadEnvironmentView {
+    pub environment_id: String,
+    pub cwd: PathUri,
+    pub workspace_roots: Vec<PathUri>,
+}
+
+impl From<&TurnEnvironmentSelection> for ThreadEnvironmentView {
+    fn from(selection: &TurnEnvironmentSelection) -> Self {
+        Self {
+            environment_id: selection.environment_id.clone(),
+            cwd: selection.cwd.clone(),
+            workspace_roots: selection.workspace_roots.clone(),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ThreadConfigSnapshot {
@@ -661,6 +690,48 @@ impl CodexThread {
         }
     }
 
+    /// Starts an automatic goal turn with its live, account-bound preference.
+    pub async fn start_goal_turn_if_idle(
+        &self,
+        request: TurnInputRequest,
+        snapshot: Option<crate::GoalDaybreakSnapshot>,
+    ) -> CodexResult<StartIfIdleSubmission> {
+        let Some(snapshot) = snapshot.filter(|_| self.daybreak_program_propagation_enrolled())
+        else {
+            return self.start_turn_if_idle(request).await;
+        };
+        let mut data = codex_extension_api::ExtensionDataInit::new();
+        data.insert(crate::agent::helper_daybreak::goal::GoalDaybreakAdmission(
+            snapshot,
+        ));
+        self.start_turn_if_idle(WithTurnExtensionData::new(request, data))
+            .await
+    }
+
+    /// Captures the current saved preference for a newly accepted external goal.
+    pub async fn capture_saved_goal_daybreak(&self) -> Option<crate::GoalDaybreakSnapshot> {
+        if !self.daybreak_program_propagation_enrolled() {
+            return None;
+        }
+        crate::GoalDaybreakSnapshot::capture_saved(&self.session).await
+    }
+
+    /// Captures the exact turn's saved preference, never a later foreground turn's.
+    pub async fn capture_originating_saved_goal_daybreak(
+        &self,
+        expected_turn_id: &str,
+    ) -> Option<crate::GoalDaybreakSnapshot> {
+        if !self.daybreak_program_propagation_enrolled() {
+            return None;
+        }
+        let active = self.session.active_turn.lock().await;
+        let task = active.as_ref()?.task.as_ref()?;
+        if task.turn_context.sub_id != expected_turn_id || task.cancellation_token.is_cancelled() {
+            return None;
+        }
+        crate::GoalDaybreakSnapshot::from_turn(&task.turn_context)
+    }
+
     /// Starts a new internal continuation turn when idle, including in Plan mode.
     /// Rejects if a newer task has started, even if it has already finished.
     /// Supply an internal response item, or empty input to wake on a result already
@@ -946,6 +1017,19 @@ impl CodexThread {
         task.turn_context.turn_metadata_state.root_turn_id()
     }
 
+    /// Returns the explicit program captured for continuations of the named active turn.
+    pub async fn active_turn_continuation_program(
+        &self,
+        expected_turn_id: &str,
+    ) -> Option<Arc<ContinuationCyberAccessProgram>> {
+        let active = self.session.active_turn.lock().await;
+        let task = active.as_ref()?.task.as_ref()?;
+        if task.turn_context.sub_id != expected_turn_id {
+            return None;
+        }
+        task.turn_context.extension_data.get()
+    }
+
     pub async fn set_app_server_client_info(
         &self,
         app_server_client_name: Option<String>,
@@ -1144,17 +1228,43 @@ impl CodexThread {
         Ok(())
     }
 
-    /// Review the supplied tool call without executing it.
-    pub async fn guardian_review(
+    /// Assess a recorded call using the reviewer selected by the host.
+    pub async fn review_recorded_call(
         &self,
         tool_call: &ResponseItem,
+        mode: crate::guardian_review::RecordedReviewMode,
         cancellation: &CancellationToken,
     ) -> CodexResult<crate::guardian_review::GuardianReviewResult> {
         if self.session.active_turn.lock().await.is_some() {
             return Err(CodexErr::InvalidRequest("thread has an active turn".into()));
         }
+        if matches!(
+            mode,
+            crate::guardian_review::RecordedReviewMode::Attached(_)
+        ) {
+            // On resume or fork, evidence intake starts at the existing history tail.
+            let (config, initialization, history_mode) = self.session.thread_ready_config().await;
+            if !matches!(initialization, HistoryInitialization::New)
+                || self.session_source().is_non_root_agent()
+                || config.ephemeral
+                || history_mode != ThreadHistoryMode::Paginated
+            {
+                return Err(CodexErr::InvalidRequest(
+                    "Guardian V3 recorded review requires a fresh, non-ephemeral root thread with paginated history".into(),
+                ));
+            }
+        }
+        if mode.root_evidence().is_some()
+            && (!self.config().await.ephemeral
+                || matches!(self.session_source(), SessionSource::SubAgent(_)))
+        {
+            return Err(CodexErr::InvalidRequest(
+                "recorded worker review requires an ephemeral non-subagent thread".into(),
+            ));
+        }
         let history = self.session.clone_history().await;
-        crate::guardian::review_tool_call(&self.session, history, tool_call, cancellation).await
+        crate::guardian::review_tool_call(&self.session, history, tool_call, mode, cancellation)
+            .await
     }
 
     /// Inject raw Responses items. Plaintext agent-mail batches in a native MAv2
@@ -1414,6 +1524,11 @@ impl CodexThread {
         self.session.configured_snapshot().await
     }
 
+    /// Reads display settings without materializing an execution permission profile.
+    pub async fn thread_view_settings(&self) -> ThreadViewSettings {
+        self.session.thread_view_settings().await
+    }
+
     pub async fn config_snapshot(&self) -> ThreadConfigSnapshot {
         self.session.thread_config_snapshot().await
     }
@@ -1547,13 +1662,19 @@ impl CodexThread {
             .authorization_version(history.as_ref())
     }
 
-    /// Captures root originals and authorization before request-size preparation.
-    pub async fn guardian_root_snapshot(&self) -> Option<GuardianRootSnapshot> {
-        self.session
-            .services
-            .agent_control
-            .get_guardian_package(self.session.thread_id)
-            .await
+    /// Subscribes to coalesced committed changes to this runtime's Guardian evidence.
+    /// Release the watch borrow before calling Core or awaiting other work.
+    pub fn subscribe_guardian_evidence_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.thread_extension_data()
+            .get_or_init(GuardianReviewEvidence::default)
+            .changes
+            .subscribe()
+    }
+
+    /// Captures root originals and authorization before request-size preparation. A configured
+    /// host provider's failure is returned rather than treated as absent evidence.
+    pub async fn guardian_root_snapshot(&self) -> CodexResult<Option<GuardianRootSnapshot>> {
+        self.session.guardian_root_snapshot().await
     }
 
     /// Refresh the thread's layer-backed user config state from a caller-supplied

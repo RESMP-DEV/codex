@@ -212,10 +212,7 @@ impl ToolExecutor<ToolInvocation> for ToolSearchHandler {
         true
     }
 
-    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
-    where
-        ToolInvocation: 'a,
-    {
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -451,10 +448,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&without_sources, &replacement));
 
         registry.apply_functions_namespace_function_prefixes(Some(
-            &std::collections::BTreeMap::from([(
-                "create_event".to_string(),
-                "Guidance.".to_string(),
-            )]),
+            &std::collections::BTreeMap::from([("create_event".into(), "Guidance.".into())]),
         ));
         let prefixed = cache.get_or_build(&registry, ToolSearchSourceListing::Include);
         let reused = cache.get_or_build(&registry, ToolSearchSourceListing::Include);

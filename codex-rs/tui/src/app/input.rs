@@ -260,7 +260,7 @@ impl App {
             && self.sidebar_chooser_available()
     }
 
-    fn key_chord_contexts(&self, tui: &tui::Tui) -> crate::keymap::KeymapContextSet {
+    pub(super) fn key_chord_contexts(&self, tui: &tui::Tui) -> crate::keymap::KeymapContextSet {
         let contexts = self.active_keymap_contexts();
         if !self.conversation_focus_available(tui) {
             return contexts;
@@ -405,13 +405,18 @@ impl App {
             && self.keymap.chat.toggle_voice.is_pressed(key)
     }
 
-    pub(super) fn handle_voice_toggle_key(&mut self, tui: &mut tui::Tui, key: KeyEvent) -> bool {
+    pub(super) async fn handle_voice_toggle_key(
+        &mut self,
+        tui: &mut tui::Tui,
+        key: KeyEvent,
+    ) -> bool {
         if !self.voice_toggle_pressed(key) {
             return false;
         }
         self.cancel_transcript_browsing(tui);
         if !self.chat_widget.handle_startup_submission_key(key) {
-            self.control_voice(crate::app_event::VoiceControl::Toggle);
+            self.control_voice(crate::app_event::VoiceControl::Toggle)
+                .await;
         }
         true
     }
@@ -536,6 +541,15 @@ impl App {
     ) {
         let activation_key = self.routed_key_activation.take();
         if self.chat_widget.fork_in_progress {
+            return;
+        }
+        if key_event.code == KeyCode::Esc
+            && key_event.modifiers.is_empty()
+            && key_event.kind == KeyEventKind::Press
+            && self.scrollback_cycle_pending()
+        {
+            self.sidebar_mut().cancel_scrollback_cycle();
+            tui.frame_requester().schedule_frame();
             return;
         }
         if self.chat_widget.has_provider_error()
@@ -791,6 +805,16 @@ impl App {
             }
         }
 
+        if self.scrollback_cycle_pending()
+            && !crate::key_hint::ctrl(KeyCode::Char('c')).is_press(key_event)
+        {
+            let action = self
+                .chat_widget
+                .handle_restricted_key(key_event, RestrictedInputMode::DraftHandoff);
+            self.handle_clipboard_key_action(tui, action);
+            return;
+        }
+
         if self.should_handle_unavailable_thread_key(key_event) {
             self.chat_widget
                 .handle_restricted_key(key_event, RestrictedInputMode::UnavailableThread);
@@ -861,6 +885,13 @@ impl App {
         };
     }
 
+    pub(super) fn is_side_toggle(&self, key: KeyEvent) -> bool {
+        let bindings = &self.keymap.app.toggle_side_conversation;
+        bindings.is_pressed(key)
+            || bindings.contains(&crate::key_hint::ctrl(KeyCode::Char('/')))
+                && crate::key_hint::ctrl(KeyCode::Char('7')).is_press(key)
+    }
+
     pub(crate) async fn handle_shared_app_keymap_action(
         &mut self,
         tui: &mut tui::Tui,
@@ -872,14 +903,16 @@ impl App {
             self.chat_widget.open_warnings(&self.transcript_cells);
             return true;
         }
-        let side_toggle_bindings = &self.keymap.app.toggle_side_conversation;
-        if side_toggle_bindings.is_pressed(key_event)
-            || side_toggle_bindings.contains(&crate::key_hint::ctrl(KeyCode::Char('/')))
-                && crate::key_hint::ctrl(KeyCode::Char('7')).is_press(key_event)
-        {
-            if let Err(err) = self.toggle_side_conversation(tui, app_server).await {
-                self.chat_widget
-                    .add_error_message(format!("Failed to switch side conversation: {err}"));
+        if self.is_side_toggle(key_event) {
+            if let Some(parent) = self.current_displayed_thread_id()
+                && self.sidebar_parent() == Some(parent)
+                && self.can_cycle_scrollback_chats()
+                && app_server.can_list_saved_side_chats(parent)
+            {
+                self.discover_saved_chats(app_server, parent, /*cycle*/ true);
+                tui.frame_requester().schedule_frame();
+            } else {
+                self.advance_conversation(tui, app_server).await;
             }
             return true;
         }

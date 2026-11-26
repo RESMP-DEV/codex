@@ -113,6 +113,8 @@ pub enum Feature {
     DaybreakProgramPropagation,
     /// Restrict CLI resume of attributed local threads to their creator.
     CliResumeAccountCheck,
+    /// Fetch Statsig decisions for this harness.
+    StatsigGates,
     /// Removed no-op; use `tui.fullscreen_transcript` instead.
     TranscriptV2,
     // Stable.
@@ -224,6 +226,8 @@ pub enum Feature {
     DeferredExecutor,
     /// Describe each selected environment's filesystem and permissions separately.
     PerEnvironmentContext,
+    /// Describe uniform workspace-write permissions without repeating paths or nested XML.
+    CompactFilesystemContext,
     /// Use the current working directory for turn diff display paths.
     CwdRelativeTurnDiffs,
     /// Enable runtime metrics snapshots via a manual reader.
@@ -442,7 +446,7 @@ pub enum Feature {
     SkillMcpDependencyInstall,
     /// Omit descriptions from the model-visible available-skills catalog.
     OmitSkillDescriptions,
-    /// Run cheap skill-search methods in shadow mode and emit experiment metrics.
+    /// Removed compatibility flag for shadow skill ranking.
     SkillSearch,
     /// Append skill additions and edits within a cumulative context budget.
     SkillCatalogDeltas,
@@ -491,6 +495,8 @@ pub enum Feature {
     GuardianV2DecisionsComparison,
     /// Enable Guardian V3 integrations.
     GuardianV3,
+    /// Observe Guardian V3 alongside the existing automatic reviewer.
+    GuardianV3Shadow,
     /// Removed compatibility flag for the unused Guardian extension prototype.
     GuardianExt,
     /// Enable persisted thread goals and automatic goal continuation.
@@ -643,6 +649,7 @@ pub struct Features {
     legacy_usages: BTreeSet<LegacyFeatureUsage>,
     /// Spawned agents require their own opt-in, independent of the root feature flag.
     pub subagent_async_messages_enabled: bool,
+    pub async_messages_in_code_mode: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -829,7 +836,7 @@ impl Features {
                 "personality" | "plugin_discovery_prefetch" | "plugin_hooks" => {
                     continue;
                 }
-                "skill_env_var_dependency_prompt" => {
+                "skill_env_var_dependency_prompt" | "skill_search" => {
                     continue;
                 }
                 "terminal_resize_reflow" => {
@@ -1058,10 +1065,13 @@ pub struct FeaturesToml {
 
 impl Features {
     fn apply_toml(&mut self, features: &FeaturesToml) {
-        if let Some(FeatureToml::Config(config)) = &features.send_message_to_user_async
-            && let Some(subagents) = config.subagents
-        {
-            self.subagent_async_messages_enabled = subagents;
+        if let Some(FeatureToml::Config(config)) = &features.send_message_to_user_async {
+            if let Some(subagents) = config.subagents {
+                self.subagent_async_messages_enabled = subagents;
+            }
+            if let Some(direct_only) = config.direct_only {
+                self.async_messages_in_code_mode = !direct_only;
+            }
         }
         let entries = features.entries();
         self.apply_map(&entries);
@@ -1102,6 +1112,11 @@ impl FeaturesToml {
         }
         if let Some(enabled) = self.guardianv3.as_ref().and_then(FeatureToml::enabled) {
             entries.insert(Feature::GuardianV3.key().to_string(), enabled);
+        }
+        if let Some(FeatureToml::Config(config)) = &self.guardianv3
+            && let Some(enabled) = config.shadow_enabled
+        {
+            entries.insert(Feature::GuardianV3Shadow.key().to_string(), enabled);
         }
         if let Some(enabled) = self.multi_agent_v2.as_ref().and_then(FeatureToml::enabled) {
             entries.insert(Feature::MultiAgentV2.key().to_string(), enabled);
@@ -1206,6 +1221,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::CliResumeAccountCheck,
         key: "cli_resume_account_check",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::StatsigGates,
+        key: "statsig_gates",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1347,6 +1368,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::PerEnvironmentContext,
         key: "per_environment_context",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::CompactFilesystemContext,
+        key: "compact_filesystem_context",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1871,8 +1898,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::McpSharedReplCwd,
         key: "mcp_shared_repl_cwd",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::McpLazyStdioStartup,
@@ -2219,8 +2246,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::SkillSearch,
         key: "skill_search",
-        stage: Stage::Stable,
-        default_enabled: true,
+        stage: Stage::Removed,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::SkillCatalogDeltas,
@@ -2369,6 +2396,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GuardianV3,
         key: "guardianv3",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::GuardianV3Shadow,
+        key: "guardianv3.shadow_enabled",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

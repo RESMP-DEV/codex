@@ -618,6 +618,7 @@ client_request_definitions! {
     },
     ThreadDelete => "thread/delete" {
         params: v2::ThreadDeleteParams,
+        inspect_params: true,
         serialization: thread_id(params.thread_id),
         response: v2::ThreadDeleteResponse,
     },
@@ -1495,6 +1496,19 @@ client_request_definitions! {
         response: v2::GetAccountTokenUsageResponse,
     },
 
+    #[experimental("account/voiceSettings/read")]
+    AccountVoiceSettingsRead => "account/voiceSettings/read" {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        serialization: None,
+        response: v2::AccountVoiceSettingsReadResponse,
+    },
+    #[experimental("account/voiceSettings/write")]
+    AccountVoiceSettingsWrite => "account/voiceSettings/write" {
+        params: v2::AccountVoiceSettingsWriteParams,
+        serialization: global("account-auth"),
+        response: v2::AccountVoiceSettingsWriteResponse,
+    },
+
     GetWorkspaceMessages => "account/workspaceMessages/read" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: None,
@@ -1972,7 +1986,7 @@ server_request_definitions! {
     /// Execute a dynamic tool call on the client.
     DynamicToolCall => "item/tool/call" {
         params: v2::DynamicToolCallParams,
-        response: v2::DynamicToolCallResponse,
+        response: v2::DynamicToolCallResult,
     },
 
     ChatgptAuthTokensRefresh => "account/chatgptAuthTokens/refresh" {
@@ -2252,7 +2266,6 @@ mod tests {
     use codex_protocol::protocol::ConversationTextRole;
     use codex_protocol::protocol::RealtimeConversationVersion;
     use codex_protocol::protocol::RealtimeOutputModality;
-    use codex_protocol::protocol::RealtimeVoice;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
@@ -4224,7 +4237,6 @@ mod tests {
                 voice_session_id: Some("voice_789".to_string()),
                 transport: None,
                 version: Some(RealtimeConversationVersion::V3),
-                voice: Some(RealtimeVoice::Marin),
             },
         };
         assert_eq!(
@@ -4263,8 +4275,7 @@ mod tests {
                     "realtimeSessionId": "sess_456",
                     "voiceSessionId": "voice_789",
                     "transport": null,
-                    "version": "v3",
-                    "voice": "marin"
+                    "version": "v3"
                 }
             }),
             serde_json::to_value(&request)?,
@@ -4297,7 +4308,6 @@ mod tests {
                 voice_session_id: None,
                 transport: None,
                 version: None,
-                voice: None,
             },
         };
         assert_eq!(
@@ -4322,8 +4332,7 @@ mod tests {
                     "realtimeSessionId": null,
                     "voiceSessionId": null,
                     "transport": null,
-                    "version": null,
-                    "voice": null
+                    "version": null
                 }
             }),
             serde_json::to_value(&default_prompt_request)?,
@@ -4352,7 +4361,6 @@ mod tests {
                 voice_session_id: None,
                 transport: None,
                 version: None,
-                voice: None,
             },
         };
         assert_eq!(
@@ -4378,8 +4386,7 @@ mod tests {
                     "realtimeSessionId": null,
                     "voiceSessionId": null,
                     "transport": null,
-                    "version": null,
-                    "voice": null
+                    "version": null
                 }
             }),
             serde_json::to_value(&null_prompt_request)?,
@@ -4394,8 +4401,7 @@ mod tests {
                 "codexResponseHandoffPrefix": "",
                 "outputModality": "audio",
                 "realtimeSessionId": null,
-                "transport": null,
-                "voice": null
+                "transport": null
             }
         });
         assert_eq!(
@@ -4411,8 +4417,7 @@ mod tests {
                 "outputModality": "audio",
                 "prompt": null,
                 "realtimeSessionId": null,
-                "transport": null,
-                "voice": null
+                "transport": null
             }
         });
         assert_eq!(

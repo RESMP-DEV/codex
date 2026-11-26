@@ -106,7 +106,6 @@ use codex_app_server_protocol::SkillMetadata;
 use codex_app_server_protocol::ThreadGoal as AppThreadGoal;
 use codex_app_server_protocol::ThreadGoalStatus as AppThreadGoalStatus;
 use codex_app_server_protocol::ThreadItemPayload;
-use codex_app_server_protocol::ThreadSettings;
 use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::ToolRequestUserInputParams;
@@ -253,6 +252,7 @@ use crate::status::RateLimitSnapshotDisplay;
 use crate::status::remote_connection::RemoteConnectionStatus;
 use crate::status_indicator_widget::STATUS_DETAILS_DEFAULT_MAX_LINES;
 use crate::status_indicator_widget::StatusDetailsCapitalization;
+use crate::status_indicator_widget::StatusHeader;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod activity_groups;
@@ -421,6 +421,7 @@ mod usage_history;
 use self::transcript::TranscriptState;
 mod turn_lifecycle;
 mod turn_runtime;
+use self::turn_lifecycle::SteerHint;
 use self::turn_lifecycle::TurnLifecycleState;
 mod usage;
 mod user_messages;
@@ -535,6 +536,7 @@ pub(crate) enum ExternalEditorState {
 /// (which view gets Ctrl+C), while `ChatWidget` owns process-level decisions such as interrupting
 /// active work, arming the double-press quit shortcut, and requesting shutdown-first exit.
 pub(crate) struct ChatWidget {
+    pub(crate) bidi_layout: bool,
     pub(crate) empty_state_animation:
         std::cell::RefCell<crate::empty_state_animation::EmptyStateAnimation>,
     pub(crate) daybreak_enabled: bool,
@@ -678,8 +680,8 @@ pub(crate) struct ChatWidget {
     interrupts: InterruptManager,
     // Accumulates the current reasoning block text to extract a header
     reasoning_buffer: String,
-    // Caches the first completed bold header so later deltas do not rescan the whole block.
-    reasoning_header: Option<String>,
+    // Keep the last usable heading through tools and empty reasoning items.
+    reasoning_header: Option<StatusHeader>,
     // Preserves reasoning-summary part boundaries for transcript-only recording.
     reasoning_summary_parts: Vec<String>,
     status_state: StatusState,
@@ -1234,9 +1236,7 @@ impl ChatWidget {
         self.bottom_pane.pre_draw_tick();
         self.flush_realtime_transcript_history();
         self.refresh_realtime_microphone_level();
-        if let Some(pet) = self.ambient_pet.as_ref() {
-            pet.schedule_next_frame();
-        }
+        self.tick_ambient_pet();
         self.refresh_goal_status_indicator_for_time_tick();
         if self.terminal_title_shows_action_required() != self.last_terminal_title_requires_action {
             self.refresh_terminal_title();
@@ -1255,7 +1255,7 @@ impl ChatWidget {
         let status = self.desired_program_status();
         if let Err(err) = crate::terminal_program_status::set_terminal_program_status(
             status,
-            self.iterm_session_detail(status),
+            self.session_status_detail(status),
         ) {
             tracing::debug!(error = %err, "failed to set terminal program status");
         }
@@ -1418,6 +1418,14 @@ impl ChatWidget {
             }),
         };
         if let Some(pending) = matching.and_then(|index| steers.remove(index)) {
+            if steers.is_empty()
+                && self.turn_lifecycle.steer_hint == SteerHint::Pending
+                && self.turn_lifecycle.agent_turn_running
+                && self.last_turn_id() == Some(turn_id)
+                && !self.review.is_review_mode
+            {
+                self.turn_lifecycle.steer_hint = SteerHint::Acknowledged;
+            }
             self.refresh_pending_input_preview();
             if !already_rendered {
                 if !pending.optimistically_rendered {

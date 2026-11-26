@@ -26,8 +26,6 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
 
-use ratatui::style::Style;
-
 const CENTER_WIDTH: u16 = 36;
 // One column for the divider and one for padding before the conversation.
 const GUTTER_WIDTH: u16 = 2;
@@ -47,8 +45,7 @@ pub(super) struct Workspace {
     focus: Option<Pane>,
     pub(super) motion: super::pane_motion::PaneMotion,
     pub(super) fraction: Option<f64>,
-    width: Option<u16>,
-    divider_drag_viewport: Option<Rect>,
+    pub(super) width: Option<u16>,
 }
 
 impl Workspace {
@@ -74,7 +71,33 @@ impl Workspace {
     }
 }
 
+pub(super) fn center_width(width: i32, total: u16) -> u16 {
+    width.clamp(
+        24,
+        i32::from(total.saturating_sub(MIN_CHAT_WIDTH + GUTTER_WIDTH).max(24)),
+    ) as u16
+}
+
 impl App {
+    /// Both blank gutter cells belong to the painted outer divider. The task
+    /// details separator inside the center is not a workspace resize handle.
+    pub(super) fn center_divider_area(&self, viewport: Rect) -> Option<Rect> {
+        let workspace = &self.agents_overview.workspace;
+        if !workspace.is_open()
+            || self.overlay.is_some()
+            || self.chat_widget.has_active_view()
+            || viewport.width < MIN_SPLIT_WIDTH
+            || workspace.fraction != Some(1.0)
+        {
+            return None;
+        }
+        let center = self.conversation_frame.command_center?;
+        // Between input and paint, only a captured drag may be ahead of the painted center.
+        (center.right().saturating_add(GUTTER_WIDTH) <= viewport.right()
+            && (self.divider_drag.is_some() || self.workspace_areas(viewport).0 == Some(center)))
+        .then(|| Rect::new(center.right(), center.y, GUTTER_WIDTH, center.height))
+    }
+
     pub(super) fn workspace_center_owns_input(&self) -> bool {
         self.agents_overview.workspace.focus == Some(Pane::Center)
             && self.overlay.is_none()
@@ -97,16 +120,16 @@ impl App {
 
     pub(super) fn workspace_areas(&self, viewport: Rect) -> (Option<Rect>, Option<Rect>) {
         if viewport.width >= MIN_SPLIT_WIDTH {
+            let preferred = self
+                .divider_drag
+                .and_then(|drag| drag.center_preview(viewport))
+                .or(self.agents_overview.workspace.width)
+                .unwrap_or(CENTER_WIDTH);
+            let width = center_width(i32::from(preferred), viewport.width);
             let [center, _, conversation] = Layout::horizontal([
                 Constraint::Length(
-                    (f64::from(
-                        self.agents_overview
-                            .workspace
-                            .width
-                            .unwrap_or(CENTER_WIDTH)
-                            .min(viewport.width.saturating_sub(MIN_CHAT_WIDTH + GUTTER_WIDTH)),
-                    ) * self.agents_overview.workspace.fraction.unwrap_or(1.0))
-                    .round() as u16,
+                    (f64::from(width) * self.agents_overview.workspace.fraction.unwrap_or(1.0))
+                        .round() as u16,
                 ),
                 Constraint::Length(GUTTER_WIDTH),
                 Constraint::Min(MIN_CHAT_WIDTH),
@@ -153,7 +176,7 @@ impl App {
         let Some(key) = self.route_key_chord_event(tui, key) else {
             return;
         };
-        if self.handle_voice_toggle_key(tui, key) {
+        if self.handle_voice_toggle_key(tui, key).await {
             return;
         }
         if self
@@ -227,7 +250,6 @@ impl App {
             }
             if view.is_complete() {
                 self.agents_overview.workspace.focus = None;
-                self.agents_overview.workspace.divider_drag_viewport = None;
                 self.focus_workspace_composer(tui);
                 self.conversation_frame = Default::default();
             }
@@ -240,45 +262,16 @@ impl App {
             || self.overlay.is_some()
             || self.chat_widget.has_active_view()
         {
-            self.agents_overview.workspace.divider_drag_viewport = None;
             return false;
         }
         let viewport: Rect = tui.terminal.last_known_screen_size.into();
-        let (center, conversation) = self.workspace_areas(viewport);
-        if matches!(mouse.kind, MouseEventKind::Down(_)) {
-            self.agents_overview.workspace.divider_drag_viewport = None;
-        }
-        if let Some(center) = center
-            && conversation.is_some()
-            && mouse.kind == MouseEventKind::Down(crossterm::event::MouseButton::Left)
-            && mouse.column == center.right()
-        {
-            self.agents_overview.workspace.divider_drag_viewport = Some(viewport);
-            return true;
-        }
-        if matches!(
-            mouse.kind,
-            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
-        ) && self.agents_overview.workspace.divider_drag_viewport.take() == Some(viewport)
-        {
-            let max = viewport
-                .width
-                .saturating_sub(MIN_CHAT_WIDTH + GUTTER_WIDTH)
-                .max(24);
-            self.agents_overview.workspace.width =
-                Some(mouse.column.saturating_sub(viewport.x).clamp(24, max));
-            if mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
-                self.agents_overview.workspace.divider_drag_viewport = Some(viewport);
-            }
-            tui.frame_requester().schedule_frame();
-            return true;
-        }
         let center_was_focused = self.agents_overview.workspace.focus == Some(Pane::Center);
         // The press chose the owner. Let its selection finish even outside its pane.
         if matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_)) {
             return center_was_focused;
         }
 
+        let (center, conversation) = self.workspace_areas(viewport);
         let point = (mouse.column, mouse.row).into();
         let pressed = matches!(mouse.kind, MouseEventKind::Down(_));
         if center.is_some_and(|rect| rect.contains(point)) {
@@ -318,6 +311,7 @@ impl App {
         center: Rect,
         conversation: Option<Rect>,
         frames: &crate::tui::FrameRequester,
+        hint_focus: crate::footer_hint::HintFocus,
     ) {
         let center_focused = self.workspace_center_owns_input();
         frame
@@ -329,6 +323,7 @@ impl App {
         let area = center;
         if let Some(view) = &mut self.agents_overview.workspace.view {
             view.dock_focused = conversation.map(|_| center_focused);
+            view.hint_focus = hint_focus;
             view.dock_motion = Some((
                 crate::motion::MotionMode::from_animations_enabled(
                     self.local_settings.tui.animations,
@@ -336,16 +331,9 @@ impl App {
                 frames.clone(),
             ));
             view.render(area, frame.buffer);
-            if center_focused {
+            if hint_focus.is_active() {
                 frame.cursor_position = view.cursor_pos(area).map(Into::into);
                 frame.set_cursor_style(view.cursor_style(area));
-            }
-        }
-        if conversation.is_some() {
-            for y in center.y..center.bottom() {
-                frame.buffer[(center.right(), y)]
-                    .set_symbol("│")
-                    .set_style(Style::default().dim());
             }
         }
     }

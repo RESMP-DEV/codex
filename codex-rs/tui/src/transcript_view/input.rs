@@ -162,7 +162,7 @@ impl TranscriptView {
             None if forward => 0,
             None => count - 1,
         };
-        let offset = links[index].0.start;
+        let offset = links[index].0.first()?.start;
         let row = layout.row_for_offset(offset);
         if !self
             .visible
@@ -195,17 +195,17 @@ impl TranscriptView {
         let Some(layout) = self.layout(cells, /*index*/ 0) else {
             return;
         };
-        let Some((range, _)) = layout.document_links().into_iter().nth(index) else {
+        let Some((ranges, _)) = layout.document_links().into_iter().nth(index) else {
             return;
         };
-        for (row, visible) in self.visible.iter().enumerate() {
+        for (y, visible) in (self.area.top()..self.area.bottom()).zip(&self.visible) {
             if visible.index == 0 {
-                visible.layout.highlight(
-                    range.clone(),
-                    Rect::new(self.area.x, self.area.y + row as u16, self.area.width, 1),
-                    buf,
-                    visible.row,
-                );
+                let area = Rect::new(self.area.x, y, self.area.width, /*height*/ 1);
+                for range in &ranges {
+                    visible
+                        .layout
+                        .highlight(range.clone(), area, buf, visible.row);
+                }
             }
         }
     }
@@ -257,7 +257,7 @@ impl TranscriptView {
         if self.copy_mode.is_some() {
             return true;
         }
-        if self.select_mode.is_some() {
+        if self.is_select_mode() {
             return true;
         }
         if self.selection.is_some() {
@@ -293,7 +293,7 @@ impl TranscriptView {
         if let Some(action) = self.handle_copy_mode_key(key, cells) {
             return Some(action);
         }
-        if self.select_mode.is_some() {
+        if self.is_select_mode() {
             if self.is_search_editing() {
                 let (code, modifiers) =
                     crate::key_hint::normalize_key_parts(key.code, key.modifiers);
@@ -326,6 +326,15 @@ impl TranscriptView {
         if modifiers == KeyModifiers::CONTROL && code == KeyCode::Char(' ') {
             self.begin_selection(cells, self.area.x, self.area.y, /*clicks*/ 1);
             if let Some(selection) = &mut self.selection {
+                // Ctrl+Space extends a half-open source range with the arrow keys.
+                // Start at the logical boundary even if the leftmost glyph is RTL.
+                if let Some(first) = self.visible.first()
+                    && first.layout.visual_hit(first.row, /*column*/ 0).is_some()
+                {
+                    let mut anchor = selection.start;
+                    anchor.offset = first.layout.position_at(first.row, /*column*/ 0);
+                    selection.set_keyboard_range(anchor, anchor);
+                }
                 selection.dragging = false;
                 selection.resume_on_empty = false;
             }
@@ -367,6 +376,7 @@ impl TranscriptView {
                 selection.end,
                 selection.unit(),
                 selection.has_table_scope(),
+                selection.mouse_endpoints,
             )
         });
         let action =
@@ -377,6 +387,7 @@ impl TranscriptView {
                 selection.end,
                 selection.unit(),
                 selection.has_table_scope(),
+                selection.mouse_endpoints,
             )
         });
         if endpoint_changed && before != after {

@@ -146,7 +146,8 @@ where
 {
     /// The backend used to interface with the terminal
     backend: B,
-    pub(crate) tmux_kitty_image_base: Option<u32>,
+    pub(crate) virtual_image_base: Option<u32>,
+    pub(crate) bidi_layout: bool,
     /// Holds the results of the current and previous draw calls. The two are compared at the end
     /// of each draw pass to output the necessary updates to the terminal
     buffers: [Buffer; 2],
@@ -239,7 +240,8 @@ where
     ) -> Self {
         Self {
             backend,
-            tmux_kitty_image_base: None,
+            virtual_image_base: None,
+            bidi_layout: false,
             buffers: [Buffer::empty(Rect::ZERO), Buffer::empty(Rect::ZERO)],
             current: 0,
             hidden_cursor: false,
@@ -416,16 +418,16 @@ where
         let cursor_position = frame.cursor_position;
         let cursor_style = frame.cursor_style;
         let mut images = std::mem::take(&mut frame.image_placements);
-        let first_id = if let Some(base) = self.tmux_kitty_image_base {
-            images.truncate(254); // The last two pane IDs belong to the pet and picker.
+        let first_id = if let Some(base) = self.virtual_image_base {
+            images.truncate(crate::pets::FIRST_PET_SLOT as usize);
             base
         } else {
             crate::transcript_image::FIRST_IMAGE_ID
         };
-        let tmux = self.tmux_kitty_image_base.is_some();
-        // tmux retains placeholder cells, so keep their existing positional IDs and redraw
+        let virtual_placements = self.virtual_image_base.is_some();
+        // Virtual placements retain placeholder cells, so keep their existing positional IDs and redraw
         // behavior. Native Kitty can keep the same ID and pixels as other images change.
-        if !tmux || *retained_images == images {
+        if !virtual_placements || *retained_images == images {
             for image in &mut images {
                 if let Some(index) = retained_images.iter().position(|old| old == image) {
                     *image = retained_images.swap_remove(index);
@@ -435,12 +437,7 @@ where
             self.invalidate_viewport();
         }
         let mut moved = Vec::new();
-        // iTerm2 can discard the pixel data when a placement is removed. Redraw it
-        // from the source in that terminal, and keep the fast path for native Kitty.
-        if !tmux
-            && codex_terminal_detection::terminal_info().name
-                != codex_terminal_detection::TerminalName::Iterm2
-        {
+        if !virtual_placements && crate::terminal_capabilities::images::retains_image_data() {
             for (index, image) in images.iter_mut().enumerate() {
                 if image.terminal_id.is_none()
                     && image.image.protocol != crate::pets::ImageProtocol::Sixel
@@ -488,7 +485,7 @@ where
             } else if !moved.contains(&index)
                 && updates.iter().any(|update| match update {
                     DrawCommand::Put { x, y, .. } => image.area.contains((*x, *y).into()),
-                    DrawCommand::ClearToEnd { x, y, .. } => {
+                    DrawCommand::ClearToEnd { x, y } => {
                         (image.area.y..image.area.bottom()).contains(y) && *x < image.area.right()
                     }
                 })
@@ -520,7 +517,7 @@ where
             let id = placement
                 .terminal_id
                 .ok_or_else(|| io::Error::other("missing terminal ID for placement"))?;
-            let kitty_placement = if tmux {
+            let kitty_placement = if virtual_placements {
                 crate::pets::KittyPlacement::Virtual(id)
             } else {
                 crate::pets::KittyPlacement::Cursor(id)
@@ -627,7 +624,7 @@ where
     // The pet draws after the text frame. Mark its placeholder cells so the next diff
     // restores the underlying text when the sprite moves or disappears.
     pub(crate) fn mark_pet_placeholders(&mut self, request: Option<&crate::pets::AmbientPetDraw>) {
-        if self.tmux_kitty_image_base.is_some()
+        if self.virtual_image_base.is_some()
             && let Some(sprite) = request
         {
             for pos in sprite.area().intersection(self.viewport_area).positions() {
@@ -710,7 +707,7 @@ use ratatui::buffer::Cell;
 #[derive(Debug, IsVariant)]
 enum DrawCommand {
     Put { x: u16, y: u16, cell: Cell },
-    ClearToEnd { x: u16, y: u16, bg: Color },
+    ClearToEnd { x: u16, y: u16 },
 }
 
 fn diff_buffers(a: &Buffer, b: &Buffer) -> Vec<DrawCommand> {
@@ -723,25 +720,23 @@ fn diff_buffers(a: &Buffer, b: &Buffer) -> Vec<DrawCommand> {
         let row_end = row_start + a.area.width as usize;
         let previous_row = &a.content[row_start..row_end];
         let row = &next_buffer[row_start..row_end];
-        let bg = row.last().map(|cell| cell.bg).unwrap_or(Color::Reset);
 
-        // Scan the row to find the rightmost column that still matters: any non-space glyph,
-        // any cell whose bg differs from the row’s trailing bg, any cell with modifiers,
-        // or any cell explicitly marked for updating.
-        // Multi-width glyphs extend that region through their full displayed width.
-        // After that point the rest of the row can be cleared with a single ClearToEnd, a perf win
-        // versus emitting multiple space Put commands.
+        // Only erase a tail of blanks with the default background. Apple Terminal can
+        // lose a background applied by an erase when a later frame clears part of
+        // the row. Printed spaces keep their color when the diff skips them.
         let mut last_nonblank_column = 0usize;
         let mut column = 0usize;
         while column < row.len() {
             let cell = &row[column];
             let width = usize::from(cell.cell_width());
-            // Keep AlwaysUpdate blanks in the drawable prefix; otherwise filtering the tail
-            // would discard the repaint explicitly requested by Ratatui.
+            // A trailing clear must neither swallow a forced repaint nor erase skipped cells.
             if cell.symbol() != " "
-                || cell.bg != bg
+                || cell.bg != Color::Reset
                 || cell.modifier != Modifier::empty()
-                || cell.diff_option == CellDiffOption::AlwaysUpdate
+                || matches!(
+                    cell.diff_option,
+                    CellDiffOption::AlwaysUpdate | CellDiffOption::Skip
+                )
             {
                 last_nonblank_column = column + (width.saturating_sub(1));
             }
@@ -766,7 +761,7 @@ fn diff_buffers(a: &Buffer, b: &Buffer) -> Vec<DrawCommand> {
                 });
             if tail_changed || wide_char_overlaps_tail {
                 let (x, y) = a.pos_of(row_start + clear_start);
-                updates.push(DrawCommand::ClearToEnd { x, y, bg });
+                updates.push(DrawCommand::ClearToEnd { x, y });
             }
         }
 
@@ -838,7 +833,7 @@ where
     for command in commands {
         let (x, y) = match &command {
             DrawCommand::Put { x, y, .. } => (x, y),
-            DrawCommand::ClearToEnd { x, y, .. } => (x, y),
+            DrawCommand::ClearToEnd { x, y } => (x, y),
         };
         let hyperlink = match &command {
             DrawCommand::Put { cell, .. } => osc8_hyperlink_parts(cell.symbol()),
@@ -882,11 +877,11 @@ where
                 let symbol = hyperlink.map_or_else(|| cell.symbol(), |(_, visible)| visible);
                 queue!(writer, Print(symbol))?;
             }
-            DrawCommand::ClearToEnd { bg: clear_bg, .. } => {
+            DrawCommand::ClearToEnd { .. } => {
                 queue!(writer, SetAttribute(crossterm::style::Attribute::Reset))?;
                 modifier = Modifier::empty();
-                queue!(writer, SetBackgroundColor((*clear_bg).into_crossterm()))?;
-                bg = *clear_bg;
+                fg = Color::Reset;
+                bg = Color::Reset;
                 queue!(writer, Clear(crossterm::terminal::ClearType::UntilNewLine))?;
             }
         }
@@ -993,6 +988,8 @@ mod tests {
 
     #[path = "cursor_tests.rs"]
     mod cursor;
+    #[path = "shading_tests.rs"]
+    mod shading;
 
     struct CaptureBackend {
         output: Vec<u8>,
@@ -1050,7 +1047,7 @@ mod tests {
             );
             let mut terminal =
                 Terminal::with_options(CaptureBackend::new(/*width*/ 40, /*height*/ 12)).unwrap();
-            terminal.tmux_kitty_image_base = tmux_base;
+            terminal.virtual_image_base = tmux_base;
             let size = terminal.last_known_screen_size;
             terminal.set_viewport_area(Rect::new(
                 /*x*/ 0,
@@ -1505,7 +1502,7 @@ mod tests {
             assert!(
                 commands
                     .iter()
-                    .any(|command| matches!(command, DrawCommand::ClearToEnd { x: 2, y: 0, .. })),
+                    .any(|command| matches!(command, DrawCommand::ClearToEnd { x: 2, y: 0 })),
                 "expected clear-to-end after {before:?} became {after:?}; commands: {commands:?}"
             );
         }
@@ -1573,6 +1570,8 @@ mod tests {
                     .any(|command| matches!(command, DrawCommand::Put { x: 1, y: 0, .. })),
                 "expected the always-update cell in {text:?} to be emitted; commands: {commands:?}"
             );
+            next[(1, 0)].set_diff_option(CellDiffOption::Skip);
+            assert!(diff_buffers(&previous, &next).is_empty());
         }
     }
 

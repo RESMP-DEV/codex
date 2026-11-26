@@ -12,6 +12,7 @@ mod copy_mode;
 mod disclosure;
 mod document;
 pub(crate) use document::DocumentPosition;
+pub(crate) use document::DocumentTarget;
 mod follow_control;
 mod footer;
 mod input;
@@ -26,6 +27,7 @@ mod text;
 mod turn_details;
 mod turn_tip;
 
+use crate::terminal_hyperlinks::bidi;
 use std::sync::Arc;
 
 use crate::chatwidget::ActiveCellTranscriptKey;
@@ -95,6 +97,7 @@ struct VisibleRow {
 /// Shared scrolling and interaction state for compact and detailed transcript presentations.
 pub(crate) struct TranscriptView {
     pub(crate) image_protocol: Option<crate::pets::ImageProtocol>,
+    pub(crate) bidi_layout: bool,
     pub(crate) agent_links: Option<crate::backend_id::BackendId>,
     pub(crate) document_links: bool,
     pub(crate) mouse_scroll_speed: f64,
@@ -114,6 +117,7 @@ pub(crate) struct TranscriptView {
     live_key: Option<(u16, ActiveCellTranscriptKey)>,
     live_continuation: bool,
     area: Rect,
+    last_rendered_width: u16,
     prompt_header_target: Option<(Rect, EntryKey)>,
     suppressed_prompt_header: Option<prompt_header::SuppressedHeader>,
     visible: Vec<VisibleRow>,
@@ -140,6 +144,7 @@ impl Default for TranscriptView {
     fn default() -> Self {
         Self {
             image_protocol: None,
+            bidi_layout: false,
             agent_links: None,
             document_links: false,
             mouse_scroll_speed: 1.0,
@@ -159,6 +164,7 @@ impl Default for TranscriptView {
             live_key: None,
             live_continuation: false,
             area: Rect::default(),
+            last_rendered_width: 0,
             prompt_header_target: None,
             suppressed_prompt_header: None,
             visible: Vec::new(),
@@ -226,7 +232,8 @@ impl TranscriptView {
         let suppressed_prompt_header = self.suppressed_prompt_header.take();
         Clear.render(area, buf);
         let previous_height = self.area.height;
-        let resized = self.area.width != area.width || self.area.bottom() != area.bottom();
+        let resized = self.last_rendered_width != area.width || self.area.bottom() != area.bottom();
+        self.last_rendered_width = area.width;
         let select_width_changed = self
             .visible
             .first()
@@ -523,8 +530,10 @@ impl TranscriptView {
         if self.detailed {
             self.sync_live_tail(width, /*key*/ None, lines);
         } else if let Some(row) = summary {
+            let bidi_layout = self.bidi_layout;
             self.sync_live_layout(width, /*key*/ None, |width| {
-                Some(row.layout(width, expanded, auxiliary.to_vec()))
+                let lines = bidi::session_lines(auxiliary.to_vec(), bidi_layout);
+                Some(row.layout(width, expanded, lines))
             });
         } else {
             self.sync_live_activity_tail(width, /*key*/ None, expanded && disclose, |width| {
@@ -569,8 +578,10 @@ impl TranscriptView {
         key: Option<ActiveCellTranscriptKey>,
         lines: impl FnOnce(u16) -> Option<Vec<HyperlinkLine>>,
     ) -> bool {
+        let bidi_layout = self.bidi_layout;
         self.sync_live_layout(width, key, |width| {
-            lines(width).map(|lines| TextLayout::new(lines, width))
+            lines(width)
+                .map(|lines| TextLayout::new(bidi::session_lines(lines, bidi_layout), width))
         })
     }
 
@@ -585,8 +596,10 @@ impl TranscriptView {
             .disclosure
             .keymap
             .primary_hint(crate::keymap::KeymapContext::Global, "open_transcript");
+        let bidi_layout = self.bidi_layout;
         self.sync_live_layout(width, key, |width| {
-            lines(width).map(|lines| layout::activity_layout(lines, width, expanded, shortcut))
+            lines(width)
+                .map(|lines| layout::activity_layout(lines, width, expanded, bidi_layout, shortcut))
         })
     }
 
@@ -642,7 +655,7 @@ impl TranscriptView {
     }
 
     pub(crate) fn has_active_interaction(&self) -> bool {
-        self.select_mode.is_some()
+        self.is_select_mode()
             || self.selection.is_some()
             || self.search.is_active()
             || self.is_activity_focused()

@@ -170,7 +170,8 @@ impl App {
     }
 
     pub(super) fn awaiting_side_replay(&self, tui: &tui::Tui) -> bool {
-        self.pending_thread_switch_resets != 0 && self.side_retention_enabled(tui)
+        self.pending_thread_switch_resets != 0
+            && (self.side_retention_enabled(tui) || self.scrollback_side_chats_enabled())
     }
 
     /// Apply queued app events before input can cross a backend or side-chat switch.
@@ -640,6 +641,7 @@ impl App {
         let mut provider_error = None;
         let mut history_notice = None;
         let confirm_preset = initial_resume_config.is_some();
+        let resuming_thread = matches!(&session_selection, SessionSelection::Resume(_));
         let (mut chat_widget, initial_started_thread) = match session_selection {
             SessionSelection::StartFresh
             | SessionSelection::Exit
@@ -1055,6 +1057,7 @@ See the Codex keymap documentation for supported actions and examples."
             statusline_metrics,
             provider_writes,
             feature_write_lock: Arc::default(),
+            voice_settings_pending: false,
             config_notification_test_generation: 0,
             config_notification_test_pending: None,
             model_catalog,
@@ -1268,6 +1271,9 @@ See the Codex keymap documentation for supported actions and examples."
                 }
             }
             app.remember_attached_host_project(&app_server);
+            if !read_only_thread && app.scrollback_side_chats_enabled() && resuming_thread {
+                app.refresh_saved_chats(&app_server, thread_id);
+            }
             if let Some(error) = provider_error {
                 app.chat_widget
                     .show_provider_error(error, /*rejected_message_id*/ None);
@@ -1347,8 +1353,7 @@ See the Codex keymap documentation for supported actions and examples."
         if let Err(err) = app.render_startup_frame(tui, &app_event_rx) {
             return shutdown_on_startup_error(app_server, &mut other_backends, err).await;
         }
-        let tui_events = tui.event_stream();
-        tokio::pin!(tui_events);
+        let mut tui_events = tui.input_stream();
         tracing::info!(
             duration_ms = %(startup_elapsed_before_app + startup_started_at.elapsed()).as_millis(),
             bootstrap_ms = %bootstrap_ms,
@@ -1368,6 +1373,8 @@ See the Codex keymap documentation for supported actions and examples."
                 app.app_event_tx.clone(),
                 app.chat_widget.security_setup_request_id,
             );
+        }
+        if app.chat_widget.should_prefetch_rate_limits() {
             let reset_hint_request_id = app.chat_widget.start_rate_limit_reset_startup_check();
             app.refresh_rate_limits(
                 &app_server,
@@ -1630,6 +1637,7 @@ See the Codex keymap documentation for supported actions and examples."
                     cloud_inventory_owner = cloud_owner;
                     cloud_inventory_poll.reset();
                 }
+                tui_events.coalesce_divider_drags = app.divider_drag.is_some();
                 let control = select! {
                     // Leave the previous frame visible and let other app work run between batches.
                     Some(transition) = std::future::ready(app.pending_input_drain), if app.pending_input_drain.is_some() => {
@@ -1735,6 +1743,7 @@ See the Codex keymap documentation for supported actions and examples."
                             | AppEvent::SidebarDocumentResolved { backend_id, .. }
                             | AppEvent::SidebarDocumentLoaded { backend_id, .. }
                             | AppEvent::SidebarFilesLoaded { backend_id, .. }
+                            | AppEvent::SideChatArchived { backend_id, .. }
                             | AppEvent::StartupThreadStarted { backend_id, .. } => {
                                 backends.slot(*backend_id).unwrap_or(displayed_session)
                             }

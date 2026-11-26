@@ -81,11 +81,8 @@ mod history_hydration_tests;
 mod permission_shortcuts_tests;
 mod plugin_catalog;
 mod rate_limits;
-#[path = "tests/realtime_handoff_e2e.rs"]
 mod realtime_handoff_e2e;
-#[path = "tests/realtime_requests.rs"]
 mod realtime_requests;
-#[path = "tests/realtime_start.rs"]
 mod realtime_start;
 #[path = "tests/reasoning_resume_tests.rs"]
 mod reasoning_resume_tests;
@@ -104,6 +101,8 @@ mod session_lifecycle_requests;
 mod side_chat_policy_tests;
 #[path = "tests/sidebar_chooser_hover_tests.rs"]
 mod sidebar_chooser_hover_tests;
+#[path = "tests/sidebar_file_path_tests.rs"]
+mod sidebar_file_path_tests;
 mod startup;
 #[path = "tests/startup_frame_tests.rs"]
 mod startup_frame_tests;
@@ -3189,115 +3188,6 @@ fn attach_live_thread_for_selection_rejects_unmaterialized_fallback_threads() ->
     })
 }
 
-#[tokio::test]
-async fn docked_replay_finishes_while_skills_refresh_is_pending() -> Result<()> {
-    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
-    let parent = ThreadId::new();
-    let side = ThreadId::new();
-    app.side_threads
-        .insert(side, side::SideThreadState::new(parent));
-    enable_side_retention(&mut app)?;
-    let _ = app.config.features.disable(Feature::Plugins);
-    app.chat_widget.sync_plugin_mentions_config(&app.config);
-    let mut tui = crate::tui::test_support::make_test_tui()?;
-    tui.set_owned_screen(/*owned*/ true)?;
-    let mut session = test_thread_session(parent, app.config.cwd.to_path_buf());
-    session.cwd = codex_utils_path_uri::PathUri::parse("file:///D:/Workspace")?;
-    app.chat_widget.handle_thread_session(session);
-    let cwd = codex_utils_path_uri::PathUri::parse("file:///D:/workspace")?;
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let endpoint = crate::resolve_remote_addr(&format!("ws://{}", listener.local_addr()?))?;
-    let (pending_tx, mut pending_rx) = tokio::sync::mpsc::unbounded_channel();
-    let proxy = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await?;
-        let socket = tokio_tungstenite::accept_async(stream).await?;
-        disconnect::serve_reconnect_requests(socket, |request| {
-            assert_eq!(request.method, "skills/list");
-            let (release, wait) = tokio::sync::oneshot::channel();
-            pending_tx
-                .send((request.params, release))
-                .expect("test is running");
-            async move {
-                wait.await.expect("release the pending skills refresh");
-                Some(serde_json::json!({"result": {"data": []}}))
-            }
-        })
-        .await
-    });
-    let mut app_server = AppServerSession::new(
-        crate::backend_id::BackendId::new(),
-        crate::connect_remote_app_server(endpoint).await?,
-        crate::app_server_session::ThreadParamsMode::Embedded,
-    );
-    let deadline = std::time::Duration::from_secs(/*secs*/ 5);
-    while events.try_recv().is_ok() {}
-
-    for thread_id in [side, parent] {
-        app.active_thread_id = Some(thread_id);
-        app.pending_thread_switch_resets = 1;
-        app.app_event_tx
-            .send(AppEvent::CodexOp(AppCommand::list_skills(
-                cwd.clone(),
-                /*force_reload*/ true,
-            )));
-        app.app_event_tx
-            .send(AppEvent::SideReplayFinished(thread_id));
-
-        time::timeout(
-            deadline,
-            drain_app_events(&mut app, &mut tui, &mut app_server, &mut events),
-        )
-        .await??;
-        let (params, release) = time::timeout(deadline, pending_rx.recv())
-            .await?
-            .expect("skills/list should be requested");
-        assert_eq!(
-            params,
-            Some(serde_json::json!({"cwds": [r"D:\workspace"], "forceReload": true}))
-        );
-        assert!(!app.awaiting_side_replay(&tui));
-
-        release
-            .send(())
-            .expect("skills/list should still be pending");
-        let event = time::timeout(deadline, events.recv())
-            .await?
-            .expect("receive the skills refresh");
-        assert!(matches!(
-            &event,
-            AppEvent::SideReplaySkillsLoaded { thread_id: loaded_thread_id, result: Ok(_), .. }
-                if *loaded_thread_id == thread_id
-        ));
-        boxed_future!(app.handle_event(&mut tui, &mut app_server, event)).await?;
-        assert_eq!(app_server.pending_side_skills_refresh, None);
-    }
-
-    app_server.shutdown().await?;
-    proxy.await??;
-    Ok(())
-}
-
-#[tokio::test]
-async fn sidebar_reopens_saved_side_chat_after_restart() -> Result<()> {
-    boxed_future!(reopen_saved_side_chat(DuringOpen::Navigate)).await
-}
-
-#[tokio::test]
-async fn closed_saved_chat_keeps_its_live_read_receipt_during_install() -> Result<()> {
-    boxed_future!(reopen_saved_side_chat(DuringOpen::Close)).await
-}
-
-#[tokio::test]
-async fn saved_chat_replays_approval_after_a_stale_runtime_close() -> Result<()> {
-    boxed_future!(reopen_saved_side_chat(DuringOpen::Approval)).await
-}
-
-#[tokio::test]
-async fn fork_releases_a_provisional_saved_chat_on_its_original_connection() -> Result<()> {
-    boxed_future!(reopen_saved_side_chat(DuringOpen::Fork)).await
-}
-
 enum DuringOpen {
     Navigate,
     Close,
@@ -3475,6 +3365,23 @@ async fn reopen_saved_side_chat(during: DuringOpen) -> Result<()> {
     let release_enter =
         KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release);
     capture("Loading", side_frame(&mut app, &mut tui, size)?);
+    if matches!(during, DuringOpen::Navigate) {
+        // Archiving an unrelated thread while the chooser is loading restarts its list.
+        let stale = app.sidebar().unwrap().discovery.request().unwrap();
+        app.handle_app_server_event(
+            &server,
+            AppServerEvent::ServerNotification(Box::new(ServerNotification::ThreadArchived(
+                ThreadArchivedNotification {
+                    thread_id: ThreadId::new().to_string(),
+                },
+            ))),
+        )
+        .await;
+        assert!(matches!(
+            app.sidebar().unwrap().discovery,
+            crate::sidebar_chooser::Discovery::Loading { request, cycle: false, .. } if request != stale
+        ));
+    }
     finish_discovery(&mut app, &mut tui, &mut server).await?;
     assert_eq!(
         app.sidebar().unwrap().latest_prompts,
@@ -3532,6 +3439,10 @@ async fn reopen_saved_side_chat(during: DuringOpen) -> Result<()> {
     assert_eq!(app.current_displayed_thread_id(), Some(parent));
     boxed_future!(app.handle_tui_event(&mut tui, &mut server, TuiEvent::Key(release_enter)))
         .await?;
+    app.sidebar_mut().choice = 0;
+    app.hide_sidebar(&mut tui, &mut server).await?;
+    app.restore_sidebar(&mut tui, &mut server).await?;
+    assert_eq!(app.sidebar().unwrap().choice, 0);
     app.sidebar_mut().choice = 1;
     app.refresh_saved_chats(&server, parent);
     let request = app.sidebar().unwrap().discovery.request().unwrap();
@@ -3577,7 +3488,7 @@ async fn reopen_saved_side_chat(during: DuringOpen) -> Result<()> {
         MouseEventKind::Down(MouseButton::Left),
         MouseEventKind::Up(MouseButton::Left),
     ] {
-        let click = mouse(kind, strip.right() - 3, strip.y);
+        let click = mouse(kind, strip.right() - 6, strip.y);
         boxed_future!(app.handle_tui_event(&mut tui, &mut server, click)).await?;
     }
     let request = app.sidebar().unwrap().discovery.request().unwrap();
@@ -4478,6 +4389,14 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
             frame.contains(parent_row) && frame.contains("parent draft"),
             "{frame}"
         );
+        if width == 99 {
+            assert!(
+                app.conversation_frame
+                    .sidebar_targets
+                    .iter()
+                    .any(|(target, _)| *target == side_focus::SidebarTarget::Restore)
+            );
+        }
         for marker in [child_row, "child draft!", "│"] {
             assert_eq!(frame.contains(marker), width == 100, "{frame}");
         }
@@ -4689,6 +4608,36 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
             width == 100,
             "{reopened}"
         );
+        if width == 100 {
+            use crate::sidebar_tab_strip::TabTarget;
+            use side_focus::SidebarTarget;
+            for (target, thread) in [
+                (SidebarTarget::Tab(TabTarget::Hide), parent_thread_id),
+                (SidebarTarget::Restore, side_thread_id),
+            ] {
+                let area = app
+                    .conversation_frame
+                    .sidebar_targets
+                    .iter()
+                    .find(|(candidate, _)| *candidate == target)
+                    .expect("sidebar control")
+                    .1;
+                for kind in [
+                    MouseEventKind::Down(MouseButton::Left),
+                    MouseEventKind::Up(MouseButton::Left),
+                ] {
+                    boxed_future!(app.handle_tui_event(
+                        &mut tui,
+                        &mut app_server,
+                        mouse(kind, area.x + 1, area.y)
+                    ))
+                    .await?;
+                }
+                drain_app_events(&mut app, &mut tui, &mut app_server, &mut app_event_rx).await?;
+                assert_eq!(app.current_displayed_thread_id(), Some(thread));
+                side_frame(&mut app, &mut tui, size)?;
+            }
+        }
         frames.push(format!("{width} columns, reopened\n{reopened}"));
     }
     assert_app_snapshot!("hide_and_reopen_side_conversation", frames.join("\n\n"));
@@ -4864,7 +4813,6 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     tui.terminal = terminal_at(wide);
     keys!(toggle);
     let path = app.local_settings.user_config_path.clone();
-    let before = std::fs::read(&path).ok();
     let divider_at = |tui: &tui::Tui, y| {
         (0..wide.width)
             .find(|&x| tui.terminal.previous_buffer()[(x, y)].symbol() == "│")
@@ -4872,6 +4820,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     };
     let mut previews = Vec::new();
     for with_image in [false, true] {
+        let before = std::fs::read(&path).ok();
         if with_image {
             let image_path = app.config.codex_home.join("divider.png");
             image::RgbaImage::from_pixel(8, 16, image::Rgba([80, 30, 20, 255]))
@@ -4937,7 +4886,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
             .await?;
         } else {
             assert!(columns.iter().all(|x| *x == divider - 1));
-            // A fresh transcript press cancels a drag whose release was lost.
+            // A fresh press ends a drag whose release was lost, keeping its last width.
             for kind in [MouseEventKind::Down(left), MouseEventKind::Up(left)] {
                 boxed_future!(app.handle_tui_event(
                     &mut tui,
@@ -4946,7 +4895,20 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
                 ))
                 .await?;
             }
-            assert_eq!(std::fs::read(&path).ok(), before);
+            side_frame(&mut app, &mut tui, wide)?;
+            assert_eq!(divider_at(&tui, 0), divider - 1);
+            // The release position wins even if no intervening motion was delivered.
+            for (kind, x) in [
+                (MouseEventKind::Down(left), divider - 1),
+                (MouseEventKind::Up(left), divider),
+            ] {
+                boxed_future!(app.handle_tui_event(
+                    &mut tui,
+                    &mut app_server,
+                    mouse(kind, x, /*row*/ 4)
+                ))
+                .await?;
+            }
             side_frame(&mut app, &mut tui, wide)?;
             assert_eq!(divider_at(&tui, 0), divider);
         }
@@ -5166,12 +5128,12 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     // A command already running at handoff belongs before replies received while parked.
     let turn = "command-turn";
     let cwd = app.config.cwd.clone();
-    let command = |status| ThreadItemPayload::CommandExecution {
-        id: "cmd".into(),
-        command: "echo sidebar-check".into(),
+    let command = |id: &str, status| ThreadItemPayload::CommandExecution {
+        id: id.into(),
+        command: format!("echo {id}"),
         cwd: cwd.clone().into(),
         status,
-        source: Default::default(),
+        source: codex_app_server_protocol::CommandExecutionSource::UnifiedExecStartup,
         command_actions: Vec::new(),
         model_context: None,
         sandbox_type: None,
@@ -5183,15 +5145,20 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
         duration_ms: None,
     };
     use codex_app_server_protocol::CommandExecutionStatus;
-    for event in [
-        turn_started_notification(parent, turn),
-        ServerNotification::ItemStarted(ItemStartedNotification::new(
+    app.enqueue_thread_notification(parent, turn_started_notification(parent, turn))
+        .await?;
+    // The second launch commits the first row before focus switches.
+    let commands = [
+        ("background", CommandExecutionStatus::Failed),
+        ("sidebar-check", CommandExecutionStatus::Completed),
+    ];
+    for (id, _) in &commands {
+        let event = ServerNotification::ItemStarted(ItemStartedNotification::new(
             parent.to_string(),
             turn.into(),
-            command(CommandExecutionStatus::InProgress),
+            command(id, CommandExecutionStatus::InProgress),
             /*started_at_ms*/ 0,
-        )),
-    ] {
+        ));
         app.enqueue_thread_notification(parent, event).await?;
     }
     keys!(prefix, side);
@@ -5203,23 +5170,31 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     )
     .await?;
     side_frame(&mut app, &mut tui, size)?;
-    app.enqueue_thread_notification(
-        parent,
-        ServerNotification::ItemCompleted(
-            codex_app_server_protocol::ItemCompletedNotification::new(
-                parent.to_string(),
-                turn.into(),
-                command(CommandExecutionStatus::Completed),
-                /*started_at_ms*/ None,
-                /*completed_at_ms*/ 0,
+    for (id, status) in commands {
+        app.enqueue_thread_notification(
+            parent,
+            ServerNotification::ItemCompleted(
+                codex_app_server_protocol::ItemCompletedNotification::new(
+                    parent.to_string(),
+                    turn.into(),
+                    command(id, status),
+                    /*started_at_ms*/ None,
+                    /*completed_at_ms*/ 0,
+                ),
             ),
-        ),
-    )
-    .await?;
+        )
+        .await?;
+    }
     let finished = side_frame(&mut app, &mut tui, size)?;
     let (_, after_command) = finished
         .split_once("Ran echo sidebar-check")
         .unwrap_or_else(|| panic!("{finished}"));
+    // Compact activity groups show the latest command. Inspect the earlier row in place.
+    let pane = &app.side_companions[&parent_thread_id];
+    insta::assert_snapshot!(
+        lines_to_single_string(&pane.cells[pane.parked_tail - 1].transcript_lines(/*width*/ 80)),
+        @"$ echo background\n✗ (1) • 0ms"
+    );
     assert!(after_command.contains("Command finished."), "{finished}");
     assert_eq!(
         finished.matches("echo sidebar-check").count(),
@@ -5389,7 +5364,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     let arrow_x = header.chars().position(|c| c == '‹').expect("previous tab") as u16;
     let buffer = tui.terminal.previous_buffer();
     let arrow_cell = &buffer[(arrow_x, strip.y)];
-    let add_cell = &buffer[(strip.right() - 3, strip.y)];
+    let add_cell = &buffer[(strip.right() - 6, strip.y)];
     let idle_style = arrow_cell.style();
     assert_eq!(idle_style, add_cell.style());
 
@@ -5531,7 +5506,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
         assert_eq!(app.chooser_focus(), expected_focus, "{focus}");
         side_frame(&mut app, &mut tui, even)?;
         let strip = app.conversation_frame.sidebar_tab_strip().unwrap();
-        let add = strip.right() - 3;
+        let add = strip.right() - 6;
         let [inactive, selected] = app
             .conversation_frame
             .sidebar_targets
@@ -5650,13 +5625,13 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     let buffer = tui.terminal.previous_buffer();
     let style = |x| buffer[(x, chooser.y)].style();
     assert_eq!([close_x - 1, close_x + 1].map(style), [style(close_x); 2]);
-    for kind in [down, release] {
-        boxed_future!(app.handle_tui_event(
-            &mut tui,
-            &mut app_server,
-            mouse(kind, close_x + 1, chooser.y)
-        ))
-        .await?;
+    // Rex reports focus again between the press and release of a single click.
+    for event in [
+        mouse(down, close_x + 1, chooser.y),
+        TuiEvent::FocusGained,
+        mouse(release, close_x + 1, chooser.y),
+    ] {
+        boxed_future!(app.handle_tui_event(&mut tui, &mut app_server, event)).await?;
     }
     let frame = side_frame(&mut app, &mut tui, even)?;
     let dialog = frame
@@ -6982,6 +6957,7 @@ async fn side_defers_subagent_approval_overlay_until_side_exits() -> Result<()> 
         ServerRequest::DynamicToolCall {
             request_id: AppServerRequestId::Integer(99),
             params: codex_app_server_protocol::DynamicToolCallParams {
+                supported_result_format: None,
                 thread_id: quiet_thread_id.to_string(),
                 turn_id: "turn-quiet".to_string(),
                 call_id: "call-quiet".to_string(),
@@ -9137,6 +9113,7 @@ async fn make_test_app() -> Box<App> {
         provider_writes: HashMap::new(),
         realtime_call_client: Arc::default(),
         feature_write_lock: Arc::default(),
+        voice_settings_pending: false,
         config_notification_test_generation: 0,
         config_notification_test_pending: None,
         model_catalog: chat_widget.model_catalog(),
@@ -9197,11 +9174,10 @@ async fn make_test_app() -> Box<App> {
         reconnect: Default::default(),
         pending_right_click_paste: None,
         right_click_paste_environment: super::right_click_paste::PasteEnvironment {
-            primary: false,
             platform_default: true,
             ssh: false,
             wsl: false,
-            vscode: crate::tui::VscodeDetection::Other,
+            owner: crate::terminal_capabilities::PasteOwner::Application,
         },
         daemon_cli_executable: None,
         pending_update_action: None,
@@ -9286,6 +9262,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             provider_writes: HashMap::new(),
             realtime_call_client: Arc::default(),
             feature_write_lock: Arc::default(),
+            voice_settings_pending: false,
             config_notification_test_generation: 0,
             config_notification_test_pending: None,
             model_catalog: chat_widget.model_catalog(),
@@ -9346,11 +9323,10 @@ pub(super) async fn make_test_app_with_channels() -> (
             reconnect: Default::default(),
             pending_right_click_paste: None,
             right_click_paste_environment: super::right_click_paste::PasteEnvironment {
-                primary: false,
                 platform_default: true,
                 ssh: false,
                 wsl: false,
-                vscode: crate::tui::VscodeDetection::Other,
+                owner: crate::terminal_capabilities::PasteOwner::Application,
             },
             daemon_cli_executable: None,
             pending_update_action: None,
@@ -11785,13 +11761,31 @@ async fn prompt_edit_reverts_earlier_and_first_visible_prompts_in_place_scenario
     }
 
     let source_thread_id = ThreadId::from_string(&source_thread_id)?;
+    // The only loaded item from turn-0 was recorded after turn-3 began.
+    // The first rewind drops it, so it cannot anchor the second rewind.
+    codex_rollout::append_rollout_item_to_path(
+        &source_path,
+        &RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+            content_token_count: None,
+            thread_id: source_thread_id,
+            turn_id: "turn-0".into(),
+            item: TurnItem::Reasoning(codex_protocol::items::ReasoningItem {
+                id: "late-result".into(),
+                summary_text: Vec::new(),
+                raw_content: Vec::new(),
+            }),
+            started_at_ms: None,
+            completed_at_ms: 0,
+        })),
+    )
+    .await?;
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&config)).await?;
     // Bound fixture hydration independently from the owned viewport exercised below.
     // Inline hydration's row cap leaves the oldest prompt on an unloaded page.
     let mut local_settings = crate::local_settings::LocalSettings::from(&config);
     local_settings.transcript_mode = crate::transcript_mode::TranscriptMode::Terminal;
     local_settings.tui.alternate_screen = codex_config::types::AltScreenMode::Never;
-    local_settings.tui.terminal_resize_reflow_max_rows = Some(2);
+    local_settings.tui.terminal_resize_reflow_max_rows = Some(3);
     let started = app_server
         .resume_thread(
             &local_settings,
@@ -13231,6 +13225,7 @@ async fn clear_only_ui_reset_preserves_chat_session_state() {
         crate::keymap::RuntimeKeymap::defaults().pager,
         /*copy_on_select*/ false,
         /*mouse_scroll_speed*/ 1.0,
+        /*bidi_layout*/ false,
     ));
     app.deferred_history_lines = vec![Line::from("stale buffered line").into()];
     app.has_emitted_history_lines = true;

@@ -21,6 +21,7 @@ pub use codex_protocol::config_types::AltScreenMode;
 pub use codex_protocol::config_types::ApprovalsReviewer;
 pub use codex_protocol::config_types::ModeKind;
 pub use codex_protocol::config_types::Personality;
+pub use codex_protocol::config_types::PluginsDefaultConfig;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 pub use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ToolExposureSurface;
@@ -68,6 +69,18 @@ const MAX_MEMORIES_MAX_ROLLOUTS_PER_STARTUP: usize = 128;
 
 const fn default_enabled() -> bool {
     true
+}
+
+/// Resolved per-thread settings for the standalone image generation tool.
+pub struct ImageGenerationSettings {
+    pub provider: codex_model_provider_info::ModelProviderInfo,
+    pub http_client_factory: codex_http_client::HttpClientFactory,
+    pub gif_enabled: bool,
+    pub deferred: bool,
+}
+
+impl ImageGenerationSettings {
+    pub const NAMESPACE: &str = "image_gen";
 }
 
 /// Last selected grouping in Agent Command Center.
@@ -983,8 +996,8 @@ pub struct Tui {
     #[serde(default = "default_true")]
     pub fullscreen_transcript: bool,
 
-    /// Summarize tool calls and collapse completed turns in the full-screen transcript. Defaults to `false`.
-    #[serde(default)]
+    /// Summarize tool calls and collapse completed turns in the full-screen transcript. Defaults to `true`.
+    #[serde(default = "default_true")]
     pub collapse_turn_details: bool,
 
     /// Preferred docked sidebar width as a percentage of the terminal. Defaults to one third.
@@ -1155,14 +1168,6 @@ pub struct Notice {
 pub use crate::skills_config::BundledSkillsConfig;
 pub use crate::skills_config::SkillConfig;
 pub use crate::skills_config::SkillsConfig;
-
-/// Default activation settings for installed plugins.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct PluginsDefaultConfig {
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-}
 
 /// Plugin activation and capability settings loaded from configuration layers.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default, JsonSchema)]

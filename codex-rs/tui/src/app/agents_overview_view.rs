@@ -249,6 +249,10 @@ impl AgentsOverviewViewState {
             })
     }
 
+    fn task_actions_blocked(&self) -> bool {
+        self.connection_notice.is_some() || self.creating_worktree || self.removal.is_some()
+    }
+
     pub(super) fn editing_metadata(&self) -> bool {
         self.searching || self.rename_target.is_some()
     }
@@ -258,6 +262,7 @@ pub(super) struct AgentsOverviewView {
     pub(super) dock_motion: Option<(crate::motion::MotionMode, crate::tui::FrameRequester)>,
     /// Some when shown beside the conversation. The value records keyboard focus.
     pub(super) dock_focused: Option<bool>,
+    pub(super) hint_focus: crate::footer_hint::HintFocus,
     use_theme_colors: bool,
     pub(super) rows: Vec<AgentsOverviewRow>,
     project_groups: Vec<AgentsOverviewProjectGroup>,
@@ -338,6 +343,7 @@ impl AgentsOverviewView {
         let mut view = Self {
             dock_motion: None,
             dock_focused: None,
+            hint_focus: crate::footer_hint::HintFocus::Active,
             editor_keymap: keymap.clone(),
             use_theme_colors,
             rows,
@@ -484,6 +490,7 @@ impl AgentsOverviewView {
             self.load_search_matches(/*additional*/ 10);
             return;
         }
+
         if self.selected == usize::MAX && self.state().has_more {
             if !self.state().loading {
                 self.state().loading = true;
@@ -798,17 +805,18 @@ impl BottomPaneView for AgentsOverviewView {
                 if state.searching {
                     drop(state);
                     self.on_ctrl_c();
+                    return;
                 } else {
                     state.browse_selection = self.rows.get(self.selected).map(|row| row.thread_id);
                     state.searching = true;
                 }
             }
+            drop(state);
+            self.reconcile_command_center_selection();
             return;
         }
 
-        if (self.state().connection_notice.is_some()
-            || self.state().creating_worktree
-            || self.state().removal.is_some())
+        if self.state().task_actions_blocked()
             && self.keymap.action_for(key) != Some(ListAction::Cancel)
         {
             match self.keymap.action_for(key) {
@@ -817,11 +825,8 @@ impl BottomPaneView for AgentsOverviewView {
                 Some(action @ (ListAction::PageUp | ListAction::PageDown)) => {
                     self.page_selection(action)
                 }
-                Some(ListAction::JumpTop) => {
-                    self.selected = self.visible_indices().first().copied().unwrap_or(0);
-                }
-                Some(ListAction::JumpBottom) => {
-                    self.selected = self.visible_indices().last().copied().unwrap_or(0);
+                Some(action @ (ListAction::JumpTop | ListAction::JumpBottom)) => {
+                    self.jump_selection(action)
                 }
                 _ => {}
             }
@@ -943,16 +948,11 @@ impl BottomPaneView for AgentsOverviewView {
             match action {
                 ListAction::MoveUp => self.move_selection(/*forward*/ false),
                 ListAction::MoveDown => self.move_selection(/*forward*/ true),
-                ListAction::JumpTop => {
-                    self.selected = self.visible_indices().first().copied().unwrap_or(0);
-                }
-                ListAction::JumpBottom => {
-                    self.selected = self.visible_indices().last().copied().unwrap_or(0);
-                }
+                ListAction::JumpTop | ListAction::JumpBottom => self.jump_selection(action),
                 ListAction::Accept => self.activate(),
                 ListAction::Cancel => {
-                    if self.can_return_to_chat
-                        && matches!(self.on_ctrl_c(), CancellationEvent::NotHandled)
+                    if matches!(self.on_ctrl_c(), CancellationEvent::NotHandled)
+                        && self.can_return_to_chat
                     {
                         self.state().completion = Some(ViewCompletion::Cancelled);
                     }

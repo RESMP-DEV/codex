@@ -1,10 +1,17 @@
 //! Terminal detection utilities.
 //!
 //! This module feeds terminal metadata into OpenTelemetry user-agent logging and into
-//! terminal-specific configuration choices in the TUI. Detection only reads the
-//! environment; it must not execute helpers selected by an untrusted PATH.
+//! terminal-specific configuration choices in the TUI. Detection reads the
+//! environment and stdout capabilities without executing helpers from PATH.
 
 use std::sync::OnceLock;
+
+mod color;
+pub use color::StdoutColorLevel;
+pub use color::stdout_color_level;
+pub use color::terminal_color_level;
+
+const GHOSTTY_TERM: &str = "xterm-ghostty";
 
 /// Structured terminal identification data.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,7 +148,7 @@ impl TerminalInfo {
     fn from_term(term: String, multiplexer: Option<Multiplexer>) -> Self {
         let name = match term.as_str() {
             "dumb" => TerminalName::Dumb,
-            "xterm-ghostty" => TerminalName::Ghostty,
+            GHOSTTY_TERM => TerminalName::Ghostty,
             "xterm-rex" => TerminalName::Rex,
             "wezterm" | "wezterm-mux" => TerminalName::WezTerm,
             _ => TerminalName::Unknown,
@@ -206,6 +213,15 @@ impl TerminalInfo {
     /// Returns whether the active terminal multiplexer is Zellij.
     pub fn is_zellij(&self) -> bool {
         matches!(self.multiplexer, Some(Multiplexer::Zellij { .. }))
+    }
+
+    /// Whether this terminal is VS Code running in a dev container.
+    pub fn is_vscode_dev_container(&self) -> bool {
+        self.is_vscode_dev_container_in(&ProcessEnvironment)
+    }
+
+    fn is_vscode_dev_container_in(&self, env: &dyn Environment) -> bool {
+        self.name == TerminalName::VsCode && env.var("REMOTE_CONTAINERS").as_deref() == Some("true")
     }
 }
 

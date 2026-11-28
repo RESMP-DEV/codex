@@ -4,7 +4,6 @@ use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
 use crate::request_processors::thread_settings_from_config_snapshot;
 use crate::server_request_error::is_turn_transition_server_request_error;
 use crate::thread_state::PendingNetworkApproval;
-use crate::thread_state::ThreadListenerCommand;
 use crate::thread_state::ThreadState;
 use crate::thread_state::resolve_server_request_on_thread_listener;
 use crate::thread_status::ThreadWatchActiveGuard;
@@ -15,7 +14,6 @@ use codex_app_server_protocol::AuthRecoveryNotification;
 use codex_app_server_protocol::CodexErrorInfo as V2CodexErrorInfo;
 use codex_app_server_protocol::CommandAction as V2ParsedCommand;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
-use codex_app_server_protocol::CommandExecutionPresentation;
 use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::CommandExecutionSource;
@@ -44,7 +42,6 @@ use codex_app_server_protocol::ModelSafetyBufferingUpdatedNotification;
 use codex_app_server_protocol::ModelVerificationNotification;
 use codex_app_server_protocol::NetworkApprovalContext as V2NetworkApprovalContext;
 use codex_app_server_protocol::NetworkPolicyAmendment as V2NetworkPolicyAmendment;
-use codex_app_server_protocol::NetworkPolicyRuleAction as V2NetworkPolicyRuleAction;
 use codex_app_server_protocol::PermissionsRequestApprovalParams;
 use codex_app_server_protocol::PermissionsRequestApprovalResponse;
 use codex_app_server_protocol::RawResponseCompletedNotification;
@@ -130,13 +127,8 @@ use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 use tracing::error;
 
-enum CommandExecutionApprovalPresentation {
-    Network(V2NetworkApprovalContext),
-    Command(CommandExecutionCompletionItem),
-}
-
 #[derive(Debug, PartialEq)]
-pub(crate) struct CommandExecutionCompletionItem {
+struct CommandExecutionCompletionItem {
     model_context: Option<ModelInvocationContext>,
     plugin_id: Option<String>,
     script_path: Option<String>,
@@ -169,7 +161,7 @@ pub(crate) async fn apply_bespoke_event_handling(
     if finishes_latest_turn {
         outgoing.abort_pending_server_requests().await;
     }
-    let approval_starts_command = msg.command_approval_start().is_some();
+    let assessment_starts_command = msg.guardian_command_start().is_some();
     match msg {
         EventMsg::TurnStarted(payload) => {
             outgoing.abort_pending_server_requests().await;
@@ -345,7 +337,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             } else {
                 assessment.turn_id.clone()
             };
-            if approval_starts_command
+            if assessment_starts_command
                 && let Some((target_item_id, completion_item)) = pending_command_execution.as_ref()
             {
                 start_command_execution_item(
@@ -702,11 +694,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .map(CommandExecutionApprovalDecision::from)
                 .collect::<Vec<_>>();
             let ExecApprovalRequestEvent {
-                model_context,
                 kind,
                 call_id,
-                plugin_id,
-                script_path,
                 approval_id,
                 turn_id,
                 environment_id,
@@ -738,8 +727,6 @@ pub(crate) async fn apply_bespoke_event_handling(
                     return;
                 }
             };
-            let command_presentation =
-                CommandExecutionPresentation::from_raw(&command, &parsed_cmd, &cwd_uri);
             // Approval requests retain the exact command; only history is redacted.
             let command_actions = match cwd_uri.to_abs_path() {
                 Ok(native_cwd) => parsed_cmd
@@ -751,50 +738,12 @@ pub(crate) async fn apply_bespoke_event_handling(
                     command: shlex_join(&command),
                 }],
             };
-            let presentation = if let Some(network_approval_context) =
-                network_approval_context.map(V2NetworkApprovalContext::from)
-            {
-                CommandExecutionApprovalPresentation::Network(network_approval_context)
+            let network_approval_context =
+                network_approval_context.map(V2NetworkApprovalContext::from);
+            let (command, cwd, command_actions) = if network_approval_context.is_some() {
+                (None, None, None)
             } else {
-                let completion_item = CommandExecutionCompletionItem {
-                    model_context,
-                    plugin_id,
-                    script_path,
-                    command: command_presentation.command,
-                    cwd: cwd.clone(),
-                    command_actions: command_presentation.command_actions,
-                };
-                CommandExecutionApprovalPresentation::Command(completion_item)
-            };
-            let (network_approval_context, command, cwd, command_actions, completion_item) =
-                match presentation {
-                    CommandExecutionApprovalPresentation::Network(network_approval_context) => {
-                        (Some(network_approval_context), None, None, None, None)
-                    }
-                    CommandExecutionApprovalPresentation::Command(completion_item) => (
-                        None,
-                        Some(shlex_join(&command)),
-                        Some(completion_item.cwd.clone()),
-                        Some(command_actions),
-                        (kind != codex_protocol::approvals::ExecApprovalKind::HumanCommand)
-                            .then_some(completion_item),
-                    ),
-                };
-            let opened_command_item = if approval_starts_command
-                && let Some(completion_item) = completion_item.as_ref()
-            {
-                start_command_execution_item(
-                    &conversation_id,
-                    event_turn_id.clone(),
-                    call_id.clone(),
-                    started_at_ms,
-                    completion_item,
-                    &outgoing,
-                    &thread_state,
-                )
-                .await
-            } else {
-                false
+                (Some(shlex_join(&command)), Some(cwd), Some(command_actions))
             };
             let proposed_execpolicy_amendment_v2 =
                 proposed_execpolicy_amendment.map(V2ExecPolicyAmendment::from);
@@ -847,15 +796,10 @@ pub(crate) async fn apply_bespoke_event_handling(
             tokio::spawn(async move {
                 on_command_execution_request_approval_response(
                     event_turn_id,
-                    conversation_id,
-                    approval_id,
-                    call_id,
-                    completion_item,
-                    opened_command_item,
+                    approval_id.unwrap_or(call_id),
                     pending_request_id,
                     rx,
                     conversation,
-                    outgoing,
                     thread_state,
                     permission_guard,
                 )
@@ -1125,7 +1069,7 @@ pub(crate) async fn apply_bespoke_event_handling(
         EventMsg::ViewImageToolCall(_) => {}
         EventMsg::ItemStarted(event) => {
             let should_emit = match &event.item {
-                // Approval and guardian flows can emit the command start notification before core
+                // Guardian can emit the command start notification before core
                 // emits the canonical item. Keep the first observed start and suppress that duplicate.
                 CoreTurnItem::CommandExecution(item) => thread_state
                     .lock()
@@ -1542,7 +1486,7 @@ async fn start_command_execution_item(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn complete_command_execution_item(
+async fn complete_command_execution_item(
     conversation_id: &ThreadId,
     turn_id: String,
     item_id: String,
@@ -1581,7 +1525,7 @@ pub(crate) async fn complete_command_execution_item(
         turn_id,
         item,
         Some(started_at_ms),
-        // Guardian supplies the decision time used on resume. Manual approvals are timed here.
+        // Guardian supplies the decision time used on resume.
         completed_at_ms.unwrap_or_else(now_unix_timestamp_ms),
     );
     outgoing
@@ -2073,18 +2017,12 @@ async fn on_file_change_request_approval_response(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn on_command_execution_request_approval_response(
     event_turn_id: String,
-    conversation_id: ThreadId,
-    approval_id: Option<String>,
-    item_id: String,
-    completion_item: Option<CommandExecutionCompletionItem>,
-    opened_command_item: bool,
+    approval_id: String,
     pending_request_id: RequestId,
     receiver: oneshot::Receiver<ClientRequestResult>,
     conversation: Arc<CodexThread>,
-    outgoing: ThreadScopedOutgoingMessageSender,
     thread_state: Arc<Mutex<ThreadState>>,
     permission_guard: Option<ThreadWatchActiveGuard>,
 ) {
@@ -2098,130 +2036,48 @@ async fn on_command_execution_request_approval_response(
             .lock()
             .await
             .network_approvals
-            .contains_key(approval_id.as_ref().unwrap_or(&item_id))
+            .contains_key(&approval_id)
     {
         return;
     }
-    let (decision, completion_status) = match response {
-        Ok(Ok(value)) => {
-            match serde_json::from_value::<CommandExecutionRequestApprovalResponse>(value) {
-                Ok(response) => match response.decision {
-                    CommandExecutionApprovalDecision::Accept => (ReviewDecision::Approved, None),
-                    CommandExecutionApprovalDecision::AcceptForSession => {
-                        (ReviewDecision::ApprovedForSession, None)
-                    }
-                    CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
-                        execpolicy_amendment,
-                    } => (
-                        ReviewDecision::ApprovedExecpolicyAmendment {
-                            proposed_execpolicy_amendment: execpolicy_amendment.into_core(),
-                        },
-                        None,
-                    ),
-                    CommandExecutionApprovalDecision::ApplyNetworkPolicyAmendment {
-                        network_policy_amendment,
-                    } => {
-                        let completion_status = match network_policy_amendment.action {
-                            V2NetworkPolicyRuleAction::Allow => None,
-                            V2NetworkPolicyRuleAction::Deny => {
-                                Some(CommandExecutionStatus::Declined)
-                            }
-                        };
-                        (
-                            ReviewDecision::NetworkPolicyAmendment {
-                                network_policy_amendment: network_policy_amendment.into_core(),
-                            },
-                            completion_status,
-                        )
-                    }
-                    CommandExecutionApprovalDecision::Decline => (
-                        ReviewDecision::denied("rejected by user"),
-                        Some(CommandExecutionStatus::Declined),
-                    ),
-                    CommandExecutionApprovalDecision::Cancel => (
-                        ReviewDecision::Abort,
-                        Some(CommandExecutionStatus::Declined),
-                    ),
-                },
-                Err(err) => {
-                    error!("failed to deserialize CommandExecutionRequestApprovalResponse: {err}");
-                    (
-                        ReviewDecision::denied("approval request failed"),
-                        Some(CommandExecutionStatus::Failed),
-                    )
-                }
+    let response = match response {
+        Ok(Ok(value)) => serde_json::from_value::<CommandExecutionRequestApprovalResponse>(value)
+            .map_err(|_| "invalid approval response"),
+        Ok(Err(err)) if is_turn_transition_server_request_error(&err) => return,
+        Ok(Err(_)) => Err("client approval request failed"),
+        Err(_) => Err("approval response channel closed"),
+    };
+    let decision = match response {
+        Ok(response) => match response.decision {
+            CommandExecutionApprovalDecision::Accept => ReviewDecision::Approved,
+            CommandExecutionApprovalDecision::AcceptForSession => {
+                ReviewDecision::ApprovedForSession
             }
-        }
-        Ok(Err(err)) if is_turn_transition_server_request_error(&err) => {
-            // A late approval can open an item after its turn has already cleaned up.
-            if opened_command_item && let Some(completion_item) = completion_item {
-                let state = thread_state.lock().await;
-                if !state.turn_summaries.contains_key(&event_turn_id)
-                    && let Some(sender) = state.listener_command_tx()
-                    && sender
-                        .send(ThreadListenerCommand::CompleteLateCommandApproval {
-                            turn_id: event_turn_id,
-                            item_id,
-                            completion_item: Box::new(completion_item),
-                        })
-                        .is_err()
-                {
-                    error!("failed to complete late command approval: thread listener closed");
-                }
-            }
+            CommandExecutionApprovalDecision::AcceptWithExecpolicyAmendment {
+                execpolicy_amendment,
+            } => ReviewDecision::ApprovedExecpolicyAmendment {
+                proposed_execpolicy_amendment: execpolicy_amendment.into_core(),
+            },
+            CommandExecutionApprovalDecision::ApplyNetworkPolicyAmendment {
+                network_policy_amendment,
+            } => ReviewDecision::NetworkPolicyAmendment {
+                network_policy_amendment: network_policy_amendment.into_core(),
+            },
+            CommandExecutionApprovalDecision::Decline => ReviewDecision::denied("rejected by user"),
+            CommandExecutionApprovalDecision::Cancel => ReviewDecision::Abort,
+        },
+        Err(message) => {
+            error!("{message}");
+            conversation
+                .fail_exec_approval(&approval_id, &event_turn_id)
+                .await;
             return;
         }
-        Ok(Err(err)) => {
-            error!("request failed with client error: {err:?}");
-            (
-                ReviewDecision::denied("approval request failed"),
-                Some(CommandExecutionStatus::Failed),
-            )
-        }
-        Err(err) => {
-            error!("request failed: {err:?}");
-            (
-                ReviewDecision::denied("approval request failed"),
-                Some(CommandExecutionStatus::Failed),
-            )
-        }
     };
-
-    let suppress_subcommand_completion_item = {
-        // For regular shell/unified_exec approvals, approval_id is null.
-        // For zsh-fork subcommand approvals, approval_id is present and
-        // item_id points to the parent command item.
-        if approval_id.is_some() {
-            let state = thread_state.lock().await;
-            state
-                .command_start_times
-                .get(&event_turn_id)
-                .is_some_and(|starts| starts.contains_key(&item_id))
-        } else {
-            false
-        }
-    };
-
-    if let Some(status) = completion_status
-        && !suppress_subcommand_completion_item
-        && let Some(completion_item) = completion_item
-    {
-        complete_command_execution_item(
-            &conversation_id,
-            event_turn_id.clone(),
-            item_id.clone(),
-            completion_item,
-            status,
-            /*completed_at_ms*/ None,
-            &outgoing,
-            &thread_state,
-        )
-        .await;
-    }
 
     if let Err(err) = conversation
         .submit(Op::ExecApproval {
-            id: approval_id.unwrap_or_else(|| item_id.clone()),
+            id: approval_id,
             turn_id: Some(event_turn_id),
             decision,
         })

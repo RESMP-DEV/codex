@@ -540,6 +540,10 @@ async fn handoff_image_survives_model_rejection_and_submission_failure() {
     }
     set_test_model_catalog(&mut source, models);
     source.sync_image_paste_enabled();
+    source
+        .attach_clipboard_image(b"image", crate::chatwidget::ClipboardPasteContext::Composer)
+        .unwrap();
+    assert!(source.composer_draft_snapshot().local_images.is_empty());
     let path = PathBuf::from("image.png");
     let action = source.handle_restricted_key(
         KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
@@ -633,8 +637,8 @@ async fn local_clipboard_image_does_not_turn_a_held_bang_into_a_shell_command() 
     let KeyEventAction::PasteImage { context, .. } = paste else {
         panic!("expected a clipboard image request");
     };
-    let image_path = PathBuf::from("image.png");
-    chat.attach_image(image_path.clone(), context);
+    chat.attach_clipboard_image(b"image", context).unwrap();
+    let image_path = chat.bottom_pane.composer_local_image_paths()[0].clone();
     chat.handle_key_event(KeyCode::Enter.into());
 
     let draft = chat.bottom_pane.composer_recovery_snapshot();
@@ -654,6 +658,10 @@ async fn local_clipboard_image_does_not_turn_a_held_bang_into_a_shell_command() 
     let Op::UserTurn { items, .. } = next_submit_op(&mut operations) else {
         panic!("expected submitted user turn");
     };
+    assert_eq!(std::fs::read(&image_path).unwrap(), b"image");
+    // Queueing the operation alone must not make the copy permanent.
+    chat.app_event_tx.pasted_images.clear();
+    assert!(!image_path.exists());
     let placeholder = "[Image #1]";
     assert_eq!(
         items,
@@ -682,6 +690,7 @@ async fn submission_preserves_text_elements_and_local_images() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -798,6 +807,7 @@ async fn submission_includes_configured_active_permission_profile() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -857,6 +867,7 @@ async fn submission_omits_active_permission_profile_for_legacy_snapshot() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -906,6 +917,7 @@ async fn submission_with_remote_and_local_images_keeps_local_placeholder_numberi
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -1010,6 +1022,7 @@ async fn enter_with_only_remote_images_submits_user_turn() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -1086,6 +1099,7 @@ async fn shift_enter_with_only_remote_images_does_not_submit_user_turn() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -1131,6 +1145,7 @@ async fn enter_with_only_remote_images_does_not_submit_when_modal_is_active() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -1176,6 +1191,7 @@ async fn enter_with_only_remote_images_does_not_submit_when_input_disabled() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -1224,6 +1240,7 @@ async fn submission_prefers_selected_duplicate_skill_path() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,

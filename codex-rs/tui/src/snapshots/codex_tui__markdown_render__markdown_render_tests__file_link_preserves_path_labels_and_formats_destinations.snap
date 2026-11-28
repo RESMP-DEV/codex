@@ -20,7 +20,32 @@ file:///repo/My File.rs (My File.rs)
 
 file:///repo/percent%2520.rs (percent%20.rs)
 
-percent%20.rs (percent%20.rs)
+percent%20.rs
+
+docs/guide.md
+
+guide.md (guide.md#L12)
+
+first
+second (guide.md)
+
+• # Guide
+  Map (guide.md#L2-L4) details
+
+• # Explicit
+  Map (./guide.md:2-4) details
+
+• # Inline
+  Map details
+
+• # Plain
+  Map details
+
+• # Source
+  source.rs:2-4 notes
+
+A (a)B (b)
+: note
 
 open My File.rs (My File.rs)
 

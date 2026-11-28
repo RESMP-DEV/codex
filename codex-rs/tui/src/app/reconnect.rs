@@ -457,7 +457,7 @@ impl App {
         // Old request handles stay attached to the dead connection. Rotating the event channel
         // prevents their late completions from submitting follow-up operations on the new one.
         let (tx, rx) = mpsc::unbounded_channel();
-        self.app_event_tx = AppEventSender::new(tx);
+        self.app_event_tx = self.app_event_tx.new_scope(tx);
         self.app_server_backend_id = Some(session.backend_id());
         *app_event_rx = rx;
         self.pending_thread_switch_resets = 0;
@@ -465,6 +465,9 @@ impl App {
         for (parent, pane) in &mut self.sidebars {
             pane.focus_document_request = None;
             pane.agents.pending_link = None;
+            if let Some(tab) = pane.diff_tab() {
+                pane.remove_document(tab);
+            }
             for (tab, doc) in &mut pane.documents {
                 if let Some(parent) = parent
                     && doc.backend == session.backend_id()

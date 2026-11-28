@@ -51,6 +51,16 @@ pub(super) fn configured_thread_session(
     crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: Some(std::sync::Arc::new(
+            crate::session_state::ConfirmedPermissions {
+                profile: PermissionProfile::read_only(),
+                active: None,
+                policy: AskForApproval::Never,
+                reviewer: ApprovalsReviewer::User,
+                cwd: test_path_buf("/tmp/thread-settings").abs().into(),
+                roots: vec![test_path_buf("/tmp/thread-settings").abs().into()],
+            },
+        )),
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -108,6 +118,60 @@ async fn session_header_uses_catalog_display_name_without_changing_model() {
         assert_chatwidget_snapshot!(format!("catalog_model_session_header_{name}"), rendered);
         assert_eq!(chat.current_model(), slug);
     }
+}
+
+#[tokio::test]
+async fn permission_status_follows_the_displayed_thread() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(Some("gpt-5.2")).await;
+    chat.local_settings.tui.status_line = Some(vec!["permissions".into(), "approval-mode".into()]);
+    let rendered = |chat: &mut ChatWidget| {
+        chat.add_status_output(
+            /*refreshing_rate_limits*/ false, /*request_id*/ None,
+        );
+        let card = chat
+            .transcript
+            .last_status_copy_targets
+            .as_ref()
+            .unwrap()
+            .handle
+            .copy_text();
+        let permissions = card
+            .lines()
+            .find_map(|line| line.split_once("Permissions:"))
+            .unwrap()
+            .1
+            .trim();
+        format!(
+            "{} | {permissions}",
+            status_line_text(chat).unwrap_or_else(|| "<hidden>".into())
+        )
+    };
+    let mut first = configured_thread_session(ThreadId::new());
+    // A pending selection can be restored into execution config when switching threads.
+    first.permission_profile = PermissionProfile::Disabled;
+    first.approval_policy = AskForApproval::OnRequest;
+    first.approvals_reviewer = ApprovalsReviewer::AutoReview;
+    chat.handle_thread_session(first.clone());
+    let before = rendered(&mut chat);
+    let mut history = configured_thread_session(ThreadId::new());
+    history.read_only_history = true;
+    history.confirmed_permissions = None;
+    chat.handle_thread_session_quiet(history);
+    let unknown = rendered(&mut chat);
+    let mut update = thread_settings_for_test("gpt-5.2", first.thread_id);
+    update
+        .thread_settings
+        .active_permission_profile
+        .as_mut()
+        .unwrap()
+        .id = "restricted".into();
+    chat.on_thread_settings_updated(update.clone());
+    assert_eq!(rendered(&mut chat), unknown);
+    chat.handle_thread_session_quiet(first);
+    assert_eq!(rendered(&mut chat), before);
+    chat.on_thread_settings_updated(update);
+    let confirmed = rendered(&mut chat);
+    insta::assert_snapshot!(format!("{before}\n{unknown}\n{confirmed}"));
 }
 
 #[tokio::test]
@@ -786,11 +850,22 @@ async fn thread_settings_updated_updates_visible_state_without_transcript() {
     let mut notification = thread_settings_for_test("gpt-5.4", thread_id);
     notification.thread_settings.cwd =
         codex_utils_path_uri::LegacyAppPathString::from_string(remote_cwd);
+    let root = test_path_buf("/tmp/primary-workspace").abs();
+    notification.thread_settings.environments =
+        Some(vec![codex_app_server_protocol::ThreadEnvironment {
+            environment_id: "primary".into(),
+            cwd: root.clone().into(),
+            runtime_workspace_roots: vec![root.clone().into()],
+        }]);
     chat.handle_server_notification(
         ServerNotification::ThreadSettingsUpdated(notification),
         /*replay_kind*/ None,
     );
 
+    assert_eq!(
+        chat.confirmed_permissions.as_ref().unwrap().roots,
+        vec![codex_utils_path_uri::PathUri::from_abs_path(&root)]
+    );
     assert_eq!(chat.session_cwd().inferred_native_path_string(), remote_cwd);
     assert_eq!(
         chat.current_workspace_roots.as_slice(),
@@ -864,8 +939,10 @@ async fn thread_settings_updated_during_replay_restores_effort_without_animating
     };
     crate::terminal_palette::with_test_palette(/*colors*/ None, || {
         // Switching back restores the current session before replaying older settings.
+        let confirmed = chat.confirmed_permissions.clone();
         let replay = Some(ReplayKind::ThreadSnapshot);
         chat.handle_server_notification(settings(ReasoningEffortConfig::High), replay);
+        assert_eq!(chat.confirmed_permissions, confirmed);
         chat.handle_server_notification(settings(ReasoningEffortConfig::Max), replay);
         assert!(render_bottom_popup(&chat, /*width*/ 80).contains("max"));
         chat.handle_server_notification(settings(ReasoningEffortConfig::Ultra), replay);

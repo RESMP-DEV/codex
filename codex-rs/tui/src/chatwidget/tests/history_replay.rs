@@ -22,6 +22,7 @@ async fn resumed_initial_messages_render_history() {
     let mut configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: true,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -188,6 +189,7 @@ async fn restored_conversation_ultra_remains_selected_after_switching_to_plan() 
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -514,6 +516,7 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -590,6 +593,7 @@ async fn replayed_user_message_preserves_remote_image_urls() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -696,6 +700,7 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -778,6 +783,7 @@ async fn session_configured_preserves_profile_workspace_roots() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -829,6 +835,7 @@ async fn session_configured_external_sandbox_keeps_external_runtime_policy() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -872,6 +879,7 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -936,6 +944,7 @@ async fn replayed_user_message_with_only_local_images_renders_history_cell() {
     let configured = crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -1297,6 +1306,7 @@ async fn replayed_reasoning_item_preserves_summary_parts_and_hides_raw_reasoning
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -1352,6 +1362,7 @@ async fn replayed_reasoning_item_shows_raw_reasoning_when_enabled() {
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -1805,6 +1816,31 @@ async fn replayed_in_progress_turn_marks_task_running() {
                 std::iter::from_fn(|| rx.try_recv().ok())
                     .all(|event| !matches!(event, AppEvent::Exit(_)))
             );
+
+            let input = chat.capture_thread_input_state();
+            chat.restore_reconnected_input(input, &[]);
+            replay_entered_review_mode(&mut chat, "current changes");
+            let idle = ServerNotification::ThreadStatusChanged(
+                codex_app_server_protocol::ThreadStatusChangedNotification {
+                    thread_id: chat.thread_id.unwrap().to_string(),
+                    status: codex_app_server_protocol::ThreadStatus::Idle,
+                },
+            );
+            chat.bottom_pane
+                .reset_status_timer(std::time::Duration::from_secs(/*secs*/ 125));
+            chat.handle_server_notification(idle.clone(), /*replay_kind*/ None);
+            assert!(!chat.bottom_pane.is_task_running());
+
+            super::helpers::handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
+            let completion = drain_insert_history(&mut rx)
+                .into_iter()
+                .map(|lines| lines_to_single_string(&lines))
+                .collect::<String>();
+            assert!(completion.contains("Worked for 2m 5s"), "{completion}");
+
+            handle_turn_started(&mut chat, "turn-2");
+            chat.handle_server_notification(idle, /*replay_kind*/ None);
+            assert!(chat.bottom_pane.is_task_running());
         }
     }
 }

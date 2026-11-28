@@ -1776,17 +1776,9 @@ pub enum EventMsg {
 }
 
 impl EventMsg {
-    /// Returns the ID and start time of the command this approval opens.
-    /// Stdin and network reviews have their own prompts for an existing operation.
-    pub fn command_approval_start(&self) -> Option<(&str, i64)> {
+    /// Returns the command item first exposed by a Guardian assessment.
+    pub fn guardian_command_start(&self) -> Option<(&str, i64)> {
         match self {
-            Self::ExecApprovalRequest(request)
-                if request.kind == crate::approvals::ExecApprovalKind::Command
-                    && request.approval_id.is_none()
-                    && request.network_approval_context.is_none() =>
-            {
-                Some((&request.call_id, request.started_at_ms))
-            }
             Self::GuardianAssessment(assessment)
                 if assessment.status == GuardianAssessmentStatus::InProgress
                     && matches!(

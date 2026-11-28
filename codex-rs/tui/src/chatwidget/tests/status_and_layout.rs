@@ -2609,11 +2609,6 @@ async fn esc_interrupt_pauses_active_goal_turn() {
         .draw(|f| chat.render(f.area(), f.buffer_mut()))
         .expect("draw goal paused footer");
     let snapshot = normalized_backend_snapshot(terminal.backend());
-    #[cfg(target_os = "windows")]
-    insta::with_settings!({ snapshot_suffix => "windows" }, {
-        assert_chatwidget_snapshot!("esc_interrupt_goal_paused_footer", snapshot);
-    });
-    #[cfg(not(target_os = "windows"))]
     assert_chatwidget_snapshot!("esc_interrupt_goal_paused_footer", snapshot);
 }
 
@@ -4896,6 +4891,7 @@ async fn session_configured_clears_goal_status_footer() {
     chat.handle_thread_session(crate::session_state::ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,

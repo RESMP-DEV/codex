@@ -103,6 +103,16 @@ fn partial_markup_is_balanced_and_preserves_selected_characters() {
             "ment",                          // codespell:ignore ment
             "[ment](<https://example.com>)", // codespell:ignore ment
         ),
+        (
+            "before [`guide`.md:2-4](guide.md:2-4) after",
+            "guide.md:2-4",
+            "`guide`.md:2-4",
+        ),
+        (
+            "before [**guide**.md:2-4](guide.md:2-4) after",
+            "guide",
+            "**guide**",
+        ),
         ("[**label**](/repo/file.rs)", "label", "**label**"),
         (
             "escaped \\*literal\\* &amp; `code`",
@@ -126,6 +136,7 @@ fn inline_code_selection_copies_only_selected_content() {
     for (source, selected) in [
         ("before `something` after", "something"),
         ("before `something` after", "some"),
+        ("- # Reading\n  `gauge` value", "aug"),
         ("before `something` after", "thing"),
         ("before `closeRequested_` after", "Requested"),
         ("before ``a`b`` after", "a`"),
@@ -166,8 +177,8 @@ fn inline_code_selection_copies_only_selected_content() {
 #[test]
 fn mixed_file_targets_preserve_markdown_escaping() {
     for (source, expected) in [
-        ("before [+](/+) after", "before + (+) after"),
-        ("before [1.)](</1.)>) after", "before 1.) (1.)) after"),
+        ("before [+](/+) after", "before + after"),
+        ("before [number](</1.)>) after", "before number (1.)) after"),
         (
             "| File |\n|---|\n| [`foo_bar!`](/repo/foo_bar!) |",
             "| File |\n|---|\n| `foo_bar!` (repo/foo\\_bar\\!) |",
@@ -249,7 +260,7 @@ fn inline_boundaries_preserve_selected_text_and_formatting() {
 
 #[test]
 fn lists_keep_nesting_and_paragraphs_without_sibling_spacers() {
-    let source = "3. first item long enough to wrap\n4. second item\n   - nested `code`\n\n     another paragraph\n   - next nested\n5. final item\n\nOutside.";
+    let source = "3. first item long enough to wrap\n4. second item\n   - nested `code`\n\n     another paragraph\n   - next nested\n5. final item\n\nOutside.\n\n- # Reading\n  `gauge` value";
     let mut copies = Vec::new();
     for width in [24, 80] {
         let layout = markdown_layout(source, width);

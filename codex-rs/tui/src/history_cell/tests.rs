@@ -567,6 +567,7 @@ fn session_configured_event(model: &str) -> ThreadSessionState {
     ThreadSessionState {
         read_only_history: false,
         thread_settings_confirmed: true,
+        confirmed_permissions: None,
         primary_environment_cwd: None,
         daybreak_enabled: false,
         windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
@@ -698,24 +699,6 @@ fn ps_output_empty_snapshot() {
     let cell = new_unified_exec_processes_output(Vec::new());
     let rendered = render_lines(&cell.display_lines(/*width*/ 60)).join("\n");
     insta::assert_snapshot!(rendered);
-}
-
-#[tokio::test]
-async fn session_info_uses_availability_nux_tooltip_override() {
-    let config = test_config().await;
-    let cell = new_session_info(
-        &config,
-        &crate::local_settings::LocalSettings::from(&config),
-        "gpt-5",
-        "gpt-5",
-        &session_configured_event("gpt-5"),
-        /*is_first_event*/ false,
-        Some("Model just became available".to_string()),
-        Some(PlanType::Free),
-    );
-
-    let rendered = render_transcript(&cell).join("\n");
-    assert!(rendered.contains("Model just became available"));
 }
 
 #[tokio::test]

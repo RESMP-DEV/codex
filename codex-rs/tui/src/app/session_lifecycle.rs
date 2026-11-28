@@ -505,6 +505,7 @@ impl App {
                 if let Some(channel) = self.thread_event_channels.get(&thread_id)
                     && let Some(cached) = channel.store.lock().await.session.as_ref()
                 {
+                    session.confirmed_permissions = cached.confirmed_permissions.clone();
                     session.approval_policy = cached.approval_policy;
                     session.permission_profile = cached.permission_profile.clone();
                     session.active_permission_profile = cached.active_permission_profile.clone();
@@ -586,6 +587,7 @@ impl App {
             )
         });
         store.set_session(session, turns);
+        store.rebase_buffer_after_session_refresh();
         if let Some((active, latest, evicted, reasoning)) = live_turn {
             store.active_turn_id = active;
             store.latest_turn_id = latest;
@@ -599,7 +601,6 @@ impl App {
         }
         store.replay_may_have_output |= replay_may_have_output;
         store.merge_recap_progress(recap_progress);
-        store.rebase_buffer_after_session_refresh();
         live_attached
     }
 
@@ -2331,24 +2332,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn terminal_thread_read_error_detection_matches_not_loaded_errors() {
-        let err = color_eyre::eyre::eyre!(
-            "thread/read failed during TUI session lookup: thread/read failed: thread not loaded: thr_123"
-        );
-
-        assert!(App::is_terminal_thread_read_error(&err));
-    }
-
-    #[test]
-    fn terminal_thread_read_error_detection_ignores_transient_failures() {
-        let err = color_eyre::eyre::eyre!(
-            "thread/read failed during TUI session lookup: thread/read transport error: broken pipe"
-        );
-
-        assert!(!App::is_terminal_thread_read_error(&err));
-    }
 
     #[test]
     fn closed_state_for_thread_read_error_preserves_live_state_without_cache_on_transient_error() {

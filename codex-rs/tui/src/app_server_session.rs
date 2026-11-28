@@ -134,6 +134,7 @@ use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStartSource;
+use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadStatusChangedNotification;
 use codex_app_server_protocol::ThreadUnarchiveParams;
 use codex_app_server_protocol::ThreadUnarchiveResponse;
@@ -144,6 +145,7 @@ use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnInterruptResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
@@ -3174,11 +3176,24 @@ async fn started_thread_from_start_response(
 }
 
 async fn started_thread_from_resume_response(
-    response: ThreadResumeResponse,
+    mut response: ThreadResumeResponse,
     local_settings: &LocalSettings,
     cwd_convention: Option<PathConvention>,
 ) -> Result<AppServerStartedThread> {
     let blocks_direct_input = thread_blocks_direct_input(&response.thread);
+    // Replay and interrupt routing both infer the active turn from hydrated history.
+    // Match the server's interrupted-turn fallback when that history outlives the task.
+    // An unanchored page can include a turn started after the resume status was read.
+    if (response.thread.history_mode == ThreadHistoryMode::Legacy
+        || response.turns_backwards_cursor.is_some())
+        && !matches!(response.thread.status, ThreadStatus::Active { .. })
+    {
+        for turn in &mut response.thread.turns {
+            if turn.status == TurnStatus::InProgress {
+                turn.status = TurnStatus::Interrupted;
+            }
+        }
+    }
     let session =
         thread_session_state_from_thread_resume_response(&response, local_settings, cwd_convention)
             .await
@@ -3241,6 +3256,7 @@ async fn thread_session_state_from_thread_start_response(
         response.approval_policy,
         response.approvals_reviewer.to_core(),
         permission_profile,
+        Some(&response.sandbox),
         response.active_permission_profile.clone().map(Into::into),
         cwd,
         response.runtime_workspace_roots.clone(),
@@ -3280,6 +3296,7 @@ async fn thread_session_state_from_thread_resume_response(
         response.approval_policy,
         response.approvals_reviewer.to_core(),
         permission_profile,
+        Some(&response.sandbox),
         response.active_permission_profile.clone().map(Into::into),
         cwd,
         response.runtime_workspace_roots.clone(),
@@ -3318,6 +3335,7 @@ async fn thread_session_state_from_thread_fork_response(
         response.approval_policy,
         response.approvals_reviewer.to_core(),
         permission_profile,
+        Some(&response.sandbox),
         response.active_permission_profile.clone().map(Into::into),
         cwd,
         response.runtime_workspace_roots.clone(),
@@ -3383,6 +3401,7 @@ async fn thread_session_state_from_thread_response(
     approval_policy: AskForApproval,
     approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer,
     permission_profile: PermissionProfile,
+    sandbox: Option<&codex_app_server_protocol::SandboxPolicy>,
     active_permission_profile: Option<ActivePermissionProfile>,
     cwd: PathUri,
     runtime_workspace_roots: Vec<LegacyAppPathString>,
@@ -3402,7 +3421,27 @@ async fn thread_session_state_from_thread_response(
         &local_settings.history,
     );
     let (log_id, entry_count) = codex_message_history::history_metadata(&history_config).await;
+    let runtime_workspace_roots = runtime_workspace_roots
+        .into_iter()
+        .map(PathUri::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    // Embedded sessions may substitute a local execution profile. Keep the wire
+    // projection even then, without changing how execution settings are adopted.
+    let confirmed_permissions = sandbox
+        .and_then(|policy| policy.permission_profile_for_cwd(&cwd).ok())
+        .map(|profile| {
+            std::sync::Arc::new(crate::session_state::ConfirmedPermissions {
+                profile,
+                active: active_permission_profile.clone(),
+                policy: approval_policy,
+                reviewer: approvals_reviewer,
+                cwd: cwd.clone(),
+                roots: runtime_workspace_roots.clone(),
+            })
+        });
     Ok(ThreadSessionState {
+        confirmed_permissions,
         read_only_history: false,
         thread_settings_confirmed: true,
         daybreak_enabled: false,
@@ -3422,11 +3461,7 @@ async fn thread_session_state_from_thread_response(
         permission_profile,
         active_permission_profile,
         cwd,
-        runtime_workspace_roots: runtime_workspace_roots
-            .into_iter()
-            .map(PathUri::try_from)
-            .collect::<Result<_, _>>()
-            .map_err(|err| err.to_string())?,
+        runtime_workspace_roots,
         instruction_source_paths,
         reasoning_effort,
         collaboration_mode: None,
@@ -3480,9 +3515,7 @@ mod tests {
     use app_test_support::create_fake_rollout;
     use codex_app_server_protocol::ThreadItem;
     use codex_app_server_protocol::ThreadItemsListCursor;
-    use codex_app_server_protocol::ThreadStatus;
     use codex_app_server_protocol::Turn;
-    use codex_app_server_protocol::TurnStatus;
     use codex_features::Feature;
     use codex_protocol::config_types::ReasoningSummary;
     use codex_protocol::config_types::ServiceTier;
@@ -5325,7 +5358,7 @@ mod tests {
         let thread_id = ThreadId::new();
         let forked_from_id = ThreadId::new();
         let read_only_profile = PermissionProfile::read_only();
-        let response = ThreadResumeResponse {
+        let mut response = ThreadResumeResponse {
             disabled_plugin_ids: Vec::new(),
             thread: codex_app_server_protocol::Thread {
                 originator: None,
@@ -5381,6 +5414,12 @@ mod tests {
                             },
                         ),
                         ThreadItem::untimed(
+                            codex_app_server_protocol::ThreadItemPayload::EnteredReviewMode {
+                                id: "review-1".to_string(),
+                                review: "current changes".to_string(),
+                            },
+                        ),
+                        ThreadItem::untimed(
                             codex_app_server_protocol::ThreadItemPayload::AgentMessage {
                                 moderation: None,
                                 id: "assistant-1".to_string(),
@@ -5392,7 +5431,7 @@ mod tests {
                             },
                         ),
                     ],
-                    status: TurnStatus::Completed,
+                    status: TurnStatus::InProgress,
                     error: None,
                     started_at: None,
                     completed_at: None,
@@ -5455,14 +5494,19 @@ mod tests {
             response.instruction_source_path_uris()
         );
         assert_eq!(started.session.permission_profile, read_only_profile);
-        assert_eq!(started.turns.len(), 1);
-        assert_eq!(started.turns[0], response.thread.turns[0]);
+        let mut interrupted = response.thread.turns[0].clone();
+        interrupted.status = TurnStatus::Interrupted;
+        assert_eq!(started.turns, vec![interrupted]);
         assert!(!started.blocks_direct_input);
 
         // The first prompt after resume must preserve the server's restored mode.
         let (mut chat, _sender, _events, mut commands) =
             crate::chatwidget::tests::helpers::make_chatwidget_manual_with_sender().await;
         chat.handle_thread_session(started.session);
+        chat.replay_thread_turns(
+            started.turns,
+            crate::chatwidget::ReplayKind::ResumeInitialMessages,
+        );
         insta::assert_snapshot!(
             "resumed_plan_mode",
             crate::chatwidget::tests::helpers::normalize_snapshot_paths(
@@ -5492,6 +5536,9 @@ mod tests {
             .build()
             .await
             .expect("config should build");
+        response.thread.status = ThreadStatus::Active {
+            active_flags: Vec::new(),
+        };
         let started = started_thread_from_resume_response(
             response.clone(),
             &LocalSettings::from(&embedded_config),
@@ -5499,10 +5546,11 @@ mod tests {
         )
         .await
         .expect("embedded resume response should map");
+        assert_eq!(started.turns, response.thread.turns);
         assert_eq!(started.session.permission_profile, read_only_profile);
 
         let mut thread = response.thread.clone();
-        let mut empty_roots_response = response;
+        let mut empty_roots_response = response.clone();
         empty_roots_response.runtime_workspace_roots = Vec::new();
         let server_cwd = r"/\repo";
         empty_roots_response.cwd = LegacyAppPathString::from_string(server_cwd);
@@ -5525,6 +5573,7 @@ mod tests {
 
         // Cloud can filter every item in its newest page while older prompts remain.
         thread.history_mode = ThreadHistoryMode::Paginated;
+        thread.status = ThreadStatus::Idle;
         let mut turn = thread.turns.pop().unwrap();
         let prompt = turn.items.remove(0);
         turn.items.clear();
@@ -5572,6 +5621,13 @@ mod tests {
             )
             .await
             .expect("Cloud history should load past a hidden page");
+        // Activation was idle, but the unanchored Cloud page includes a live turn.
+        response.thread = thread.clone();
+        let started =
+            started_thread_from_resume_response(response, &settings, /*cwd_convention*/ None)
+                .await
+                .unwrap();
+        assert_eq!(started.turns, thread.turns);
         let cells = crate::thread_transcript::thread_to_transcript_cells(
             thread,
             crate::thread_transcript::RawReasoningVisibility::Hidden,
@@ -5661,6 +5717,7 @@ mod tests {
             AskForApproval::Never,
             codex_protocol::config_types::ApprovalsReviewer::User,
             PermissionProfile::read_only(),
+            /*sandbox*/ None,
             /*active_permission_profile*/ None,
             test_path_buf("/tmp/project").abs().into(),
             Vec::new(),
@@ -5671,6 +5728,7 @@ mod tests {
         .await
         .expect("session should map");
 
+        assert_eq!(session.confirmed_permissions, None);
         let metadata = session
             .message_history
             .expect("session should include message-history metadata");
@@ -5697,6 +5755,7 @@ mod tests {
             AskForApproval::Never,
             codex_protocol::config_types::ApprovalsReviewer::User,
             PermissionProfile::read_only(),
+            Some(&codex_app_server_protocol::SandboxPolicy::DangerFullAccess),
             /*active_permission_profile*/ None,
             test_path_buf("/tmp/project").abs().into(),
             Vec::new(),
@@ -5708,6 +5767,11 @@ mod tests {
         .expect("session should map");
 
         assert_eq!(session.forked_from_id, Some(forked_from_id));
+        assert_eq!(
+            session.confirmed_permissions.unwrap().profile,
+            PermissionProfile::Disabled
+        );
+        assert_eq!(session.permission_profile, PermissionProfile::read_only());
     }
 
     #[test]

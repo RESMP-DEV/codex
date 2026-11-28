@@ -166,6 +166,7 @@ impl App {
                     | AppEvent::ArchiveFinished { .. }
                     | AppEvent::OpenAgentsOverview
                     | AppEvent::ShowMoreAgentsOverview
+                    | AppEvent::AgentsOverviewGroupsUpdated
                     | AppEvent::AgentsOverviewThreadsLoaded { .. }
                     | AppEvent::AgentsOverviewUsageLoaded { .. }
                     | AppEvent::AppendMessageHistoryEntry { .. }
@@ -587,7 +588,7 @@ impl App {
             }
             AppEvent::StatuslinePicker { scan, updates } => self.finish_statusline_discovery(scan, updates, app_server),
             AppEvent::StatuslineRead(event) => {
-                self.chat_widget.handle_statusline_read(event, app_server, &self.statusline_metrics, &self.config);
+                self.chat_widget.handle_statusline_read(event, app_server, &self.statusline_metrics, &self.config).await;
             }
             AppEvent::TaskToolsAvailable { thread_id } => {
                 app_server.remember_task_tool_thread(thread_id);
@@ -1732,12 +1733,18 @@ impl App {
                 self.enqueue_thread_history_entry_response(thread_id, event)
                     .await?;
             }
+            AppEvent::OpenDiff { thread_id, cwd } => {
+                if thread_id == self.chat_widget.thread_id() && &cwd == self.chat_widget.session_cwd() {
+                    Box::pin(self.open_diff(tui, app_server, thread_id, cwd)).await?;
+                }
+            }
+            AppEvent::SidebarDiffLoaded { request, text } => {
+                self.finish_sidebar_diff(tui, app_server.backend_id(), request, text).await;
+            }
             AppEvent::DiffResult { thread_id, cwd, text } => {
                 if thread_id != self.chat_widget.thread_id() || &cwd != self.chat_widget.session_cwd() {
                     return Ok(AppRunControl::Continue);
                 }
-                // Clear the in-progress state in the bottom pane
-                self.chat_widget.on_diff_complete();
                 // Enter alternate screen using TUI helper and build pager lines
                 let _ = tui.enter_alt_screen();
                 let pager_lines: Vec<ratatui::text::Line<'static>> = if text.trim().is_empty() {
@@ -3540,6 +3547,7 @@ impl App {
             AppEvent::NewAgentsOverviewSession { cwd, .. } => {
                 return Box::pin(self.new_agents_overview_session(tui, app_server, cwd)).await;
             }
+            AppEvent::AgentsOverviewGroupsUpdated => self.repaint_agents_overview(),
             AppEvent::AgentsOverviewThreadsLoaded { request_id, result } => {
                 self.apply_agents_overview_thread_refresh(app_server, request_id, result);
             }

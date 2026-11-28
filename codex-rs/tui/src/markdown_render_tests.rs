@@ -1049,6 +1049,27 @@ fn file_link_preserves_path_labels_and_formats_destinations() {
 
 [percent%20.rs](/repo/percent%2520.rs)
 
+[docs/guide.md](docs/guide.md)
+
+[guide.md](guide.md#L12)
+
+[first\
+second](guide.md)
+
+- # Guide
+  [Map](guide.md#L2-L4) details
+- # Explicit
+  [`Map`](./guide.md#L2-L4) details
+- # Inline
+  `Map` details
+- # Plain
+  Map details
+- # Source
+  [source.rs:2-4](source.rs:2-4) notes
+
+[A](/repo/a)[B](b)
+: note
+
 [open **My File.rs**](/repo/My%20File.rs)
 
 [other/src/lib.rs](/repo/src/lib.rs)";
@@ -1112,21 +1133,29 @@ fn file_link_keeps_unrelated_relative_label_with_matching_suffix() {
 }
 
 #[test]
-fn file_link_appends_line_number_when_label_lacks_it() {
-    let text = render_markdown_text_for_cwd(
-        "[markdown_render.rs](/Users/example/code/codex/codex-rs/tui/src/markdown_render.rs:74)",
-        Path::new("/Users/example/code/codex"),
-    );
-    let expected = Text::from(Line::from_iter([
-        "markdown_render.rs".into(),
-        " (".into(),
-        Span::styled(
-            "codex-rs/tui/src/markdown_render.rs:74",
-            MarkdownStyles::default().code,
-        ),
-        ")".into(),
-    ]));
-    assert_eq!(text, expected);
+fn file_link_preserves_the_label_and_formats_the_target_location() {
+    let point = "file:///repo/src/lib.rs#L74C3";
+    let range = "/repo/src/lib.rs:74:3-76:9";
+    let hash_range = "file:///repo/src/lib.rs#L74C3-L76C9";
+    for (label, target, location) in [
+        ("lib.rs", "/repo/src/lib.rs:74", "src/lib.rs:74"),
+        ("lib.rs", point, "src/lib.rs:74:3"),
+        ("lib.rs#L74C3", point, "src/lib.rs:74:3"),
+        ("lib.rs", range, "src/lib.rs:74:3-76:9"),
+        ("lib.rs:74:3-76:9", range, "src/lib.rs:74:3-76:9"),
+        ("lib.rs", hash_range, "src/lib.rs:74:3-76:9"),
+        ("lib.rs#L74C3-L76C9", hash_range, "src/lib.rs:74:3-76:9"),
+    ] {
+        let markdown = format!("[{label}]({target})");
+        let text = render_markdown_text_for_cwd(&markdown, Path::new("/repo"));
+        let expected = Text::from(Line::from_iter([
+            label.into(),
+            " (".into(),
+            Span::styled(location, MarkdownStyles::default().code),
+            ")".into(),
+        ]));
+        assert_eq!(text, expected, "{markdown}");
+    }
 }
 
 #[test]
@@ -1157,105 +1186,20 @@ fn file_links_preserve_foreign_windows_paths_and_anchors_snapshot() {
         ),
     ]
     .map(|(destination, cwd)| {
-        render_markdown_text_for_cwd(&format!("[report]({destination}#L4C2)"), Path::new(cwd))
-            .to_string()
+        render_markdown_text_for_cwd(
+            &format!(
+                "[report]({destination}#L4C2) and [Quarterly Report.xlsx:4:2]({destination}#L4C2)"
+            ),
+            Path::new(cwd),
+        )
+        .to_string()
     })
     .join("\n");
 
     insta::assert_snapshot!(rendered, @r"
-    report (Quarterly Report.xlsx:4:2)
-    report (Quarterly Report.xlsx:4:2)
+    report (Quarterly Report.xlsx:4:2) and Quarterly Report.xlsx:4:2
+    report (Quarterly Report.xlsx:4:2) and Quarterly Report.xlsx:4:2
     ");
-}
-
-#[test]
-fn file_link_appends_hash_anchor_when_label_lacks_it() {
-    let text = render_markdown_text_for_cwd(
-        "[markdown_render.rs](file:///Users/example/code/codex/codex-rs/tui/src/markdown_render.rs#L74C3)",
-        Path::new("/Users/example/code/codex"),
-    );
-    let expected = Text::from(Line::from_iter([
-        "markdown_render.rs".into(),
-        " (".into(),
-        Span::styled(
-            "codex-rs/tui/src/markdown_render.rs:74:3",
-            MarkdownStyles::default().code,
-        ),
-        ")".into(),
-    ]));
-    assert_eq!(text, expected);
-}
-
-#[test]
-fn file_link_uses_target_path_for_hash_anchor() {
-    let text = render_markdown_text_for_cwd(
-        "[markdown_render.rs#L74C3](file:///Users/example/code/codex/codex-rs/tui/src/markdown_render.rs#L74C3)",
-        Path::new("/Users/example/code/codex"),
-    );
-    let expected = Text::from(Line::from_iter([
-        "markdown_render.rs#L74C3".into(),
-        " (".into(),
-        Span::styled(
-            "codex-rs/tui/src/markdown_render.rs:74:3",
-            MarkdownStyles::default().code,
-        ),
-        ")".into(),
-    ]));
-    assert_eq!(text, expected);
-}
-
-#[test]
-fn file_link_appends_range_when_label_lacks_it() {
-    let text = render_markdown_text_for_cwd(
-        "[markdown_render.rs](/Users/example/code/codex/codex-rs/tui/src/markdown_render.rs:74:3-76:9)",
-        Path::new("/Users/example/code/codex"),
-    );
-    let expected = Text::from(Line::from_iter([
-        "markdown_render.rs".into(),
-        " (".into(),
-        Span::styled(
-            "codex-rs/tui/src/markdown_render.rs:74:3-76:9",
-            MarkdownStyles::default().code,
-        ),
-        ")".into(),
-    ]));
-    assert_eq!(text, expected);
-}
-
-#[test]
-fn file_link_uses_target_path_for_range() {
-    let text = render_markdown_text_for_cwd(
-        "[markdown_render.rs:74:3-76:9](/Users/example/code/codex/codex-rs/tui/src/markdown_render.rs:74:3-76:9)",
-        Path::new("/Users/example/code/codex"),
-    );
-    let expected = Text::from(Line::from_iter([
-        "markdown_render.rs:74:3-76:9".into(),
-        " (".into(),
-        Span::styled(
-            "codex-rs/tui/src/markdown_render.rs:74:3-76:9",
-            MarkdownStyles::default().code,
-        ),
-        ")".into(),
-    ]));
-    assert_eq!(text, expected);
-}
-
-#[test]
-fn file_link_appends_hash_range_when_label_lacks_it() {
-    let text = render_markdown_text_for_cwd(
-        "[markdown_render.rs](file:///Users/example/code/codex/codex-rs/tui/src/markdown_render.rs#L74C3-L76C9)",
-        Path::new("/Users/example/code/codex"),
-    );
-    let expected = Text::from(Line::from_iter([
-        "markdown_render.rs".into(),
-        " (".into(),
-        Span::styled(
-            "codex-rs/tui/src/markdown_render.rs:74:3-76:9",
-            MarkdownStyles::default().code,
-        ),
-        ")".into(),
-    ]));
-    assert_eq!(text, expected);
 }
 
 #[test]
@@ -1274,24 +1218,6 @@ fn multiline_file_link_label_after_styled_prefix_does_not_panic() {
         " (".into(),
         Span::styled(
             "codex-rs/tui/src/markdown_render.rs:74:3",
-            MarkdownStyles::default().code,
-        ),
-        ")".into(),
-    ]));
-    assert_eq!(text, expected);
-}
-
-#[test]
-fn file_link_uses_target_path_for_hash_range() {
-    let text = render_markdown_text_for_cwd(
-        "[markdown_render.rs#L74C3-L76C9](file:///Users/example/code/codex/codex-rs/tui/src/markdown_render.rs#L74C3-L76C9)",
-        Path::new("/Users/example/code/codex"),
-    );
-    let expected = Text::from(Line::from_iter([
-        "markdown_render.rs#L74C3-L76C9".into(),
-        " (".into(),
-        Span::styled(
-            "codex-rs/tui/src/markdown_render.rs:74:3-76:9",
             MarkdownStyles::default().code,
         ),
         ")".into(),
@@ -2238,23 +2164,27 @@ fn narrow_header_only_table_preserves_link_columns_and_escaped_pipes() {
 
 #[test]
 fn narrow_table_record_labels_keep_local_file_targets() {
-    let markdown = "| [Guide](./guide.md) | A | B | C | D | E | F | G |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |";
-    for width in [20, 50] {
-        let rendered =
-            render_markdown_lines_with_width_and_cwd(markdown, Some(width), /*cwd*/ None);
-        let first = &rendered[0];
-        let text = first.line.to_string();
-        assert!(text.starts_with(" Guide"), "{text}");
-        let (before, _) = text.split_once("./guide.md").expect("visible file path");
-        let column = crate::width::display_width(before);
-        assert_eq!(
-            first
-                .hyperlinks
-                .iter()
-                .map(|link| (link.columns.clone(), link.destination.as_str()))
-                .collect::<Vec<_>>(),
-            vec![(column..column + "./guide.md".len(), "./guide.md")],
+    for (label, expected) in [("Guide", " Guide"), ("./**guide**.md", " ./guide.md")] {
+        let markdown = format!(
+            "| [{label}](./guide.md) | A | B | C | D | E | F | G |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |"
         );
+        for width in [20, 50] {
+            let rendered =
+                render_markdown_lines_with_width_and_cwd(&markdown, Some(width), /*cwd*/ None);
+            let first = &rendered[0];
+            let text = first.line.to_string();
+            assert!(text.starts_with(expected), "{text}");
+            let (before, _) = text.split_once("./guide.md").expect("visible file path");
+            let column = crate::width::display_width(before);
+            assert_eq!(
+                first
+                    .hyperlinks
+                    .iter()
+                    .map(|link| (link.columns.clone(), link.destination.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![(column..column + "./guide.md".len(), "./guide.md")],
+            );
+        }
     }
 }
 

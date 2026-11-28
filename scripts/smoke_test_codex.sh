@@ -180,28 +180,13 @@ else
 fi
 
 if [[ "$do_notify" -eq 1 ]]; then
-  # Extract a compact error excerpt for the dialog body.
+  # Extract a compact error excerpt for alerting (no AppleScript/osascript per machine policy).
   excerpt="$(head -c 400 "$probe_output_path" | tr '\n' ' ' | sed 's/"/'\''/g')"
-  if command -v osascript >/dev/null 2>&1; then
-    # Notification Center banner first (non-blocking, for when you're away).
-    osascript -e "display notification \"codex smoke test failed — see modal\" with title \"‼️ codex smoke test FAILED\" sound name \"Basso\"" >/dev/null 2>&1 || true
-    # Terminal bell.
-    printf '\a' >&2 || true
-    # Blocking modal — literally in your face, requires a click.
-    osascript <<APPLESCRIPT >/dev/null 2>&1 || true
-display dialog "codex smoke test FAILED after daily rebuild.
-
-Probe: $probe_prompt
-Outcome: exit $probe_rc, reply did not contain '$PROBE_REPLY_TOKEN'.
-
-$([[ "$do_rollback" -eq 1 ]] && echo "Rolled back to previous-good snapshot: ${rollback_target:-none available}" || echo "No rollback (--no-rollback in effect).")
-
-Excerpt: $excerpt
-
-Manual intervention required. Log: $log_path" with title "‼️ codex smoke test FAILED" buttons {"Acknowledge"} default button 1 with icon stop
-APPLESCRIPT
-  else
-    log "osascript not available — cannot pop macOS notification"
+  alert_body="codex smoke test FAILED after daily rebuild. Probe: $probe_prompt | exit=$probe_rc | $([[ "$do_rollback" -eq 1 ]] && echo "Rolled back to: ${rollback_target:-none}" || echo "No rollback") | Excerpt: $excerpt | Log: $log_path"
+  log "ALERT: $alert_body"
+  printf '\a%s\n' "$alert_body" >&2 || true
+  if [[ -n "${CODEX_SMOKE_NTFY_TOPIC:-}" ]] && command -v ntfy >/dev/null 2>&1; then
+    ntfy publish "$CODEX_SMOKE_NTFY_TOPIC" "$alert_body" >/dev/null 2>&1 || true
   fi
 fi
 
